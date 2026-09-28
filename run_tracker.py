@@ -1,0 +1,784 @@
+#!/usr/bin/env python3
+"""
+Autonomous Drone Pursuit Flight Bridge Node.
+Interfaces the YOLOv8 + Kalman perception pipeline with the Kinematic IBVS Controller
+and dispatches real-time velocity setpoints to Pixhawk Autopilot via MAVSDK / MAVLink.
+
+Features:
+- Dual execution: Live flight offboard control or Benchtop Dry-Run (desktop test mode)
+- Dynamic attitude streaming: Ingests real-time EKF2 pitch for camera de-rotation
+- Metric-free visual servoing: Regulates 2D bounding box pixel size directly
+- Flight safety: Graceful failsafe handling, velocity slew-rate limiting, and clean emergency disengage
+"""
+
+import os
+import sys
+import time
+import argparse
+import asyncio
+import threading
+from pathlib import Path
+from typing import Optional, Dict, Any, Tuple
+
+import cv2
+import numpy as np
+
+# ==============================================================================
+# Module Path Resolution (Allows clean imports outside subdirectories)
+# ==============================================================================
+ROOT_DIR = Path(__file__).resolve().parent
+CONTROL_DIR = ROOT_DIR / "control"
+DETECTION_DIR = ROOT_DIR / "perception"
+
+for p in (ROOT_DIR, CONTROL_DIR, DETECTION_DIR):
+    if str(p) not in sys.path:
+        sys.path.insert(0, str(p))
+
+from perception.pipeline import DroneTrackingPipeline
+from control.pid_controller import KinematicVisualServoController
+
+# Conditional MAVSDK Import (enables desktop testing without MAVSDK installed)
+try:
+    from mavsdk import System
+    from mavsdk.offboard import VelocityBodyYawspeed, OffboardError
+    MAVSDK_AVAILABLE = True
+except ImportError:
+    MAVSDK_AVAILABLE = False
+
+
+# ==============================================================================
+# Telemetry & Vehicle State Container
+# ==============================================================================
+class VehicleState:
+    """Thread-safe container for asynchronous Pixhawk telemetry."""
+    def __init__(self):
+        self.pitch_rad: float = 0.0
+        self.roll_rad: float = 0.0
+        self.yaw_deg: float = 0.0
+        self.altitude_rel_m: float = 0.0       # Relative to takeoff/home (EKF2)
+        self.altitude_amsl_m: float = 0.0      # Absolute altitude above MSL
+        self.distance_sensor_m: Optional[float] = None  # Downward lidar/sonar rangefinder
+        self.is_connected: bool = False
+        self.is_armed: bool = False
+        self.in_air: bool = False
+        self.flight_mode: str = "DISCONNECTED"
+        self.battery_pct: float = 100.0
+        self.alt_safety_status: str = "OK"     # OK, FLOOR_CUSHION, FLOOR_LIMIT, FLOOR_BREACH, etc.
+
+
+class PerceptionState:
+    """Thread-safe container holding latest perception telemetry, frames, and timings."""
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.telemetry: Dict[str, Any] = {"status": "SEARCHING"}
+        self.latest_frame: Optional[np.ndarray] = None
+        self.last_update_time: float = 0.0
+        self.frame_idx: int = 0
+        self.fps: float = 0.0
+        self.is_stale: bool = True
+        self.has_new_frame: bool = False
+
+
+# ==============================================================================
+# Master Autonomous Pursuit Bridge
+# ==============================================================================
+class AutonomousTrackerNode:
+    """
+    Coordinates Camera Ingestion, YOLO/Kalman Perception, Kinematic IBVS Control,
+    and MAVSDK Pixhawk Communication.
+    """
+    def __init__(self, args: argparse.Namespace):
+        self.args = args
+        self.vehicle_state = VehicleState()
+        self.running = False
+        self.drone: Optional[Any] = None
+
+        # 1. Initialize Kinematic Visual Servoing Controller
+        print("\n[INIT] Initializing Kinematic Visual Servoing Controller...")
+        self.controller = KinematicVisualServoController(
+            camera_uptilt_deg=args.uptilt,
+            hfov_deg=args.hfov,
+            vfov_deg=args.vfov,
+            desired_bbox_size=args.target_size,
+            min_limits=np.array([0.0, -args.max_climb, -args.max_yawspeed]),
+            max_limits=np.array([args.max_speed, args.max_desc, args.max_yawspeed]),
+            use_bbox_size=True,
+            enable_lateral_strafe=args.lateral_strafe,
+            max_lat_vel=args.max_lat_speed
+        )
+
+        # 2. Initialize Perception Pipeline (YOLOv8 + 8D Kalman Filter)
+        print(f"[INIT] Initializing Perception Pipeline with model: {args.weights}")
+        self.pipeline = DroneTrackingPipeline(
+            weights=args.weights,
+            conf_threshold=args.conf,
+            iou_threshold=0.45,
+            max_lost_frames=args.max_lost_frames,
+            desired_target_size=args.target_size,
+            enable_dynamic_zoom=False  # Full sensor frame for flight control
+        )
+
+        # 3. Decoupled Threading & State Containers
+        self.perception_state = PerceptionState()
+        self.latest_cmd_safe = np.zeros(3, dtype=np.float64)
+        self.vision_thread: Optional[threading.Thread] = None
+
+        if self.args.dry_run:
+            self.vehicle_state.altitude_rel_m = float(args.sim_alt)
+
+    async def telemetry_listener(self):
+        """Asynchronously streams telemetry from Pixhawk EKF2 over MAVLink."""
+        if not self.drone:
+            return
+
+        async def watch_attitude():
+            try:
+                async for att in self.drone.telemetry.attitude_euler():
+                    if not self.running:
+                        break
+                    # PX4 right-hand aerospace convention:
+                    #   Pitch > 0 is nose UP.
+                    # Controller convention:
+                    #   Pitch > 0 is nose DOWN (forward acceleration).
+                    # We invert the sign:
+                    self.vehicle_state.pitch_rad = -float(np.deg2rad(att.pitch_deg))
+                    self.vehicle_state.roll_rad = float(np.deg2rad(att.roll_deg))
+                    self.vehicle_state.yaw_deg = float(att.yaw_deg)
+            except Exception as e:
+                print(f"[WARN] Attitude telemetry stream interrupted: {e}")
+
+        async def watch_flight_mode():
+            try:
+                async for mode in self.drone.telemetry.flight_mode():
+                    if not self.running:
+                        break
+            except Exception as e:
+                print(f"[WARN] Flight mode stream interrupted: {e}")
+
+        async def watch_position():
+            try:
+                async for pos in self.drone.telemetry.position():
+                    if not self.running:
+                        break
+                    self.vehicle_state.altitude_rel_m = float(pos.relative_altitude_m)
+                    self.vehicle_state.altitude_amsl_m = float(pos.absolute_altitude_m)
+            except Exception as e:
+                print(f"[WARN] Position telemetry stream interrupted: {e}")
+
+        async def watch_distance_sensor():
+            try:
+                async for dist in self.drone.telemetry.distance_sensor():
+                    if not self.running:
+                        break
+                    self.vehicle_state.distance_sensor_m = float(dist.current_distance_m)
+            except Exception:
+                pass
+
+        async def watch_in_air():
+            try:
+                async for in_air in self.drone.telemetry.in_air():
+                    if not self.running:
+                        break
+                    self.vehicle_state.in_air = bool(in_air)
+            except Exception as e:
+                print(f"[WARN] In-air telemetry stream interrupted: {e}")
+
+        await asyncio.gather(
+            watch_attitude(),
+            watch_flight_mode(),
+            watch_position(),
+            watch_distance_sensor(),
+            watch_in_air()
+        )
+
+    def get_current_altitude(self) -> float:
+        """
+        Returns the most reliable current vehicle altitude Above Ground Level (AGL) in meters.
+        Prefers downward distance sensor (LIDAR/sonar) if healthy, falls back to EKF2 relative altitude.
+        """
+        if (self.vehicle_state.distance_sensor_m is not None and 
+            0.05 < self.vehicle_state.distance_sensor_m < 50.0):
+            return self.vehicle_state.distance_sensor_m
+        return self.vehicle_state.altitude_rel_m
+
+    def enforce_altitude_limits(self, v_down: float, current_alt: float) -> Tuple[float, str]:
+        """
+        Enforces altitude floor (ground collision protection) and ceiling (airspace limit).
+
+        Coordinate convention (PX4 NED Body Frame):
+          v_down > 0 is DESCENT (moving downward towards the earth)
+          v_down < 0 is CLIMB (moving upward into the sky)
+
+        Args:
+            v_down: Commanded vertical velocity in m/s (+ down, - up)
+            current_alt: Current altitude AGL in meters
+
+        Returns:
+            Tuple of (safe_v_down: float, safety_status: str)
+        """
+        min_alt = self.args.min_alt
+        max_alt = self.args.max_alt
+        cushion = max(0.1, self.args.alt_cushion)
+
+        # -------------------------------------------------------------
+        # 1. ALTITUDE FLOOR (Ground Collision Avoidance)
+        # -------------------------------------------------------------
+        if current_alt <= min_alt:
+            # Below or at floor: Descent is strictly forbidden
+            if current_alt < (min_alt - 0.2):
+                # Critical breach: Force active emergency climb (negative down)
+                safe_v_down = -min(self.args.max_climb, 0.8)
+                return safe_v_down, "FLOOR_BREACH"
+            else:
+                # At floor boundary: Only upward climb is permitted
+                safe_v_down = min(0.0, v_down)
+                return safe_v_down, "FLOOR_LIMIT"
+
+        elif current_alt < (min_alt + cushion):
+            # Inside floor cushion: Proportional descent damping
+            if v_down > 0.0:  # Vehicle attempting to descend
+                margin_ratio = (current_alt - min_alt) / cushion
+                # Smooth quadratic deceleration cushion
+                safe_v_down = v_down * (margin_ratio ** 1.5)
+                return safe_v_down, "FLOOR_CUSHION"
+
+        # -------------------------------------------------------------
+        # 2. ALTITUDE CEILING (Flyaway / Airspace Limit Protection)
+        # -------------------------------------------------------------
+        if current_alt >= max_alt:
+            # Above or at ceiling: Climb is strictly forbidden
+            if current_alt > (max_alt + 0.5):
+                # Critical breach: Force gentle descent (positive down)
+                safe_v_down = min(self.args.max_desc, 0.5)
+                return safe_v_down, "CEIL_BREACH"
+            else:
+                # At ceiling boundary: Only downward descent is permitted
+                safe_v_down = max(0.0, v_down)
+                return safe_v_down, "CEIL_LIMIT"
+
+        elif current_alt > (max_alt - cushion):
+            # Inside ceiling cushion: Proportional climb damping
+            if v_down < 0.0:  # Vehicle attempting to climb
+                margin_ratio = (max_alt - current_alt) / cushion
+                safe_v_down = v_down * (margin_ratio ** 1.5)
+                return safe_v_down, "CEIL_CUSHION"
+
+        return v_down, "OK"
+
+    def draw_flight_hud(
+        self,
+        frame: np.ndarray,
+        telemetry: Dict[str, Any],
+        cmd_3d: np.ndarray,
+        dt: float
+    ) -> np.ndarray:
+        """Overlays comprehensive real-time flight control gauges on the camera feed."""
+        h, w = frame.shape[:2]
+        hud = frame.copy()
+
+        # Commanded velocities (supports both 3D and 4D)
+        v_fwd = cmd_3d[0]
+        v_right = cmd_3d[1] if len(cmd_3d) == 4 else 0.0
+        v_down = cmd_3d[2] if len(cmd_3d) == 4 else cmd_3d[1]  # NED (+ is down, - is up)
+        yawspeed = cmd_3d[3] if len(cmd_3d) == 4 else cmd_3d[2]
+        status = telemetry.get("status", "SEARCHING")
+        current_alt = self.get_current_altitude()
+        alt_status = self.vehicle_state.alt_safety_status
+
+        # Top Control Banner
+        banner_color = (25, 28, 36)
+        cv2.rectangle(hud, (0, 0), (w, 55), banner_color, -1)
+        cv2.line(hud, (0, 55), (w, 55), (0, 210, 211), 1)
+
+        # Status badge color
+        badge_color = (46, 213, 115) if status == "LOCKED" else ((255, 165, 2) if status == "COASTING" else (255, 71, 87))
+        cv2.rectangle(hud, (12, 10), (120, 44), badge_color, -1)
+        cv2.putText(hud, status, (22, 34), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (255, 255, 255), 2, cv2.LINE_AA)
+
+        # Target Size, Pitch Info & Altitude
+        curr_sz = telemetry.get("target_size", 0.0)
+        goal_sz = self.args.target_size
+        pitch_deg = -np.rad2deg(self.vehicle_state.pitch_rad)
+        cam_fps = 1.0 / max(1e-4, dt)
+        info_str = f"SZ: {curr_sz:3.0f}/{goal_sz:.0f}px | PITCH: {pitch_deg:+4.1f}* | ALT: {current_alt:4.1f}m | CAM: {cam_fps:4.1f}fps | MAV: {self.args.ctrl_rate:.0f}Hz"
+        cv2.putText(hud, info_str, (128, 34), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (220, 220, 220), 1, cv2.LINE_AA)
+
+        # MAVLink link badge (top right)
+        link_str = "PX4: " + ("DRY-RUN" if self.args.dry_run or not self.vehicle_state.is_connected else self.vehicle_state.flight_mode)
+        link_color = (120, 120, 120) if (self.args.dry_run or not self.vehicle_state.is_connected) else (46, 213, 115)
+        cv2.putText(hud, link_str, (w - 180, 34), cv2.FONT_HERSHEY_SIMPLEX, 0.48, link_color, 1, cv2.LINE_AA)
+
+        # Altitude Limit Warning Alert Banner (if floor/ceiling active)
+        alert_y = 60
+        if alt_status != "OK":
+            alert_color = (0, 0, 230) if "BREACH" in alt_status else (0, 165, 255)
+            alert_text = f"ALT SAFEGUARD: {alt_status} (FLR: {self.args.min_alt:.1f}m | CEIL: {self.args.max_alt:.1f}m)"
+            box_w = 420
+            cv2.rectangle(hud, (w // 2 - box_w // 2, alert_y), (w // 2 + box_w // 2, alert_y + 30), (20, 20, 20), -1)
+            cv2.rectangle(hud, (w // 2 - box_w // 2, alert_y), (w // 2 + box_w // 2, alert_y + 30), alert_color, 2)
+            cv2.putText(hud, alert_text, (w // 2 - box_w // 2 + 12, alert_y + 21), cv2.FONT_HERSHEY_SIMPLEX, 0.44, alert_color, 2, cv2.LINE_AA)
+            alert_y += 35
+
+        # Perception Watchdog Warning Banner
+        if self.perception_state.is_stale and self.perception_state.frame_idx > 0:
+            wd_text = "WATCHDOG: VISION STALE (SAFE STATION-KEEPING HOVER)"
+            box_w = 460
+            cv2.rectangle(hud, (w // 2 - box_w // 2, alert_y), (w // 2 + box_w // 2, alert_y + 30), (20, 20, 20), -1)
+            cv2.rectangle(hud, (w // 2 - box_w // 2, alert_y), (w // 2 + box_w // 2, alert_y + 30), (0, 165, 255), 2)
+            cv2.putText(hud, wd_text, (w // 2 - box_w // 2 + 10, alert_y + 21), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 165, 255), 2, cv2.LINE_AA)
+
+        # Bottom Command Gauge Panel
+        cv2.rectangle(hud, (0, h - 45), (w, h), banner_color, -1)
+        cv2.line(hud, (0, h - 45), (w, h - 45), (0, 210, 211), 1)
+
+        if abs(v_right) > 0.05:
+            cmd_text = f"CMD -> FWD: {v_fwd:4.1f} | LAT: {v_right:+4.1f} | VERT: {-v_down:+4.2f} m/s | YAW: {yawspeed:+5.1f} */s | GUARD: {alt_status}"
+        else:
+            cmd_text = f"CMD -> FWD: {v_fwd:4.1f} m/s | VERT: {-v_down:+4.2f} m/s | YAW: {yawspeed:+5.1f} */s | GUARD: {alt_status}"
+        cv2.putText(hud, cmd_text, (20, h - 16), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (0, 210, 211), 2, cv2.LINE_AA)
+
+        # Alpha blend overlay with original frame
+        return cv2.addWeighted(hud, 0.88, frame, 0.12, 0)
+
+    def _vision_worker(self):
+        """
+        Independent vision ingestion & inference thread.
+        Runs at the camera's native framerate (or YOLO throughput) without blocking MAVLink control.
+        """
+        src = int(self.args.source) if str(self.args.source).isdigit() else self.args.source
+        cap = cv2.VideoCapture(src)
+        if not cap.isOpened():
+            print(f"\n[ERROR] Failed to open video source: {self.args.source}")
+            self.running = False
+            return
+
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        print(f"[VISION] Ingestion worker active ({actual_w}x{actual_h})")
+
+        prev_time = time.perf_counter()
+
+        while self.running:
+            ret, frame = cap.read()
+            if not ret:
+                if not str(self.args.source).isdigit() and Path(self.args.source).is_file():
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    continue
+                print("[VISION] Video source reached end or disconnected.")
+                self.running = False
+                break
+
+            now = time.perf_counter()
+            raw_dt = now - prev_time
+            prev_time = now
+            fps = 1.0 / max(1e-4, raw_dt)
+
+            # Ingest YOLOv8 + Kalman Tracking (draw_hud=False for clean raw annotated output)
+            annotated_frame, telemetry = self.pipeline.process_frame(frame, draw_hud=False)
+
+            with self.perception_state.lock:
+                self.perception_state.telemetry = telemetry
+                self.perception_state.latest_frame = annotated_frame
+                self.perception_state.last_update_time = time.perf_counter()
+                self.perception_state.frame_idx = self.pipeline.frame_idx
+                self.perception_state.fps = fps
+                self.perception_state.is_stale = False
+                self.perception_state.has_new_frame = True
+
+            if self.args.max_frames > 0 and self.pipeline.frame_idx >= self.args.max_frames:
+                print(f"[LIMIT] Reached max requested frames ({self.args.max_frames}).")
+                self.running = False
+                break
+
+        cap.release()
+        print("[VISION] Ingestion worker terminated cleanly.")
+
+    async def control_loop(self):
+        """
+        High-priority deterministic MAVLink flight control loop (default 50 Hz).
+        Runs continuously, decoupled from vision, ensuring PX4 offboard heartbeat never drops.
+        """
+        ctrl_period = 1.0 / max(1.0, self.args.ctrl_rate)
+        prev_time = time.perf_counter()
+        prev_cmd_3d = np.zeros(3, dtype=np.float64)
+
+        print(f"[CONTROL] Deterministic MAVLink control loop active at {self.args.ctrl_rate:.0f} Hz.")
+
+        while self.running:
+            loop_start = time.perf_counter()
+            now = loop_start
+            dt = float(np.clip(now - prev_time, 1e-4, 0.10))
+            prev_time = now
+
+            # 1. Read latest telemetry under lock
+            with self.perception_state.lock:
+                telemetry = dict(self.perception_state.telemetry)
+                last_vision_time = self.perception_state.last_update_time
+                time_since_vision = (now - last_vision_time) if last_vision_time > 0 else 999.0
+
+            # 2. Perception Deadman Watchdog Check
+            # If no vision update for > watchdog_timeout, declare STALE and force safe holding hover
+            if time_since_vision > self.args.watchdog_timeout:
+                telemetry["status"] = "SEARCHING"
+                with self.perception_state.lock:
+                    self.perception_state.is_stale = True
+
+            # 3. Dynamic attitude compensation from vehicle IMU (Pitch and Roll)
+            current_pitch = self.vehicle_state.pitch_rad
+            current_roll = self.vehicle_state.roll_rad
+
+            # 4. Compute Velocity Command via Kinematic Visual Servoing (3D or 4D)
+            raw_cmd = self.controller.compute_cmd(
+                telemetry=telemetry,
+                drone_pitch=current_pitch,
+                drone_roll=current_roll,
+                dt=dt
+            )
+
+            # 5. Slew-Rate Limiting (Acceleration Limiting for smooth control signals)
+            if len(raw_cmd) == 4:
+                max_accel = np.array([
+                    self.args.max_accel_xy,
+                    self.args.max_accel_xy,
+                    self.args.max_accel_z,
+                    self.args.max_accel_yaw
+                ], dtype=np.float64)
+            else:
+                max_accel = np.array([
+                    self.args.max_accel_xy,
+                    self.args.max_accel_z,
+                    self.args.max_accel_yaw
+                ], dtype=np.float64)
+
+            if len(prev_cmd_3d) != len(raw_cmd):
+                prev_cmd_3d = np.zeros_like(raw_cmd)
+
+            max_step = max_accel * dt
+            cmd_safe = np.clip(raw_cmd, prev_cmd_3d - max_step, prev_cmd_3d + max_step)
+            prev_cmd_3d = cmd_safe.copy()
+
+            # 6. Convert to PX4 MAVSDK Body Frame (forward, right, down, yawspeed)
+            v_fwd, v_right, v_down, yawspeed = self.controller.to_mavsdk(cmd_safe)
+
+            # 7. Altitude Floor & Ceiling Safety Envelope Protection
+            current_alt = self.get_current_altitude()
+            safe_v_down, alt_status = self.enforce_altitude_limits(v_down, current_alt)
+            self.vehicle_state.alt_safety_status = alt_status
+            v_down = safe_v_down
+
+            # In dry-run mode, simulate altitude dynamics
+            if self.args.dry_run:
+                self.vehicle_state.altitude_rel_m = max(
+                    0.0, self.vehicle_state.altitude_rel_m - (v_down * dt)
+                )
+
+            # 8. Dispatch steady velocity setpoint to Pixhawk Autopilot
+            if self.drone and not self.args.dry_run and self.vehicle_state.is_connected:
+                try:
+                    await self.drone.offboard.set_velocity_body(
+                        VelocityBodyYawspeed(
+                            forward_m_s=v_fwd,
+                            right_m_s=v_right,
+                            down_m_s=v_down,
+                            yawspeed_deg_s=yawspeed
+                        )
+                    )
+                except OffboardError:
+                    # Offboard mode dropped (e.g. pilot manual RC takeover)
+                    pass
+
+            # 9. Store latest safe command for HUD rendering & diagnostics
+            self.latest_cmd_safe = np.array([v_fwd, v_down, yawspeed], dtype=np.float64)
+
+            # 10. Precise sleep to maintain deterministic frequency
+            elapsed = time.perf_counter() - loop_start
+            sleep_time = max(0.001, ctrl_period - elapsed)
+            await asyncio.sleep(sleep_time)
+
+    async def display_loop(self):
+        """
+        GUI rendering and user input listener (or periodic headless telemetry console logger).
+        Runs cooperatively on the main asyncio thread.
+        """
+        last_log_time = time.perf_counter()
+
+        while self.running:
+            if not self.args.headless:
+                with self.perception_state.lock:
+                    frame = self.perception_state.latest_frame
+                    telemetry = dict(self.perception_state.telemetry)
+                    fps = self.perception_state.fps
+                    is_stale = self.perception_state.is_stale
+
+                if frame is not None:
+                    if is_stale:
+                        telemetry["status"] = "STALE (WD)"
+
+                    cmd_safe = getattr(self, "latest_cmd_safe", np.zeros(3))
+                    display_frame = self.draw_flight_hud(frame, telemetry, cmd_safe, 1.0 / max(1.0, fps))
+                    cv2.imshow("Autonomous Drone Tracker - Companion Node", display_frame)
+
+                    key = cv2.waitKey(1) & 0xFF
+                    if key == ord('q'):
+                        print("\n[USER] Quit key pressed.")
+                        self.running = False
+                        break
+
+                await asyncio.sleep(0.02)  # ~50 Hz check for responsive display and key input
+            else:
+                now = time.perf_counter()
+                if now - last_log_time >= 0.5:  # 2 Hz clean telemetry log
+                    last_log_time = now
+                    with self.perception_state.lock:
+                        status = self.perception_state.telemetry.get("status", "SEARCHING")
+                        f_idx = self.perception_state.frame_idx
+                        v_fps = self.perception_state.fps
+                        sz = self.perception_state.telemetry.get("target_size", 0.0)
+                        is_stale = self.perception_state.is_stale
+
+                    if is_stale and f_idx > 0:
+                        status = "STALE_WD"
+
+                    current_alt = self.get_current_altitude()
+                    alt_status = self.vehicle_state.alt_safety_status
+                    cmd = getattr(self, "latest_cmd_safe", np.zeros(3))
+
+                    print(f"Frame {f_idx:5d} ({v_fps:4.1f}fps) | "
+                          f"Status: {status:8s} | "
+                          f"Alt: {current_alt:4.1f}m ({alt_status:13s}) | "
+                          f"Size: {sz:4.0f}px | "
+                          f"Cmd: [vx={cmd[0]:4.1f}, vz={cmd[1]:+4.2f}, yaw={cmd[2]:+5.1f}]")
+
+                await asyncio.sleep(0.05)
+
+    async def run(self):
+        """Entry point that coordinates the decoupled threads and asyncio tasks."""
+        self.running = True
+
+        # Check MAVSDK availability
+        if not self.args.dry_run:
+            if not MAVSDK_AVAILABLE:
+                print("\n[NOTICE] 'mavsdk' is not installed in the current Python environment.")
+                print("[NOTICE] Automatically switching to DRY-RUN Mode (Desktop Benchtop Test).\n")
+                self.args.dry_run = True
+            elif not self.args.connection:
+                print("\n[NOTICE] No MAVLink connection string provided via --connection.")
+                print("[NOTICE] Running in DRY-RUN Mode. Pass e.g. '--connection serial:///dev/ttyTHS1:921600' for flight.\n")
+                self.args.dry_run = True
+
+        # Connect to Pixhawk if in live mode
+        telemetry_task = None
+        if not self.args.dry_run and MAVSDK_AVAILABLE:
+            print(f"[MAVLINK] Connecting to Pixhawk via {self.args.connection}...")
+            self.drone = System()
+            try:
+                await self.drone.connect(system_address=self.args.connection)
+                print("[MAVLINK] Waiting for autopilot heartbeat...")
+                async for state in self.drone.core.connection_state():
+                    if state.is_connected:
+                        print("[MAVLINK] ✓ Autopilot connected!")
+                        self.vehicle_state.is_connected = True
+                        break
+                telemetry_task = asyncio.create_task(self.telemetry_listener())
+            except Exception as e:
+                print(f"[ERROR] Could not connect to Pixhawk: {e}")
+                print("[FALLBACK] Switching to Dry-Run mode.\n")
+                self.args.dry_run = True
+
+        # Startup banner
+        print("\n=======================================================")
+        print("    AUTONOMOUS DRONE TRACKING & SERVOING RUNNING       ")
+        print("=======================================================")
+        print(f"• Flight Mode:        {'DRY-RUN (Desktop Test)' if self.args.dry_run else 'LIVE MAVSDK AUTOPILOT'}")
+        print(f"• MAVLink Loop Rate:  {self.args.ctrl_rate:.0f} Hz (Decoupled Deterministic Stream)")
+        print(f"• Target Pixel Size:  {self.args.target_size:.0f} px")
+        print(f"• Altitude Floor:     {self.args.min_alt:.1f} m AGL (Cushion: {self.args.alt_cushion:.1f} m)")
+        print(f"• Altitude Ceiling:   {self.args.max_alt:.1f} m AGL")
+        print(f"• Watchdog Timeout:   {self.args.watchdog_timeout * 1000:.0f} ms")
+        print(f"• Acceleration Caps:  XY={self.args.max_accel_xy:.1f} m/s^2 | Z={self.args.max_accel_z:.1f} m/s^2 | Yaw={self.args.max_accel_yaw:.0f} deg/s^2")
+        print(f"• Forward Speed Cap:  {self.args.max_speed:.1f} m/s")
+        print(f"• Press 'q' in video window or Ctrl+C to terminate.")
+        print("=======================================================\n")
+
+        # 1. Start Vision Worker Thread (Independent OS Thread)
+        self.vision_thread = threading.Thread(target=self._vision_worker, name="VisionWorker", daemon=True)
+        self.vision_thread.start()
+
+        # 2. Launch Asyncio Control & Display Tasks
+        control_task = asyncio.create_task(self.control_loop())
+        display_task = asyncio.create_task(self.display_loop())
+
+        try:
+            # Run tasks concurrently until user termination or error
+            done, pending = await asyncio.wait(
+                [control_task, display_task],
+                return_when=asyncio.FIRST_COMPLETED
+            )
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            print("\n[STOP] Termination signal received.")
+        finally:
+            self.running = False
+
+            # Cancel remaining asyncio tasks
+            control_task.cancel()
+            display_task.cancel()
+            if telemetry_task:
+                telemetry_task.cancel()
+
+            # Wait for vision thread to cleanly close camera
+            if self.vision_thread and self.vision_thread.is_alive():
+                self.vision_thread.join(timeout=1.5)
+
+            if not self.args.headless:
+                cv2.destroyAllWindows()
+
+            # Send safe zero-velocity holding command to Pixhawk before exit
+            if self.drone and not self.args.dry_run and self.vehicle_state.is_connected:
+                print("[SAFETY] Sending zero velocity holding command to Pixhawk...")
+                try:
+                    await self.drone.offboard.set_velocity_body(VelocityBodyYawspeed(0.0, 0.0, 0.0, 0.0))
+                except Exception:
+                    pass
+
+            print("[SHUTDOWN] Autonomous Tracker Node stopped cleanly.")
+
+
+# ==============================================================================
+# CLI Entrypoint
+# ==============================================================================
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Autonomous Drone Pursuit Bridge Node: Connects Vision Pipeline with Pixhawk Controller."
+    )
+    # Vision & Camera Options
+    parser.add_argument(
+        "--source", type=str, default="0",
+        help="Video source: camera index (e.g. '0'), video file path, or GStreamer string."
+    )
+    parser.add_argument(
+        "--weights", type=str,
+        default=str(DETECTION_DIR / "runs/detect/yolov8n_drone/weights/best.pt"),
+        help="Path to trained YOLOv8 drone detector weights."
+    )
+    parser.add_argument(
+        "--conf", type=float, default=0.40,
+        help="YOLO detection confidence threshold."
+    )
+    parser.add_argument(
+        "--target-size", type=float, default=35.0,
+        help="Desired bounding box size in pixels on 640x480 frame (default: 35 px for ~6m standoff)."
+    )
+    parser.add_argument(
+        "--max-lost-frames", type=int, default=15,
+        help="Consecutive missed frames before Kalman track transitions from COASTING to SEARCHING."
+    )
+
+    # Controller & Flight Tuning Options
+    parser.add_argument(
+        "--max-speed", type=float, default=6.0,
+        help="Maximum forward velocity limit (m/s)."
+    )
+    parser.add_argument(
+        "--max-climb", type=float, default=2.5,
+        help="Maximum climb velocity limit (m/s)."
+    )
+    parser.add_argument(
+        "--max-desc", type=float, default=1.5,
+        help="Maximum descent velocity limit (m/s)."
+    )
+    parser.add_argument(
+        "--max-yawspeed", type=float, default=90.0,
+        help="Maximum yaw turn rate limit (deg/s)."
+    )
+    parser.add_argument(
+        "--lateral-strafe", action="store_true", default=True,
+        help="Enable 4-DOF lateral strafe roll tilt (default: True)."
+    )
+    parser.add_argument(
+        "--no-lateral-strafe", action="store_false", dest="lateral_strafe",
+        help="Disable lateral strafe (enforces 3-DOF coordinated-turn yaw-only mode)."
+    )
+    parser.add_argument(
+        "--max-lat-speed", type=float, default=2.5,
+        help="Maximum lateral velocity limit in m/s for roll tilt (default: 2.5 m/s)."
+    )
+    parser.add_argument(
+        "--uptilt", type=float, default=15.0,
+        help="Mechanical camera mount up-tilt angle in degrees."
+    )
+    parser.add_argument(
+        "--hfov", type=float, default=60.0,
+        help="Horizontal field of view in degrees."
+    )
+    parser.add_argument(
+        "--vfov", type=float, default=45.0,
+        help="Vertical field of view in degrees."
+    )
+
+    # Altitude Floor and Ceiling Safety Limits
+    parser.add_argument(
+        "--min-alt", type=float, default=2.0,
+        help="Hard altitude floor in meters AGL (prevents ground collision)."
+    )
+    parser.add_argument(
+        "--max-alt", type=float, default=30.0,
+        help="Hard altitude ceiling in meters AGL (prevents flyaway/excessive climb)."
+    )
+    parser.add_argument(
+        "--alt-cushion", type=float, default=1.0,
+        help="Proportional braking cushion zone (meters) near floor and ceiling boundaries."
+    )
+    parser.add_argument(
+        "--sim-alt", type=float, default=5.0,
+        help="Simulated initial altitude in meters AGL for desktop dry-run testing."
+    )
+
+    # MAVLink Timing & Slew-Rate Limiting Options
+    parser.add_argument(
+        "--ctrl-rate", type=float, default=50.0,
+        help="Deterministic MAVLink setpoint stream rate in Hz (default: 50 Hz)."
+    )
+    parser.add_argument(
+        "--watchdog-timeout", type=float, default=0.40,
+        help="Deadman watchdog timeout in seconds before vision is declared stale (default: 0.40s)."
+    )
+    parser.add_argument(
+        "--max-accel-xy", type=float, default=4.0,
+        help="Maximum forward acceleration limit in m/s^2 for smooth slew-rate limiting (default: 4.0)."
+    )
+    parser.add_argument(
+        "--max-accel-z", type=float, default=3.0,
+        help="Maximum vertical acceleration limit in m/s^2 for smooth slew-rate limiting (default: 3.0)."
+    )
+    parser.add_argument(
+        "--max-accel-yaw", type=float, default=180.0,
+        help="Maximum yaw angular acceleration limit in deg/s^2 (default: 180.0)."
+    )
+
+    # MAVLink & Hardware Connection Options
+    parser.add_argument(
+        "--connection", type=str, default="",
+        help="MAVLink connection URI, e.g. 'serial:///dev/ttyTHS1:921600' (Jetson) or 'udp://:14540' (SITL)."
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Force Dry-Run mode (runs vision & control math without sending commands to hardware)."
+    )
+    parser.add_argument(
+        "--headless", action="store_true",
+        help="Run without GUI display window (recommended for companion compute background service)."
+    )
+    parser.add_argument(
+        "--max-frames", type=int, default=0,
+        help="Optional limit on number of frames to process before exiting (0 = infinite)."
+    )
+
+    return parser.parse_args()
+
+
+if __name__ == "__main__":
+    args = parse_args()
+    node = AutonomousTrackerNode(args)
+    asyncio.run(node.run())

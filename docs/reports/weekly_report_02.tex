@@ -1,0 +1,110 @@
+\documentclass[11pt,a4paper]{article}
+
+% --- Packages ---
+\usepackage[utf8]{inputenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{microtype}
+\usepackage{enumitem}
+\usepackage{titlesec}
+
+% --- Hyperref Setup ---
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue!70!black,
+    citecolor=blue!70!black,
+    urlcolor=blue!70!black
+}
+
+% --- Section Styling ---
+\titleformat{\section}{\large\bfseries}{\thesection}{1em}{}[\titlerule]
+\titleformat{\subsection}{\normalsize\bfseries}{\thesubsection}{1em}{}
+
+% --- Document Info ---
+\title{\textbf{Weekly Progress Report 02}\\[0.2em]
+\large Autonomous Drone Pursuit \& Interception System (DTU Bachelor Thesis)}
+\author{\textbf{Philip Kierkegaard}}
+\date{Week 2 --- September 2026}
+
+\begin{document}
+\maketitle
+
+\vspace{-1.5em}
+\noindent\rule{\textwidth}{0.4pt}
+
+\section{Executive Summary}
+During Week 2, project milestones were advanced across two core subsystems: \textbf{perception/tracking on edge hardware} and \textbf{target trajectory and flight simulation}:
+\begin{itemize}[leftmargin=1.5em, itemsep=0.2em]
+    \item \textbf{Perception \& Tracking:} To address false positives on background clutter and detection dropouts on distant drones, \textbf{YOLOv8n v3} was trained on 31,233 images (incorporating the \textbf{DUT-Anti-UAV} dataset alongside Anti-UAV, plus 723 domain-specific hard negatives of foliage, rooftops, and utility poles). Combined with an \textbf{8D Kalman Filter}, the tracking pipeline was validated on 3,570 frames from the Anti-UAV test set across 12 benchmark runs, improving average tracking precision ($\text{CLE} \le 20\text{px}$) from \textbf{69.3\%} in v1 to \textbf{89.7\%} in v3.
+    \item \textbf{Trajectory \& Flight Simulation:} Formulated and prototyped a realistic 3D target drone generator. By smoothing random waypoint walks with cubic splines and enforcing motor acceleration limits, the simulation produces smooth, physically feasible evasive maneuvers rather than impossible sharp turns. In addition, an initial 50~Hz quadrotor flight simulator was developed to model realistic autopilot response lag and sensor delay.
+    \item \textbf{Offboard Telemetry Interface:} Formulated a compact visual servoing telemetry stream to transmit filtered error setpoints over MAVLink without saturating serial communication channels.
+\end{itemize}
+
+\section{Perception \& Tracking Benchmark (v1 vs. v3, with/without Kalman)}
+To evaluate the contribution of both the clutter-enriched training data (incorporating DUT-Anti-UAV and hard negatives) and the Kalman temporal filter, a complete factorial ablation ($2 \times 2$) was executed across all sequential test videos (\texttt{video05}, \texttt{video12}, and \texttt{video20}):
+
+\begin{table}[h!]
+\centering
+\small
+\begin{tabular}{lcccccc}
+\toprule
+\textbf{Pipeline Configuration} & \textbf{Raw Lock} & \textbf{Verif. Lock ($\text{IoU} \ge 0.5$)} & \textbf{Prec. ($\text{CLE} \le 20\text{px}$)} & \textbf{Mean IoU} & \textbf{Mean CLE} & \textbf{Avg Speed} \\
+\midrule
+\textbf{YOLOv8 v3 + Kalman (Selected)} & \textbf{84.2\%} & \textbf{77.8\%} & \textbf{89.7\%} & \textbf{0.624} & \textbf{13.2 px} & \textbf{22.6 FPS} \\
+YOLOv8 v3 (Raw YOLO, No Kalman)       & 86.0\%          & 76.4\%          & 83.4\%                 & 0.592             & 37.0 px           & 24.2 FPS \\
+YOLOv8 v1 + Kalman                     & 62.0\%          & 62.9\%          & 69.3\%                 & 0.504             & 37.2 px           & 24.8 FPS \\
+YOLOv8 v1 (Raw YOLO, No Kalman)       & 62.9\%          & 63.3\%          & 64.8\%                 & 0.473             & 38.1 px           & 25.4 FPS \\
+\bottomrule
+\end{tabular}
+\caption{Overall benchmark performance across the Anti-UAV sequential test set (14,280 evaluated frames total). \textit{Raw Lock} denotes the fraction of frames where the tracker declared an active lock, while \textit{Verif. Lock} requires $\text{IoU} \ge 0.5$ against ground truth. (In \texttt{video12}, the target physically exits for $\approx 147$ frames, capping maximum possible visibility at $\approx 90\%$).}
+\label{tab:benchmark_summary}
+\end{table}
+
+\subsection{Key Empirical Takeaways}
+\begin{itemize}[leftmargin=1.5em, itemsep=0.3em]
+    \item \textbf{The Clutter Breakthrough (\texttt{video20}):} In \texttt{video20} (a challenging sequence featuring tree canopies and changing ground textures), v1 collapsed completely, locking only \textbf{41.2\%} of the time and losing the drone for over 58\% of the flight. In contrast, \textbf{v3 + Kalman maintained a 95.0\% lock rate, 93.7\% verified lock ($\text{IoU} \ge 0.3$), and 99.9\% precision} with an average center localization error (CLE) of just \textbf{3.8 pixels}. The combination of DUT-Anti-UAV clutter diversity and explicit hard negative mining successfully established robust decision boundaries against complex natural backgrounds.
+    \item \textbf{Raw Lock vs. Ground-Truth Verified Lock (The False Lock Trap):} A crucial finding was uncovered on \texttt{video20}: Raw YOLO reported a deceptively high raw lock rate of \textbf{99.8\%}. However, when cross-referenced against ground truth, \textbf{14.5\% of those locked frames were false locks} ($\text{IoU} < 0.1$ on background clutter or severe bounding box twitching), causing the verified lock rate to plummet to \textbf{67.2\%} and center error to spike to \textbf{70.9 px}. With the 8D Kalman filter, temporal confirmation and physical velocity gating completely suppressed spurious locks, achieving a \textbf{0.0\% false lock rate} and collapsing mean center error to \textbf{3.8 px}.
+    \item \textbf{Real-Time Throughput:} The integrated YOLO + Kalman pipeline processed $1280 \times 720$ frames at \textbf{22.6 FPS} on Apple Silicon Metal (\texttt{mps}), confirming that real-time tracking is viable near the camera's 30~Hz limit with negligible filter overhead ($\approx 1.6\text{ ms}$).
+\end{itemize}
+
+\section{Target Trajectory \& Flight Simulation}
+To evaluate visual pursuit controllers (such as Image-Based Visual Servoing or Reinforcement Learning), the target drone needs to exhibit realistic, evasive behavior. Simply picking independent random coordinates in space produces unphysical, jagged paths with sharp corners that a real multirotor cannot execute.
+
+\subsection{The Trajectory Generator Prototype (\texttt{stochastic\_trajectory.py})}
+The trajectory simulation uses a two-step approach grounded in quadrotor physical constraints:
+\begin{enumerate}[leftmargin=1.5em, itemsep=0.3em]
+    \item \textbf{Simulated Pilot Intent (Heading \& Speed):} Every $1.5$ to $3.0\text{ seconds}$, the target drone samples an incremental heading change $\Delta \psi$ and forward speed. This mimics an evasive pilot's natural inputs---banking into turns, leveling off, climbing, or diving.
+    \item \textbf{Smooth Curve Fitting (Cubic B-Splines):} Instead of connecting waypoints with straight line segments (which produce infinite acceleration spikes at every corner), a cubic B-spline is fitted through the nodes. Because cubic splines possess continuous 1st derivatives (velocity) and 2nd derivatives (acceleration), the simulated path is twice continuously differentiable ($C^2$).
+    \item \textbf{Acceleration \& Thrust Clamping:} Real quadrotors are bounded by their maximum motor thrust-to-weight ratio and safe bank angle limits (typically $\approx 35^\circ$, giving $a_{\max} \approx g \tan(35^\circ) \approx 6.8\text{ m/s}^2$). If a generated turn turns too sharply, the simulation automatically scales down the time parameterization so maneuvers always remain within feasible physical limits ($2.2\text{ m/s}^2$ for cruising, up to $8.0\text{ m/s}^2$ for aggressive breaks).
+\end{enumerate}
+
+\subsection{The Chase Drone Simulator Prototype (\texttt{FastPixhawkQuadSim.py})}
+To simulate how the pursuing drone responds to tracking commands, an initial 50~Hz quadrotor simulator was constructed with realistic physical bottlenecks:
+\begin{itemize}[leftmargin=1.5em, itemsep=0.3em]
+    \item \textbf{Autopilot Velocity Lag ($\tau$):} Real drones cannot change speed instantaneously because the airframe must tilt to tilt its total thrust vector. This is modeled using PX4 velocity response time constants ($\tau_v \approx 0.32\text{ s}$, $\tau_{\text{yaw}} \approx 0.15\text{ s}$).
+    \item \textbf{End-to-End Latency ($60\text{ ms}$):} Modeled realistic transport and processing delays (camera shutter exposure + neural network inference + serial MAVLink UART transmission). In control theory, unmodeled delays introduce destabilizing phase lag; modeling it early ensures controllers tested in simulation remain stable on real hardware.
+    \item \textbf{15$^\circ$ Camera Mechanical Up-Tilt:} In forward flight, a quadrotor pitches nose-down. A $15^\circ$ upward camera tilt was built into the sensor geometry to keep the target centered in the field of view during high-speed forward pursuit.
+\end{itemize}
+
+\section{Offboard Telemetry \& Risk Mitigations (W2 Plan Alignment)}
+\begin{itemize}[leftmargin=1.5em, itemsep=0.3em]
+    \item \textbf{[Risk A] Small-Target Recall Gap:}
+    \textit{Mitigation:} Confidence curve analysis revealed that single-frame detection peaks at $\text{conf} = 0.32$, while tracking pipeline stability is optimal at $\text{conf} = 0.22 - 0.25$ (where recall is maximized and false alarms are suppressed by the Kalman confirmation window). Furthermore, dynamic digital zoom was tested on real flight footage (\texttt{GOPR5842\_007.mp4}), maintaining continuous target lock from frame 60 to 511 without a single dropout.
+    \item \textbf{[Risk B] Communication Stream Congestion:}
+    \textit{Mitigation:} Rather than transmitting high-rate raw bounding box arrays across serial links, the tracker distills detections into a compact 8-value visual servoing telemetry packet:
+    $$\mathbf{u}_{\text{telemetry}} = \big[e_x,\, e_y,\, e_{\text{range}},\, \dot{e}_x,\, \dot{e}_y,\, \text{status},\, \text{target\_id},\, \text{zoom}\big]$$
+    This directly matches MAVSDK's \texttt{VelocityBodyYawspeed} setpoint format at a steady 30~Hz rate, preventing serial buffer saturation.
+\end{itemize}
+
+\section{Plan for Week 3}
+\begin{enumerate}[leftmargin=1.5em, itemsep=0.3em]
+    \item \textbf{Close the Loop in Simulation:} Connect the visual servoing telemetry outputs from \texttt{track\_pipeline.py} directly into \texttt{FastPixhawkQuadSim.py} to benchmark baseline pursuit controllers against the evasive target trajectories.
+    \item \textbf{Edge Hardware Deployment:} Export YOLOv8 v3 to TensorRT (FP16 engine) on the NVIDIA Jetson Orin Nano companion board to target $\ge 45\text{ FPS}$.
+    \item \textbf{Hardware Serial Verification:} Validate bidirectional telemetry packet transmission and setpoint dispatch over a physical USB-UART serial link with the Pixhawk flight controller.
+\end{enumerate}
+
+\end{document}

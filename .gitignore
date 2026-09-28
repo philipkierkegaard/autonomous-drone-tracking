@@ -1,0 +1,108 @@
+# ==============================================================================
+# Python & Virtual Environments
+# ==============================================================================
+.venv/
+env/
+venv/
+ENV/
+*.egg-info/
+dist/
+build/
+
+# Bytecode & Caching
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ==============================================================================
+# Operating System & IDEs
+# ==============================================================================
+.DS_Store
+**/.DS_Store
+._*
+.AppleDouble
+.LSOverride
+Thumbs.db
+.idea/
+.vscode/
+
+# ==============================================================================
+# Media, Videos & Animations (Simulation Renders & Screen Captures)
+# ==============================================================================
+*.mp4
+*.MP4
+*.avi
+*.AVI
+*.mov
+*.MOV
+*.mkv
+*.webm
+*.flv
+*.wmv
+*.gif
+outputs/videos/
+control/rendering/drone_chase/
+**/drone_chase/
+**/videos/
+
+# ==============================================================================
+# Datasets & Heavy Raw Data (Anti-UAV, DET-FLY, DUT images, frames, labels)
+# ==============================================================================
+perception/raw_data/
+perception/datasets/
+perception/data/
+**/raw_data/
+**/datasets/
+data/
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.rar
+*.7z
+
+# Legacy paths (for backward compatibility)
+object-detection/datasets/
+object-detection/data/
+object-detection/outputs/
+control-model/
+
+# ==============================================================================
+# Model Formats & Training Weights
+# ==============================================================================
+*.onnx
+*.engine
+*.plan
+*.tflite
+*.weights
+*.pth
+*.safetensors
+*.bin
+
+# YOLO Weights (*.pt): ignore all checkpoints by default, but track the deployment model for Jetson
+*.pt
+!perception/weights/yolov8n_v3_best.pt
+perception/yolov8n.pt
+
+# Training runs, validation batches, and experiment logs
+runs/
+perception/runs/
+**/runs/
+wandb/
+*.tensorboard
+lightning_logs/
+
+# ==============================================================================
+# Generated Outputs & Temporary Files
+# ==============================================================================
+outputs/
+
+# Scratch & temporary workspace
+perception/scratch/
+scratch/
