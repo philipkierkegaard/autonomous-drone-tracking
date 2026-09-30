@@ -18,10 +18,49 @@ import argparse
 import asyncio
 import threading
 from pathlib import Path
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple, Union
 
 import cv2
 import numpy as np
+
+
+def build_jetson_csi_pipeline(
+    sensor_id: int = 0,
+    capture_width: int = 1920,
+    capture_height: int = 1080,
+    framerate: int = 30,
+    flip_method: int = 0,
+    display_width: int = 1280,
+    display_height: int = 720,
+) -> str:
+    """
+    Builds hardware-accelerated GStreamer pipeline for NVIDIA Jetson CSI cameras
+    using nvarguscamerasrc and Tegra ISP hardware debayering/scaling.
+    """
+    return (
+        f"nvarguscamerasrc sensor-id={sensor_id} ! "
+        f"video/x-raw(memory:NVMM), width=(int){capture_width}, height=(int){capture_height}, "
+        f"format=(string)NV12, framerate=(fraction){framerate}/1 ! "
+        f"nvvidconv flip-method={flip_method} ! "
+        f"video/x-raw, width=(int){display_width}, height=(int){display_height}, format=(string)BGRx ! "
+        f"videoconvert ! "
+        f"video/x-raw, format=(string)BGR ! appsink drop=true sync=false"
+    )
+
+
+def is_zero_yuv_green_frame(frame: np.ndarray) -> bool:
+    """
+    Detects if a frame is an unpopulated/errored zero-byte YUV buffer (RGB: ~0, ~141, ~0).
+    On Jetson Linux for Tegra, reading a CSI camera via plain V4L2 without ISP or a saturated
+    USB bus returns zeroed memory, which decodes to solid green.
+    """
+    if frame is None or frame.size == 0:
+        return True
+    b_max = int(frame[..., 0].max())
+    r_max = int(frame[..., 2].max())
+    g_mean = float(frame[..., 1].mean())
+    return (b_max == 0 and r_max == 0 and 120 <= g_mean <= 160)
+
 
 # ==============================================================================
 # Module Path Resolution (Allows clean imports outside subdirectories)
@@ -357,20 +396,120 @@ class AutonomousTrackerNode:
         # Alpha blend overlay with original frame
         return cv2.addWeighted(hud, 0.88, frame, 0.12, 0)
 
+    def _open_capture_device(self) -> Optional[cv2.VideoCapture]:
+        """
+        Robust camera initialization for Jetson Orin Nano, Linux, and macOS.
+        Automatically handles:
+        - NVIDIA Jetson CSI ribbon cameras (nvarguscamerasrc) to prevent green-screen YUV zero-buffers
+        - USB Webcams via V4L2 with MJPG hardware compression (prevents 4K USB bus congestion)
+        - Automatic green-screen detection and seamless fallback to Jetson hardware ISP
+        - Custom GStreamer pipelines or video files
+        """
+        source_str = str(self.args.source).strip()
+        cam_w = getattr(self.args, "cam_width", 1280)
+        cam_h = getattr(self.args, "cam_height", 720)
+        cam_fps = int(getattr(self.args, "cam_fps", 30))
+        cam_flip = getattr(self.args, "cam_flip", 0)
+
+        # 1. Explicit GStreamer pipeline string
+        if "!" in source_str or "nvarguscamerasrc" in source_str:
+            print("[VISION] Opening custom GStreamer pipeline...")
+            cap = cv2.VideoCapture(source_str, cv2.CAP_GSTREAMER)
+            if cap.isOpened():
+                return cap
+            print("[WARN] Custom GStreamer pipeline failed to open.")
+
+        # 2. CSI Camera explicitly requested (--csi or --source csi / csi:0)
+        use_csi = getattr(self.args, "csi", False) or source_str.lower().startswith("csi")
+        if use_csi:
+            sensor_id = 0
+            if ":" in source_str:
+                try:
+                    sensor_id = int(source_str.split(":")[-1])
+                except ValueError:
+                    sensor_id = 0
+            pipe = build_jetson_csi_pipeline(
+                sensor_id=sensor_id,
+                capture_width=1920,
+                capture_height=1080,
+                framerate=cam_fps,
+                flip_method=cam_flip,
+                display_width=cam_w,
+                display_height=cam_h,
+            )
+            print(f"[VISION] Opening Jetson CSI camera (sensor-id={sensor_id}) via nvarguscamerasrc...")
+            cap = cv2.VideoCapture(pipe, cv2.CAP_GSTREAMER)
+            if cap.isOpened():
+                ret, test_frame = cap.read()
+                if ret and test_frame is not None:
+                    return cap
+                cap.release()
+            print("[WARN] Failed to open nvarguscamerasrc pipeline.")
+            print("       Tip: If camera is locked, run: 'sudo systemctl restart nvargus-daemon'")
+
+        # 3. Numeric source index (webcam or /dev/videoX)
+        if source_str.isdigit():
+            src_idx = int(source_str)
+
+            # A. On Linux: Try V4L2 with MJPG first (standard for USB webcams to avoid uncompressed YUYV bus congestion)
+            if sys.platform.startswith("linux"):
+                cap = cv2.VideoCapture(src_idx, cv2.CAP_V4L2)
+                if cap.isOpened():
+                    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+                    cap.set(cv2.CAP_PROP_FRAME_WIDTH, cam_w)
+                    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, cam_h)
+                    cap.set(cv2.CAP_PROP_FPS, cam_fps)
+                    ret, test_frame = cap.read()
+                    if ret and test_frame is not None and not is_zero_yuv_green_frame(test_frame):
+                        print(f"[VISION] Initialized USB camera on /dev/video{src_idx} via V4L2 (MJPG {cam_w}x{cam_h}).")
+                        return cap
+                    cap.release()
+
+            # B. Standard VideoCapture with Green-Screen Auto-Recovery
+            cap = cv2.VideoCapture(src_idx)
+            if cap.isOpened():
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, cam_w)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, cam_h)
+                ret, test_frame = cap.read()
+                if ret and test_frame is not None:
+                    if is_zero_yuv_green_frame(test_frame):
+                        print(f"\n[NOTICE] Detected solid green frame on /dev/video{src_idx} (uninitialized V4L2 DMA buffer).")
+                        print("[NOTICE] CSI ribbon camera detected without ISP! Automatically switching to Jetson hardware ISP (nvarguscamerasrc)...")
+                        cap.release()
+                        pipe = build_jetson_csi_pipeline(
+                            sensor_id=src_idx,
+                            capture_width=1920,
+                            capture_height=1080,
+                            framerate=cam_fps,
+                            flip_method=cam_flip,
+                            display_width=cam_w,
+                            display_height=cam_h,
+                        )
+                        csi_cap = cv2.VideoCapture(pipe, cv2.CAP_GSTREAMER)
+                        if csi_cap.isOpened():
+                            ret_csi, test_csi = csi_cap.read()
+                            if ret_csi and test_csi is not None and not is_zero_yuv_green_frame(test_csi):
+                                print("[VISION] Successfully recovered Jetson CSI camera via nvarguscamerasrc!")
+                                return csi_cap
+                            csi_cap.release()
+                        print("[WARN] nvarguscamerasrc auto-recovery failed. Re-opening standard capture.")
+                        cap = cv2.VideoCapture(src_idx)
+                    return cap
+
+        # 4. Fallback: Video file path
+        return cv2.VideoCapture(source_str)
+
     def _vision_worker(self):
         """
         Independent vision ingestion & inference thread.
         Runs at the camera's native framerate (or YOLO throughput) without blocking MAVLink control.
         """
-        src = int(self.args.source) if str(self.args.source).isdigit() else self.args.source
-        cap = cv2.VideoCapture(src)
-        if not cap.isOpened():
+        cap = self._open_capture_device()
+        if cap is None or not cap.isOpened():
             print(f"\n[ERROR] Failed to open video source: {self.args.source}")
             self.running = False
             return
 
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
         actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         print(f"[VISION] Ingestion worker active ({actual_w}x{actual_h})")
@@ -727,6 +866,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--record-fps", type=float, default=30.0,
         help="Recording framerate in FPS (default: 30.0)."
+    )
+    parser.add_argument(
+        "--csi", action="store_true",
+        help="Use NVIDIA Jetson hardware ISP pipeline (nvarguscamerasrc) for CSI ribbon cameras (e.g. Raspberry Pi HQ / IMX477 / IMX219)."
+    )
+    parser.add_argument(
+        "--cam-flip", type=int, default=0,
+        help="CSI camera rotation/flip method: 0=none, 2=rotate 180 degrees (for upside-down mounting)."
+    )
+    parser.add_argument(
+        "--cam-width", type=int, default=1280,
+        help="Camera ingestion width (default: 1280 for fast 30+ FPS inference; scales 4K down in hardware)."
+    )
+    parser.add_argument(
+        "--cam-height", type=int, default=720,
+        help="Camera ingestion height (default: 720)."
+    )
+    parser.add_argument(
+        "--cam-fps", type=int, default=30,
+        help="Camera framerate (default: 30)."
     )
 
     # Controller & Flight Tuning Options
