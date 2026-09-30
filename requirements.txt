@@ -1,0 +1,31 @@
+# ==============================================================================
+# Autonomous Drone Pursuit & Interception System
+# DTU Bachelor Thesis — Complete Python Dependencies
+# ==============================================================================
+
+# Core Deep Learning & Computer Vision
+torch>=2.0.0
+torchvision>=0.15.0
+ultralytics>=8.0.0
+opencv-python>=4.8.0
+Pillow>=9.5.0
+
+# Reinforcement Learning & Simulation Environment
+gymnasium>=0.29.0
+stable-baselines3>=2.0.0
+sb3-contrib>=2.0.0
+cloudpickle>=3.0.0
+
+# Scientific Computing, Linear Algebra & Filtering
+numpy>=1.24.0
+scipy>=1.10.0
+pandas>=2.0.0
+
+# Telemetry, Trajectory Visualization & Logging
+matplotlib>=3.7.0
+seaborn>=0.12.0
+tensorboard>=2.13.0
+PyYAML>=6.0
+
+# Pixhawk Autopilot & MAVLink Hardware Interface (Optional for Desktop Simulation)
+mavsdk>=2.0.0
