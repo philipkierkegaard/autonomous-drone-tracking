@@ -510,8 +510,56 @@ class AutonomousTrackerNode:
             cmd_text = f"CMD -> FWD: {v_fwd:4.1f} m/s | VERT: {-v_down:+4.2f} m/s | YAW: {yawspeed:+5.1f} */s | GUARD: {alt_status}"
         cv2.putText(hud, cmd_text, (20, h - 16), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (0, 210, 211), 2, cv2.LINE_AA)
 
-        # Alpha blend overlay with original frame
-        return cv2.addWeighted(hud, 0.88, frame, 0.12, 0)
+        # Alpha blend background banners with frame
+        out = cv2.addWeighted(hud, 0.88, frame, 0.12, 0)
+
+        # Center Gimbal Optical Boresight Crosshair
+        cx, cy = w // 2, h // 2
+        reticle_color = (180, 180, 180)
+        cv2.circle(out, (cx, cy), 16, reticle_color, 1, cv2.LINE_AA)
+        cv2.line(out, (cx - 28, cy), (cx - 18, cy), reticle_color, 1, cv2.LINE_AA)
+        cv2.line(out, (cx + 18, cy), (cx + 28, cy), reticle_color, 1, cv2.LINE_AA)
+        cv2.line(out, (cx, cy - 28), (cx, cy - 18), reticle_color, 1, cv2.LINE_AA)
+        cv2.line(out, (cx, cy + 18), (cx, cy + 28), reticle_color, 1, cv2.LINE_AA)
+
+        # Target Bounding Box, Tactical Brackets, & Tracking Lead Line
+        bbox = telemetry.get("bbox")
+        if bbox is not None:
+            bx1, by1, bx2, by2 = [int(v) for v in bbox]
+            tcx, tcy = (bx1 + bx2) // 2, (by1 + by2) // 2
+            trk_id = telemetry.get("target_id", 1)
+            box_color = (46, 213, 115) if status == "LOCKED" else (255, 165, 2)
+
+            # Tactical corner brackets around target
+            c_len = max(8, min(24, int(abs(bx2 - bx1) * 0.25)))
+            thick = 2
+            # Top-Left
+            cv2.line(out, (bx1, by1), (bx1 + c_len, by1), box_color, thick, cv2.LINE_AA)
+            cv2.line(out, (bx1, by1), (bx1, by1 + c_len), box_color, thick, cv2.LINE_AA)
+            # Top-Right
+            cv2.line(out, (bx2, by1), (bx2 - c_len, by1), box_color, thick, cv2.LINE_AA)
+            cv2.line(out, (bx2, by1), (bx2, by1 + c_len), box_color, thick, cv2.LINE_AA)
+            # Bottom-Left
+            cv2.line(out, (bx1, by2), (bx1 + c_len, by2), box_color, thick, cv2.LINE_AA)
+            cv2.line(out, (bx1, by2), (bx1, by2 - c_len), box_color, thick, cv2.LINE_AA)
+            # Bottom-Right
+            cv2.line(out, (bx2, by2), (bx2 - c_len, by2), box_color, thick, cv2.LINE_AA)
+            cv2.line(out, (bx2, by2), (bx2, by2 - c_len), box_color, thick, cv2.LINE_AA)
+
+            # Center target reticle dot & lead line to optical boresight
+            cv2.circle(out, (tcx, tcy), 4, box_color, -1, cv2.LINE_AA)
+            cv2.line(out, (cx, cy), (tcx, tcy), (0, 210, 211), 1, cv2.LINE_AA)
+
+            # Target Lock Badge
+            tag_str = f"TARGET #{trk_id} [{curr_sz:.0f}px]"
+            badge_w = len(tag_str) * 8 + 12
+            cv2.rectangle(out, (bx1, max(10, by1 - 22)), (bx1 + badge_w, max(10, by1)), (20, 20, 20), -1)
+            cv2.rectangle(out, (bx1, max(10, by1 - 22)), (bx1 + badge_w, max(10, by1)), box_color, 1)
+            cv2.putText(out, tag_str, (bx1 + 5, max(24, by1 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.42, box_color, 1, cv2.LINE_AA)
+        else:
+            cv2.putText(out, "[SEARCHING FOR TARGET]", (cx - 90, cy + 38), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (120, 120, 120), 1, cv2.LINE_AA)
+
+        return out
 
     def _open_capture_device(self) -> Optional[cv2.VideoCapture]:
         """
