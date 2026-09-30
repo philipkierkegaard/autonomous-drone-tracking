@@ -25,7 +25,7 @@ import shutil
 import argparse
 import subprocess
 from pathlib import Path
-from typing import Optional, Tuple, Callable
+from typing import Optional, Tuple, Callable, Any, Union
 import numpy as np
 
 # Ensure project root is on sys.path
@@ -43,7 +43,13 @@ from control.simulation import FastPixhawkQuadSim
 from control.pid_controller import KinematicVisualServoController
 from control.trajectory import StochasticTargetTrajectory, PROFILES
 
+try:
+    from control.predictive_controller import RecurrentVisualServoController
+except Exception:
+    RecurrentVisualServoController = None
+
 ARTIFACT_DIRS = [
+    Path("/Users/philipkierkegaard/.gemini/antigravity-ide/brain/53eb0b3e-b75c-4830-a9d4-c69e644ccb6a"),
     Path("/Users/philipkierkegaard/.gemini/antigravity-ide/brain/42b621c5-bd5c-42b8-ae83-87208090e0a7"),
     Path("/Users/philipkierkegaard/.gemini/antigravity-ide/brain/c2b8fddd-4624-46f7-9768-e1974371d76e"),
 ]
@@ -174,11 +180,17 @@ def simulate_pursuit(
     dt: float = 0.02,
     enable_lateral_strafe: bool = True,
     desired_standoff: float = 6.0,
-    desired_bbox_px: float = 55.0,
+    desired_bbox_px: float = 32.33,
+    controller: Optional[Any] = None,
+    controller_type: str = "pid",
+    model_path: Optional[Union[str, Path]] = None,
+    initial_chaser_pos: Optional[np.ndarray] = None,
+    initial_chaser_yaw: float = 0.0,
 ) -> dict:
     """
     Executes the full closed-loop 50 Hz simulation with FastPixhawkQuadSim and
-    KinematicVisualServoController, logging state histories for movie rendering.
+    either KinematicVisualServoController or RecurrentVisualServoController,
+    logging state histories for movie rendering and performance inspection.
     """
     num_steps = int(duration / dt)
 
@@ -189,24 +201,37 @@ def simulate_pursuit(
         max_vel_up=4.0,
         max_vel_down=2.5
     )
-    sim.reset(initial_pos=[0.0, 0.0, -2.5], initial_yaw=0.0)
+    p0 = [0.0, 0.0, -2.5] if initial_chaser_pos is None else initial_chaser_pos
+    sim.reset(initial_pos=p0, initial_yaw=initial_chaser_yaw)
 
-    controller = KinematicVisualServoController(
-        camera_uptilt_deg=15.0,
-        hfov_deg=60.0,
-        vfov_deg=45.0,
-        desired_bbox_size=desired_bbox_px,
-        desired_standoff_dist=desired_standoff,
-        use_bbox_size=True,
-        enable_lateral_strafe=enable_lateral_strafe,
-        kp_lat=2.5,
-        kd_lat=0.35,
-        max_lat_vel=4.0,
-        max_lat_accel=5.0,
-        max_limits=np.array([18.0, 4.0, 2.5, 120.0]),
-        max_accel=6.5,
-        max_decel=2.8,
-    )
+    if controller is None:
+        if controller_type.lower() in ("recurrent_ppo", "rl", "recurrent"):
+            if model_path is None:
+                default_p = PROJECT_ROOT / "control" / "weights" / "recurrent_ppo" / "best_model" / "best_model.zip"
+                if not default_p.exists():
+                    default_p = PROJECT_ROOT / "control" / "weights" / "recurrent_ppo" / "recurrent_ppo_drone_final.zip"
+                model_path = default_p
+            if RecurrentVisualServoController is not None:
+                controller = RecurrentVisualServoController(model_path=model_path)
+            else:
+                raise ImportError("RecurrentVisualServoController could not be imported.")
+        else:
+            controller = KinematicVisualServoController(
+                camera_uptilt_deg=15.0,
+                hfov_deg=60.0,
+                vfov_deg=45.0,
+                desired_bbox_size=desired_bbox_px,
+                desired_standoff_dist=desired_standoff,
+                use_bbox_size=False,
+                enable_lateral_strafe=enable_lateral_strafe,
+                kp_lat=2.5,
+                kd_lat=0.35,
+                max_lat_vel=4.0,
+                max_lat_accel=5.0,
+                max_limits=np.array([18.0, 4.0, 2.5, 120.0]),
+                max_accel=6.5,
+                max_decel=2.8,
+            )
 
     times = []
     chaser_pos = []
@@ -239,8 +264,26 @@ def simulate_pursuit(
             desired_target_size=desired_bbox_px
         )
 
-        # 2. Compute 4-DOF velocity setpoint with 3D SO(3) attitude decoupling
-        cmd = controller.compute_cmd(telem, drone_pitch=sim.pitch, drone_roll=sim.roll, dt=dt)
+        # 2. Compute 4-DOF velocity setpoint
+        if RecurrentVisualServoController is not None and isinstance(controller, RecurrentVisualServoController):
+            c, s = np.cos(sim.yaw), np.sin(sim.yaw)
+            vx_b = c * sim.vel[0] + s * sim.vel[1]
+            vy_b = -s * sim.vel[0] + c * sim.vel[1]
+            vz_b = sim.vel[2]
+            v_body = np.array([vx_b, vy_b, vz_b], dtype=np.float64)
+            alt_agl = -sim.pos[2]
+
+            cmd = controller.compute_cmd(
+                telem,
+                drone_pitch=sim.pitch,
+                drone_roll=sim.roll,
+                dt=dt,
+                vehicle_vel=v_body,
+                vehicle_yaw_rate=sim.yaw_rate,
+                current_alt_m=alt_agl
+            )
+        else:
+            cmd = controller.compute_cmd(telem, drone_pitch=sim.pitch, drone_roll=sim.roll, dt=dt)
 
         # 3. Advance drone flight physics
         obs = sim.step(cmd)
@@ -629,9 +672,13 @@ def render_movie_frames(
     # Copy to artifact directories for user review
     for adir in ARTIFACT_DIRS:
         if adir.exists():
-            shutil.copy(output_mp4_path, adir / output_mp4_path.name)
+            dst_mp4 = adir / output_mp4_path.name
+            if output_mp4_path.resolve() != dst_mp4.resolve():
+                shutil.copy(output_mp4_path, dst_mp4)
             if output_gif_path and output_gif_path.exists():
-                shutil.copy(output_gif_path, adir / output_gif_path.name)
+                dst_gif = adir / output_gif_path.name
+                if output_gif_path.resolve() != dst_gif.resolve():
+                    shutil.copy(output_gif_path, dst_gif)
 
 
 # ==============================================================================
@@ -646,17 +693,24 @@ def generate_chase_movie(
     fps: int = 25,
     seed: int = 42,
     enable_lateral_strafe: bool = True,
+    controller_type: str = "pid",
+    model_path: Optional[Union[str, Path]] = None,
 ):
     """
     Primary interface for batch scripts and test suites.
     Simulates the pursuit and renders the 2D top-down movie.
     """
     traj_fn, title = get_target_trajectory(trajectory_name, duration=total_time_s, seed=seed)
+    ctrl_label = "Learned Recurrent PPO" if controller_type.lower() in ("recurrent_ppo", "rl", "recurrent") else "Classical Visual Servoing (PID)"
+    title = f"{title} [{ctrl_label}]"
+
     sim_data = simulate_pursuit(
         trajectory_fn=traj_fn,
         duration=total_time_s,
         dt=0.02,
-        enable_lateral_strafe=enable_lateral_strafe
+        enable_lateral_strafe=enable_lateral_strafe,
+        controller_type=controller_type,
+        model_path=model_path,
     )
     render_movie_frames(
         sim_data=sim_data,
@@ -675,6 +729,9 @@ if __name__ == "__main__":
     parser.add_argument("--duration", type=float, default=25.0, help="Duration in seconds (default: 25.0)")
     parser.add_argument("--fps", type=int, default=25, help="Video framerate (default: 25)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for stochastic trajectory")
+    parser.add_argument("--controller", type=str, default="pid", choices=["pid", "recurrent_ppo", "rl"],
+                        help="Controller policy: 'pid' or 'recurrent_ppo' / 'rl'")
+    parser.add_argument("--model", type=str, default=None, help="Path to trained policy .zip")
     parser.add_argument("--out", type=str, default=None, help="Output MP4 file path")
     parser.add_argument("--gif", action="store_true", help="Also generate an animated GIF")
     parser.add_argument("--no-lateral-strafe", action="store_true", help="Disable 4-DOF lateral strafe (3-DOF classic mode)")
@@ -707,5 +764,7 @@ if __name__ == "__main__":
         total_time_s=args.duration,
         fps=args.fps,
         seed=args.seed,
-        enable_lateral_strafe=(not args.no_lateral_strafe)
+        enable_lateral_strafe=(not args.no_lateral_strafe),
+        controller_type=args.controller,
+        model_path=args.model,
     )

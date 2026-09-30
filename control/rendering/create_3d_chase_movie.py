@@ -19,7 +19,7 @@ import shutil
 import argparse
 import subprocess
 from pathlib import Path
-from typing import Optional, Callable
+from typing import Optional, Callable, Union
 import numpy as np
 
 # Ensure project root is on sys.path
@@ -335,17 +335,24 @@ def generate_3d_chase_movie(
     fps: int = 25,
     seed: int = 42,
     enable_lateral_strafe: bool = True,
+    controller_type: str = "pid",
+    model_path: Optional[Union[str, Path]] = None,
 ):
     """
     Primary interface for batch scripts and test suites.
     Simulates the pursuit and renders the 3D spatial movie.
     """
     traj_fn, title = get_target_trajectory(trajectory_name, duration=total_time_s, seed=seed)
+    ctrl_label = "Learned Recurrent PPO" if controller_type.lower() in ("recurrent_ppo", "rl", "recurrent") else "Classical Visual Servoing (PID)"
+    title = f"{title} [{ctrl_label}]"
+
     sim_data = simulate_pursuit(
         trajectory_fn=traj_fn,
         duration=total_time_s,
         dt=0.02,
-        enable_lateral_strafe=enable_lateral_strafe
+        enable_lateral_strafe=enable_lateral_strafe,
+        controller_type=controller_type,
+        model_path=model_path,
     )
     render_3d_movie_frames(
         sim_data=sim_data,
@@ -363,6 +370,9 @@ if __name__ == "__main__":
     parser.add_argument("--duration", type=float, default=20.0, help="Duration in seconds (default: 20.0)")
     parser.add_argument("--fps", type=int, default=25, help="Video framerate (default: 25)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for stochastic trajectory")
+    parser.add_argument("--controller", type=str, default="pid", choices=["pid", "recurrent_ppo", "rl"],
+                        help="Controller policy: 'pid' or 'recurrent_ppo' / 'rl'")
+    parser.add_argument("--model", type=str, default=None, help="Path to trained policy .zip")
     parser.add_argument("--out", type=str, default=None, help="Output MP4 file path")
     parser.add_argument("--gif", action="store_true", help="Also generate an animated GIF")
     args = parser.parse_args()
@@ -373,7 +383,7 @@ if __name__ == "__main__":
     if args.out:
         mp4_path = Path(args.out)
     else:
-        mp4_path = out_dir / f"chase_3d_{args.profile}_seed{args.seed}.mp4"
+        mp4_path = out_dir / f"chase_3d_{args.profile}_{args.controller}_seed{args.seed}.mp4"
 
     gif_path = mp4_path.with_suffix(".gif") if args.gif else None
 
@@ -383,5 +393,7 @@ if __name__ == "__main__":
         trajectory_name=args.profile,
         total_time_s=args.duration,
         fps=args.fps,
-        seed=args.seed
+        seed=args.seed,
+        controller_type=args.controller,
+        model_path=args.model,
     )

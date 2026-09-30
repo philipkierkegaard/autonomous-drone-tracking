@@ -90,6 +90,16 @@ control-model/
 !perception/weights/yolov8n_v3_best.pt
 perception/yolov8n.pt
 
+# RL Control Weights (*.zip): ignore all checkpoints, runs, and eval archives, tracking only the best models
+control/weights/**
+!control/weights/
+!control/weights/recurrent_ppo_continuous_potential/
+!control/weights/recurrent_ppo_continuous_potential/best_model/
+!control/weights/recurrent_ppo_continuous_potential/best_model/best_model.zip
+!control/weights/recurrent_ppo_gen5/
+!control/weights/recurrent_ppo_gen5/best_model/
+!control/weights/recurrent_ppo_gen5/best_model/best_model.zip
+
 # Training runs, validation batches, and experiment logs
 runs/
 perception/runs/

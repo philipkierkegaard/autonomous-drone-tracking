@@ -24,8 +24,10 @@ if str(CURRENT_DIR) not in sys.path:
 
 try:
     from control.simulation import FastPixhawkQuadSim
+    from control.spatial import unproject_camera_to_horizon
 except ImportError:
     from simulation import FastPixhawkQuadSim
+    from spatial import unproject_camera_to_horizon
 
 
 # ==============================================================================
@@ -51,9 +53,9 @@ class KinematicVisualServoController:
         camera_uptilt_deg: float = 15.0,
         hfov_deg: float = 60.0,
         vfov_deg: float = 45.0,
-        desired_bbox_size: float = 35.0,     # Desired target bounding box size (pixels, 640x480 frame)
-        desired_standoff_dist: float = 6.0,  # Backward-compatible distance in meters (when use_bbox_size=False)
-        use_bbox_size: bool = True,          # If True, regulates bounding-box size instead of metric distance
+        desired_bbox_size: float = 32.33,    # Desired target bounding box size (pixels, 640x480 frame at 6.0m standoff)
+        desired_standoff_dist: float = 6.0,  # Target standoff distance in meters (6.0m)
+        use_bbox_size: bool = False,         # If False, regulates direct metric distance (6.0m)
         # 3D/4D PID Gains: [Forward (X), Lateral (Y), Vertical (Z), Yaw (Psi)]
         kp: np.ndarray = None,
         ki: np.ndarray = None,
@@ -66,13 +68,13 @@ class KinematicVisualServoController:
         ki_z: float = None,
         kd_z: float = None,
         # Output Saturation Limits per axis: [Forward, Lateral, Vertical, Yaw]
-        min_limits: np.ndarray = None,       # Default: [-2.0 m/s fwd (reverse brake), -4.0 m/s lat, -3.5 m/s climb, -120 deg/s yaw]
-        max_limits: np.ndarray = None,       # Default: [18.0 m/s fwd, +4.0 m/s lat, +2.5 m/s desc, +120 deg/s yaw]
+        min_limits: np.ndarray = None,       # Default: [-5.0 m/s fwd (reverse brake), -6.0 m/s lat, -4.0 m/s climb, -120 deg/s yaw]
+        max_limits: np.ndarray = None,       # Default: [15.0 m/s fwd, +6.0 m/s lat, +2.5 m/s desc, +120 deg/s yaw]
         # Integrator Anti-Windup Clamping Bounds
         int_limits: np.ndarray = None,       # Forward and Lateral integrators are 0.0 (kinematic surge + PD sway)
         # Acceleration & Slew Rate Limits (Calibrated for ~2 kg quadrotor flight envelope)
         max_accel: float = 6.5,              # m/s^2 forward acceleration (calibrated ~33.5 deg tilt ramp for 2 kg quad)
-        max_decel: float = 2.8,              # m/s^2 calibrated braking (tightens standoff tracking without tilting camera out of FOV)
+        max_decel: float = 5.0,              # m/s^2 calibrated braking deceleration (matched identically to RL envelope)
         max_accel_z: float = 3.0,            # m/s^2 vertical climb/descent acceleration limit
         max_accel_yaw: float = 180.0,        # deg/s^2 yaw angular acceleration limit
         filter_tau: float = 0.06,            # Derivative low-pass filter time constant (seconds)
@@ -81,7 +83,7 @@ class KinematicVisualServoController:
         enable_lateral_strafe: bool = True,
         kp_lat: float = 2.5,                 # Lateral proportional gain (m/s per unit error_x)
         kd_lat: float = 0.35,                # Lateral derivative damping (counteracts roll-induced visual swings)
-        max_lat_vel: float = 4.0,            # Maximum lateral velocity in m/s (enables pacing crossing targets up to 4 m/s)
+        max_lat_vel: float = 6.0,            # Maximum lateral velocity in m/s (matched identically to RL envelope)
         max_lat_accel: float = 5.0,          # Maximum lateral acceleration in m/s^2 for agile roll initiation
     ):
         self.camera_uptilt = np.deg2rad(camera_uptilt_deg)
@@ -133,12 +135,12 @@ class KinematicVisualServoController:
                 self.min_limits = np.array(min_limits, dtype=np.float64)
             elif len(min_limits) == 3:
                 # [vx_min, vz_min, yaw_min] -> allow active reverse braking if vx_min == 0.0
-                vx_min = float(min_limits[0]) if min_limits[0] < 0.0 else -2.0
+                vx_min = float(min_limits[0]) if min_limits[0] < 0.0 else -5.0
                 self.min_limits = np.array([vx_min, -lat_limit, min_limits[1], min_limits[2]], dtype=np.float64)
             else:
-                self.min_limits = np.array([-2.0, -lat_limit, -3.5, -yaw_limit], dtype=np.float64)
+                self.min_limits = np.array([-5.0, -lat_limit, -4.0, -yaw_limit], dtype=np.float64)
         else:
-            self.min_limits = np.array([-2.0, -lat_limit, -3.5, -yaw_limit], dtype=np.float64)
+            self.min_limits = np.array([-5.0, -lat_limit, -4.0, -yaw_limit], dtype=np.float64)
 
         if max_limits is not None:
             if len(max_limits) == 4:
@@ -146,9 +148,9 @@ class KinematicVisualServoController:
             elif len(max_limits) == 3:
                 self.max_limits = np.array([max_limits[0], lat_limit, max_limits[1], max_limits[2]], dtype=np.float64)
             else:
-                self.max_limits = np.array([18.0, lat_limit, 2.5, yaw_limit], dtype=np.float64)
+                self.max_limits = np.array([15.0, lat_limit, 2.5, yaw_limit], dtype=np.float64)
         else:
-            self.max_limits = np.array([18.0, lat_limit, 2.5, yaw_limit], dtype=np.float64)
+            self.max_limits = np.array([15.0, lat_limit, 2.5, yaw_limit], dtype=np.float64)
 
         if int_limits is not None:
             if len(int_limits) == 4:
@@ -236,37 +238,15 @@ class KinematicVisualServoController:
         # ----------------------------------------------------------------------
         # 1. 3D RAY BACK-PROJECTION (FULL SO(3) DECOUPLING)
         # ----------------------------------------------------------------------
-        # Reconstruct unit sightline ray in Camera optical frame [Right, Down, Forward]
-        rx_cam = err_x * self.half_hfov
-        ry_cam = err_y * self.half_vfov
-        rz_cam = 1.0
-
-        # Un-tilt camera mount (+15 deg) to Body frame [Forward, Right, Down]
-        cu, su = np.cos(self.camera_uptilt), np.sin(self.camera_uptilt)
-        rx_body = cu * rz_cam + su * ry_cam   # Body Forward
-        ry_body = rx_cam                      # Body Right
-        rz_body = cu * ry_cam - su * rz_cam   # Body Down
-
-        # Un-roll body (drone_roll around Body Forward axis)
-        cr, sr = np.cos(drone_roll), np.sin(drone_roll)
-        ry_unrolled =  cr * ry_body - sr * rz_body
-        rz_unrolled =  sr * ry_body + cr * rz_body
-
-        # Un-pitch body (drone_pitch around Horizon Right axis: nose-down is pitch > 0)
-        cp, sp = np.cos(drone_pitch), np.sin(drone_pitch)
-        rx_horizon =  cp * rx_body - sp * rz_unrolled
-        rz_horizon =  sp * rx_body + cp * rz_unrolled
-        ry_horizon = ry_unrolled
-
-        # Exact Horizon-Stabilized Error Angles (rad)
-        azimuth_horizon = float(np.arctan2(ry_horizon, rx_horizon))      # + right, - left
-        elevation_horizon = float(np.arctan2(rz_horizon, rx_horizon))    # + down, - up
-
-        # Guard against +/- 90 deg tangent singularity when target is abeam or behind
-        if rx_horizon > 0.05:
-            err_x_horizon = float(np.clip((ry_horizon / rx_horizon) / self.half_hfov, -1.0, 1.0))
-        else:
-            err_x_horizon = 1.0 if ry_horizon >= 0.0 else -1.0
+        err_x_horizon, err_y_horizon, azimuth_horizon, elevation_horizon = unproject_camera_to_horizon(
+            err_x=err_x,
+            err_y=err_y,
+            drone_pitch=drone_pitch,
+            drone_roll=drone_roll,
+            camera_uptilt_rad=self.camera_uptilt,
+            half_hfov=self.half_hfov,
+            half_vfov=self.half_vfov,
+        )
 
         # 2. Scale / Range Error (Bounding Box Pixels vs Metric Meters)
         if self.use_bbox_size:
