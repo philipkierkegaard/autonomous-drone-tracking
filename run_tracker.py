@@ -19,6 +19,7 @@ import asyncio
 import threading
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple, Union
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
 import cv2
 import numpy as np
@@ -179,8 +180,121 @@ class AutonomousTrackerNode:
                 self.record_path.parent.mkdir(parents=True, exist_ok=True)
             print(f"[RECORD] Target video recording destination: {self.record_path}")
 
+        # 5. Live MJPEG Web Streamer Setup (Browser / SSH Port Forwarding)
+        self.stream_server: Optional[ThreadingHTTPServer] = None
+        self.latest_jpeg: Optional[bytes] = None
+        self.jpeg_lock = threading.Lock()
+        if getattr(args, "stream", False):
+            self._start_stream_server(int(getattr(args, "stream_port", 8080)))
+
         if self.args.dry_run:
             self.vehicle_state.altitude_rel_m = float(args.sim_alt)
+
+    def _start_stream_server(self, port: int):
+        """Starts a background HTTP MJPEG stream server for live browser viewing over SSH or USB-C."""
+        node = self
+
+        class MJPEGHandler(BaseHTTPRequestHandler):
+            def log_message(self, format, *args):
+                pass  # Suppress noisy HTTP request logging in terminal
+
+            def do_GET(self):
+                if self.path in ("/", "/index.html"):
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.end_headers()
+                    html = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Autonomous Drone Pursuit - Live Stream</title>
+    <style>
+        body {{
+            background: #0f141c;
+            color: #ecf0f1;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            margin: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+        }}
+        .header {{
+            margin-bottom: 12px;
+            text-align: center;
+        }}
+        h1 {{
+            margin: 0 0 4px 0;
+            font-size: 20px;
+            letter-spacing: 1px;
+            color: #00d2d3;
+        }}
+        .status {{
+            font-size: 13px;
+            color: #a4b0be;
+        }}
+        .video-box {{
+            box-shadow: 0 8px 32px rgba(0, 210, 211, 0.15);
+            border: 2px solid #2f3542;
+            border-radius: 8px;
+            overflow: hidden;
+            background: #000;
+            max-width: 95vw;
+            max-height: 85vh;
+        }}
+        img {{
+            display: block;
+            max-width: 100%;
+            height: auto;
+        }}
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>AUTONOMOUS DRONE TRACKING & SERVOING</h1>
+        <div class="status">&#9679; LIVE HUD & INFERENCE STREAM (PORT {port})</div>
+    </div>
+    <div class="video-box">
+        <img src="/stream" alt="Live Companion Stream" />
+    </div>
+</body>
+</html>"""
+                    self.wfile.write(html.encode("utf-8"))
+
+                elif self.path == "/stream":
+                    self.send_response(200)
+                    self.send_header("Age", "0")
+                    self.send_header("Cache-Control", "no-cache, private")
+                    self.send_header("Pragma", "no-cache")
+                    self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=FRAME")
+                    self.end_headers()
+                    try:
+                        while node.running:
+                            with node.jpeg_lock:
+                                jpeg_bytes = node.latest_jpeg
+                            if jpeg_bytes is not None:
+                                self.wfile.write(b"--FRAME\r\n")
+                                self.send_header("Content-Type", "image/jpeg")
+                                self.send_header("Content-Length", str(len(jpeg_bytes)))
+                                self.end_headers()
+                                self.wfile.write(jpeg_bytes)
+                                self.wfile.write(b"\r\n")
+                            time.sleep(0.033)  # ~30 FPS broadcast cadence
+                    except (ConnectionResetError, BrokenPipeError):
+                        pass
+                else:
+                    self.send_error(404)
+
+        try:
+            self.stream_server = ThreadingHTTPServer(("0.0.0.0", port), MJPEGHandler)
+            stream_thread = threading.Thread(target=self.stream_server.serve_forever, daemon=True)
+            stream_thread.start()
+            print(f"[STREAM] Live MJPEG web stream active at: http://0.0.0.0:{port}/")
+            print(f"         On your Mac, open: http://192.168.55.1:{port}/")
+        except Exception as e:
+            print(f"[WARN] Failed to start HTTP stream server on port {port}: {e}")
+
 
     async def telemetry_listener(self):
         """Asynchronously streams telemetry from Pixhawk EKF2 over MAVLink."""
@@ -683,6 +797,13 @@ class AutonomousTrackerNode:
                 cmd_safe = getattr(self, "latest_cmd_safe", np.zeros(3))
                 display_frame = self.draw_flight_hud(frame, telemetry, cmd_safe, 1.0 / max(1.0, fps))
 
+                # Live Web Stream: broadcast latest annotated HUD frame to browser / SSH port forward
+                if self.stream_server is not None and new_frame_available:
+                    ret_enc, buf = cv2.imencode(".jpg", display_frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                    if ret_enc:
+                        with self.jpeg_lock:
+                            self.latest_jpeg = buf.tobytes()
+
                 # Video Recording: write each uniquely processed frame with HUD and bounding box
                 if self.record_path is not None and new_frame_available:
                     if self.video_writer is None:
@@ -814,6 +935,14 @@ class AutonomousTrackerNode:
                 self.video_writer = None
                 print(f"[RECORD] ✓ Tracked video successfully saved to: {self.record_path}")
 
+            # Shutdown live MJPEG stream server
+            if self.stream_server is not None:
+                try:
+                    self.stream_server.shutdown()
+                except Exception:
+                    pass
+                self.stream_server = None
+
             # Send safe zero-velocity holding command to Pixhawk before exit
             if self.drone and not self.args.dry_run and self.vehicle_state.is_connected:
                 print("[SAFETY] Sending zero velocity holding command to Pixhawk...")
@@ -886,6 +1015,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--cam-fps", type=int, default=30,
         help="Camera framerate (default: 30)."
+    )
+    parser.add_argument(
+        "--stream", action="store_true",
+        help="Enable live HTTP MJPEG stream (viewable in Mac browser at http://192.168.55.1:8080 or http://localhost:8080 via SSH port forward)."
+    )
+    parser.add_argument(
+        "--stream-port", type=int, default=8080,
+        help="HTTP port for live MJPEG stream (default: 8080)."
     )
 
     # Controller & Flight Tuning Options
