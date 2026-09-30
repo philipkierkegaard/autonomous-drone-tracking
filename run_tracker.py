@@ -27,19 +27,22 @@ import numpy as np
 
 def build_jetson_csi_pipeline(
     sensor_id: int = 0,
-    capture_width: int = 1920,
-    capture_height: int = 1080,
+    capture_width: int = 3840,
+    capture_height: int = 2160,
     framerate: int = 30,
     flip_method: int = 0,
     display_width: int = 1280,
     display_height: int = 720,
+    ee_strength: float = 1.0,
 ) -> str:
     """
-    Builds hardware-accelerated GStreamer pipeline for NVIDIA Jetson CSI cameras
-    using nvarguscamerasrc and Tegra ISP hardware debayering/scaling.
+    Builds hardware-accelerated GStreamer pipeline for NVIDIA Jetson CSI cameras.
+    Locks into the sensor's exact native hardware mode (3840x2160 @ 30fps or 1920x1080 @ 60fps),
+    activates Tegra ISP Edge Enhancement (sharpening), and supersamples down to display resolution
+    using nvvidconv for pin-sharp clarity.
     """
     return (
-        f"nvarguscamerasrc sensor-id={sensor_id} ! "
+        f"nvarguscamerasrc sensor-id={sensor_id} ee-mode=2 ee-strength={ee_strength} tnr-mode=1 tnr-strength=0.0 ! "
         f"video/x-raw(memory:NVMM), width=(int){capture_width}, height=(int){capture_height}, "
         f"format=(string)NV12, framerate=(fraction){framerate}/1 ! "
         f"nvvidconv flip-method={flip_method} ! "
@@ -533,6 +536,14 @@ class AutonomousTrackerNode:
                 return cap
             print("[WARN] Custom GStreamer pipeline failed to open.")
 
+        # Determine exact native hardware mode for Jetson camera sensor:
+        # Hardware Mode 0: 3840x2160 @ 30fps (full native sensor supersampling)
+        # Hardware Mode 1: 1920x1080 @ 60fps (high-speed tracking)
+        if cam_fps >= 50:
+            sensor_cap_w, sensor_cap_h, sensor_fps = 1920, 1080, 60
+        else:
+            sensor_cap_w, sensor_cap_h, sensor_fps = 3840, 2160, 30
+
         # 2. CSI Camera explicitly requested (--csi or --source csi / csi:0)
         use_csi = getattr(self.args, "csi", False) or source_str.lower().startswith("csi")
         if use_csi:
@@ -544,14 +555,14 @@ class AutonomousTrackerNode:
                     sensor_id = 0
             pipe = build_jetson_csi_pipeline(
                 sensor_id=sensor_id,
-                capture_width=1920,
-                capture_height=1080,
-                framerate=cam_fps,
+                capture_width=sensor_cap_w,
+                capture_height=sensor_cap_h,
+                framerate=sensor_fps,
                 flip_method=cam_flip,
                 display_width=cam_w,
                 display_height=cam_h,
             )
-            print(f"[VISION] Opening Jetson CSI camera (sensor-id={sensor_id}) via nvarguscamerasrc...")
+            print(f"[VISION] Opening Jetson CSI camera (sensor-id={sensor_id}, Mode: {sensor_cap_w}x{sensor_cap_h}@{sensor_fps}fps) via nvarguscamerasrc...")
             cap = cv2.VideoCapture(pipe, cv2.CAP_GSTREAMER)
             if cap.isOpened():
                 ret, test_frame = cap.read()
@@ -592,9 +603,9 @@ class AutonomousTrackerNode:
                         cap.release()
                         pipe = build_jetson_csi_pipeline(
                             sensor_id=src_idx,
-                            capture_width=1920,
-                            capture_height=1080,
-                            framerate=cam_fps,
+                            capture_width=sensor_cap_w,
+                            capture_height=sensor_cap_h,
+                            framerate=sensor_fps,
                             flip_method=cam_flip,
                             display_width=cam_w,
                             display_height=cam_h,
@@ -603,7 +614,7 @@ class AutonomousTrackerNode:
                         if csi_cap.isOpened():
                             ret_csi, test_csi = csi_cap.read()
                             if ret_csi and test_csi is not None and not is_zero_yuv_green_frame(test_csi):
-                                print("[VISION] Successfully recovered Jetson CSI camera via nvarguscamerasrc!")
+                                print(f"[VISION] Successfully recovered Jetson CSI camera via nvarguscamerasrc ({sensor_cap_w}x{sensor_cap_h})!")
                                 return csi_cap
                             csi_cap.release()
                         print("[WARN] nvarguscamerasrc auto-recovery failed. Re-opening standard capture.")
