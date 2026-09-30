@@ -99,6 +99,9 @@ control/weights/**
 !control/weights/recurrent_ppo_gen5/
 !control/weights/recurrent_ppo_gen5/best_model/
 !control/weights/recurrent_ppo_gen5/best_model/best_model.zip
+!control/weights/recurrent_ppo_gen5_calibrated/
+!control/weights/recurrent_ppo_gen5_calibrated/best_model/
+!control/weights/recurrent_ppo_gen5_calibrated/best_model/best_model.zip
 
 # Training runs, validation batches, and experiment logs
 runs/

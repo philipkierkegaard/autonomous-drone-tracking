@@ -123,6 +123,22 @@ class AutonomousTrackerNode:
         self.latest_cmd_safe = np.zeros(3, dtype=np.float64)
         self.vision_thread: Optional[threading.Thread] = None
 
+        # 4. Video Recording Setup (HUD & Bounding Boxes)
+        self.record_path: Optional[Path] = None
+        self.video_writer: Optional[cv2.VideoWriter] = None
+        self.record_fps: float = float(getattr(args, "record_fps", 30.0))
+        if getattr(args, "record", None):
+            if args.record == "auto":
+                from datetime import datetime
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                rec_dir = ROOT_DIR / "outputs" / "recordings"
+                rec_dir.mkdir(parents=True, exist_ok=True)
+                self.record_path = rec_dir / f"flight_tracking_{timestamp}.mp4"
+            else:
+                self.record_path = Path(args.record)
+                self.record_path.parent.mkdir(parents=True, exist_ok=True)
+            print(f"[RECORD] Target video recording destination: {self.record_path}")
+
         if self.args.dry_run:
             self.vehicle_state.altitude_rel_m = float(args.sim_alt)
 
@@ -499,25 +515,44 @@ class AutonomousTrackerNode:
 
     async def display_loop(self):
         """
-        GUI rendering and user input listener (or periodic headless telemetry console logger).
+        GUI rendering, user input listener, and video recording loop (or periodic headless telemetry console logger).
         Runs cooperatively on the main asyncio thread.
         """
         last_log_time = time.perf_counter()
 
         while self.running:
-            if not self.args.headless:
-                with self.perception_state.lock:
+            new_frame_available = False
+            with self.perception_state.lock:
+                if self.perception_state.has_new_frame:
+                    frame = self.perception_state.latest_frame
+                    telemetry = dict(self.perception_state.telemetry)
+                    fps = self.perception_state.fps
+                    is_stale = self.perception_state.is_stale
+                    self.perception_state.has_new_frame = False
+                    new_frame_available = True
+                else:
                     frame = self.perception_state.latest_frame
                     telemetry = dict(self.perception_state.telemetry)
                     fps = self.perception_state.fps
                     is_stale = self.perception_state.is_stale
 
-                if frame is not None:
-                    if is_stale:
-                        telemetry["status"] = "STALE (WD)"
+            if frame is not None:
+                if is_stale:
+                    telemetry["status"] = "STALE (WD)"
 
-                    cmd_safe = getattr(self, "latest_cmd_safe", np.zeros(3))
-                    display_frame = self.draw_flight_hud(frame, telemetry, cmd_safe, 1.0 / max(1.0, fps))
+                cmd_safe = getattr(self, "latest_cmd_safe", np.zeros(3))
+                display_frame = self.draw_flight_hud(frame, telemetry, cmd_safe, 1.0 / max(1.0, fps))
+
+                # Video Recording: write each uniquely processed frame with HUD and bounding box
+                if self.record_path is not None and new_frame_available:
+                    if self.video_writer is None:
+                        h, w = display_frame.shape[:2]
+                        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                        self.video_writer = cv2.VideoWriter(str(self.record_path), fourcc, self.record_fps, (w, h))
+                        print(f"[RECORD] Video writer initialized: {self.record_path} ({w}x{h} @ {self.record_fps:.1f} FPS)")
+                    self.video_writer.write(display_frame)
+
+                if not self.args.headless:
                     cv2.imshow("Autonomous Drone Tracker - Companion Node", display_frame)
 
                     key = cv2.waitKey(1) & 0xFF
@@ -526,8 +561,7 @@ class AutonomousTrackerNode:
                         self.running = False
                         break
 
-                await asyncio.sleep(0.02)  # ~50 Hz check for responsive display and key input
-            else:
+            if self.args.headless:
                 now = time.perf_counter()
                 if now - last_log_time >= 0.5:  # 2 Hz clean telemetry log
                     last_log_time = now
@@ -551,7 +585,7 @@ class AutonomousTrackerNode:
                           f"Size: {sz:4.0f}px | "
                           f"Cmd: [vx={cmd[0]:4.1f}, vz={cmd[1]:+4.2f}, yaw={cmd[2]:+5.1f}]")
 
-                await asyncio.sleep(0.05)
+            await asyncio.sleep(0.01)  # ~100 Hz responsive check
 
     async def run(self):
         """Entry point that coordinates the decoupled threads and asyncio tasks."""
@@ -634,6 +668,12 @@ class AutonomousTrackerNode:
             if not self.args.headless:
                 cv2.destroyAllWindows()
 
+            # Flush and release video recording
+            if self.video_writer is not None:
+                self.video_writer.release()
+                self.video_writer = None
+                print(f"[RECORD] ✓ Tracked video successfully saved to: {self.record_path}")
+
             # Send safe zero-velocity holding command to Pixhawk before exit
             if self.drone and not self.args.dry_run and self.vehicle_state.is_connected:
                 print("[SAFETY] Sending zero velocity holding command to Pixhawk...")
@@ -657,14 +697,19 @@ def parse_args() -> argparse.Namespace:
         "--source", type=str, default="0",
         help="Video source: camera index (e.g. '0'), video file path, or GStreamer string."
     )
-    parser.add_argument(
-        "--weights", type=str,
-        default=str(DETECTION_DIR / "runs/detect/yolov8n_drone/weights/best.pt"),
-        help="Path to trained YOLOv8 drone detector weights."
+    default_weights = (
+        str(DETECTION_DIR / "weights/yolov8n_v3_best.pt")
+        if (DETECTION_DIR / "weights/yolov8n_v3_best.pt").exists()
+        else str(DETECTION_DIR / "runs/detect/yolov8n_drone/weights/best.pt")
     )
     parser.add_argument(
-        "--conf", type=float, default=0.40,
-        help="YOLO detection confidence threshold."
+        "--weights", type=str,
+        default=default_weights,
+        help=f"Path to trained YOLOv8 drone detector weights (default: {default_weights})."
+    )
+    parser.add_argument(
+        "--conf", type=float, default=0.35,
+        help="YOLO detection confidence threshold (default: 0.35)."
     )
     parser.add_argument(
         "--target-size", type=float, default=35.0,
@@ -673,6 +718,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-lost-frames", type=int, default=15,
         help="Consecutive missed frames before Kalman track transitions from COASTING to SEARCHING."
+    )
+    parser.add_argument(
+        "--record", nargs="?", const="auto", default=None,
+        help="Record video with bounding boxes and flight HUD. Pass flag alone ('--record') to auto-generate timestamped MP4 in outputs/recordings/, or provide a path ('--record my_flight.mp4')."
+    )
+    parser.add_argument(
+        "--record-fps", type=float, default=30.0,
+        help="Recording framerate in FPS (default: 30.0)."
     )
 
     # Controller & Flight Tuning Options

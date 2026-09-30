@@ -739,35 +739,46 @@ class DronePursuitEnv(gym.Env):
         # Clean potential-invariant penalty when lost: encourages finding target without oscillatory spinning
         r_recovery = 0.0 if raw_in_view else -0.10
 
-        # D. Sprint Time Incentive:
+        # D. Direct In-Basket Continuous Dwell Holding Reward:
+        # Awards +2.0/step (+100.0/s) continuously while inside the exact 5.0m - 7.0m benchmark basket.
+        # Creates an immediate step-level incentive to avoid creeping below 5.0m or drifting past 7.0m.
+        r_basket_dwell = 2.0 if in_basket else 0.0
+
+        # E. Sprint Time Incentive:
         r_time = 0.0 if self.milestone_1s_awarded else -0.05
 
         self.prev_trail_error = d_trail
         self.prev_distance_error = dist_err
 
-        # E. Proximity & Altitude Soft Barriers
+        # F. Proximity & Altitude Soft Barriers
+        # Continuous two-tier proximity repeller:
+        # - Tier 1: Soft under-standoff cushion between 3.0m and 5.0m prevents creeping inside the 5.0m basket floor.
+        # - Tier 2: Steep quadratic barrier below 3.0m prevents physical collision breach (< 1.2m).
         if dist < 3.0 and dist >= self.collision_dist:
-            p_proximity = 4.0 * ((3.0 - dist) / (3.0 - self.collision_dist)) ** 2
+            p_proximity = 2.0 + 4.0 * ((3.0 - dist) / (3.0 - self.collision_dist)) ** 2
+        elif dist < 5.0 and dist >= 3.0:
+            p_proximity = 2.0 * ((5.0 - dist) / 2.0) ** 2
         else:
             p_proximity = 0.0
 
         alt_agl = -self.sim.pos[2]
         p_low_alt = 1.5 * max(0.0, self.safe_altitude_cushion - alt_agl)**2
 
-        # F. Flight Dynamics Regularization
+        # G. Flight Dynamics Regularization
         # 1. Action Slew / Jerk Penalty
         action_diff_sq = float(np.sum((action - self.last_action)**2))
         p_jerk = 0.02 * action_diff_sq
         self.last_action = action.copy()
 
-        # 2. Asymmetric Control Effort Regularization:
-        # Zero effort penalty for positive forward acceleration (a[0] > 0), allowing full sprint up to 15 m/s.
-        p_effort = 0.02 * float(max(0.0, -action[0])**2) + 0.01 * float(action[2]**2) + 0.02 * float(action[1]**2 + action[3]**2)
+        # 2. Symmetric Low-Gain Control Effort Regularization:
+        # Treats acceleration and deceleration symmetrically, allowing the drone to comfortably
+        # command a0 = -0.15 (3.5 m/s) on cruising targets without incurring asymmetric braking penalties.
+        p_effort = 0.01 * float(action[0]**2) + 0.01 * float(action[2]**2) + 0.02 * float(action[1]**2 + action[3]**2)
 
         # Step Reward Total
         step_reward = (
             r_tracking_base + r_trail_potential + r_progress
-            + r_recovery + r_milestone + r_time
+            + r_basket_dwell + r_recovery + r_milestone + r_time
             - p_proximity - p_low_alt - p_jerk - p_effort
             + terminal_reward
         )
@@ -788,6 +799,7 @@ class DronePursuitEnv(gym.Env):
             "termination_reason": termination_reason,
             "r_tracking_base": float(r_tracking_base),
             "r_basket": float(r_basket),
+            "r_basket_dwell": float(r_basket_dwell),
             "r_trail_potential": float(r_trail_potential),
             "r_progress": float(r_progress),
             "r_recovery": float(r_recovery),
