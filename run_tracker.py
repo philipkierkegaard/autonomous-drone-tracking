@@ -37,12 +37,13 @@ for p in (ROOT_DIR, CONTROL_DIR, DETECTION_DIR):
 from perception.pipeline import DroneTrackingPipeline
 from control.pid_controller import KinematicVisualServoController
 
-# Conditional MAVSDK Import (enables desktop testing without MAVSDK installed)
+# Conditional MAVSDK Import (enables desktop testing without MAVSDK installed or on linker failure)
 try:
     from mavsdk import System
     from mavsdk.offboard import VelocityBodyYawspeed, OffboardError
     MAVSDK_AVAILABLE = True
-except ImportError:
+except Exception as e:
+    print(f"[WARN] Could not initialize MAVSDK ({e}). Falling back to DRY-RUN mode.")
     MAVSDK_AVAILABLE = False
 
 
