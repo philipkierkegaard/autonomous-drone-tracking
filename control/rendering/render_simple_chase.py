@@ -77,30 +77,60 @@ def render_simple_chase_video(
     encounter: str = "crossing_right",
     target_init_pos: Optional[list] = None,
     target_init_heading_deg: Optional[float] = None,
+    chaser_init_pos: Optional[list] = None,
+    chaser_init_yaw: float = 0.0,
     seed: int = 42,
     controller_type: str = "pid",
     model_path: Optional[Union[str, Path]] = None,
     output_gif_path: Optional[Path] = None,
     fixed_bounds: Optional[Tuple[float, float, float]] = None,
+    scenario_title: Optional[str] = None,
 ):
     dt_sim = 0.02  # 50 Hz simulation loop
     total_sim_steps = int(round(duration / dt_sim))
     sim_steps_per_frame = max(1, int(round((1.0 / fps) / dt_sim)))
 
     is_rl = controller_type.lower() in ("recurrent_ppo", "rl", "recurrent")
-    ctrl_label = "Learned Recurrent PPO (Gen 4)" if is_rl else "Classical Visual Servoing (PID)"
-    ctrl_short = "Gen 4 RL" if is_rl else "PID"
+    if is_rl:
+        model_str = str(model_path).lower() if model_path else ""
+        if "gen5" in model_str:
+            if "calibrated" in model_str:
+                ctrl_label = "Learned Recurrent PPO (Gen 5C Calibrated)"
+                ctrl_short = "Gen 5C RL"
+            else:
+                ctrl_label = "Learned Recurrent PPO (Gen 5A Exploit)"
+                ctrl_short = "Gen 5A Exploit"
+        elif "tail_chase" in model_str:
+            ctrl_label = "Learned Recurrent PPO (Gen 3 Tail Chase)"
+            ctrl_short = "Gen 3 RL"
+        elif "continuous_potential" in model_str:
+            ctrl_label = "Learned Recurrent PPO (Gen 4 Continuous)"
+            ctrl_short = "Gen 4 RL"
+        else:
+            ctrl_label = "Learned Recurrent PPO (RL)"
+            ctrl_short = "RL"
+    else:
+        ctrl_label = "Classical Visual Servoing (PID)"
+        ctrl_short = "PID"
     
     init_pos, init_heading, encounter_label = get_encounter_init(encounter, target_init_pos, target_init_heading_deg)
 
     print(f"\n[SIM] Initializing simulation: {duration}s at {1.0/dt_sim:.0f} Hz ({total_sim_steps} steps)...")
     print(f"      Profile: {profile.upper()} | Encounter: {encounter_label} | Seed: {seed}")
     print(f"      Controller: {ctrl_label}")
-    sim = FastPixhawkQuadSim(dt=dt_sim)
+    sim = FastPixhawkQuadSim(
+        dt=dt_sim,
+        max_vel_xy=18.0,
+        max_accel_xy=6.5,
+        max_vel_up=4.0,
+        max_vel_down=2.5
+    )
 
     if is_rl:
         if model_path is None:
-            default_p = PROJECT_ROOT / "control" / "weights" / "recurrent_ppo_continuous_potential" / "best_model" / "best_model.zip"
+            default_p = PROJECT_ROOT / "control" / "weights" / "recurrent_ppo_gen5_calibrated" / "best_model" / "best_model.zip"
+            if not default_p.exists():
+                default_p = PROJECT_ROOT / "control" / "weights" / "recurrent_ppo_continuous_potential" / "best_model" / "best_model.zip"
             if not default_p.exists():
                 default_p = PROJECT_ROOT / "control" / "weights" / "recurrent_ppo_tail_chase_finetune" / "best_model" / "best_model.zip"
             model_path = default_p
@@ -122,7 +152,9 @@ def render_simple_chase_video(
             max_lat_vel=6.0,
             max_lat_accel=5.0,
             max_accel=6.5,
-            max_decel=5.0
+            max_decel=5.0,
+            min_limits=np.array([-5.0, -6.0, -4.0, -120.0]),
+            max_limits=np.array([15.0,  6.0,  2.5,  120.0]),
         )
 
     # Initial positions
@@ -133,10 +165,11 @@ def render_simple_chase_video(
         initial_heading_rad=init_heading,
         seed=seed
     )
-    sim.reset(initial_pos=[0.0, 0.0, -2.0], initial_yaw=0.0)
+    c_init = [0.0, 0.0, -2.5] if chaser_init_pos is None else chaser_init_pos
+    sim.reset(initial_pos=np.array(c_init, dtype=np.float64), initial_yaw=chaser_init_yaw)
 
     # Pre-simulate entire flight trajectory for maximum speed and auto-scaling
-    print("[SIM] Simulating flight dynamics...")
+    print("[SIM] Simulating flight dynamics & continuous catch dwell tracking...")
     times = []
     target_pos_all = []
     chaser_pos_all = []
@@ -146,6 +179,12 @@ def render_simple_chase_video(
     chaser_roll_all = []
     telemetry_all = []
     cmd_all = []
+
+    dwell_counter = 0.0
+    catch_t = None
+    dwell_all = []
+    in_basket_all = []
+    catch_t_all = []
 
     for step in range(total_sim_steps):
         t = step * dt_sim
@@ -161,6 +200,18 @@ def render_simple_chase_video(
             img_h=480,
             desired_target_size=32.33
         )
+
+        in_basket = bool((5.0 <= telemetry["distance"] <= 7.0) and telemetry["in_view"])
+        if in_basket:
+            dwell_counter += dt_sim
+            if dwell_counter >= 3.0 and catch_t is None:
+                catch_t = t - 3.0
+        else:
+            dwell_counter = 0.0
+        dwell_all.append(dwell_counter)
+        in_basket_all.append(in_basket)
+        catch_t_all.append(catch_t)
+
         if is_rl:
             c, s = np.cos(sim.yaw), np.sin(sim.yaw)
             vx_b = c * sim.vel[0] + s * sim.vel[1]
@@ -177,7 +228,7 @@ def render_simple_chase_video(
                 current_alt_m=-sim.pos[2]
             )
         else:
-            cmd = controller.compute_cmd(telemetry, drone_pitch=sim.pitch, dt=dt_sim)
+            cmd = controller.compute_cmd(telemetry, drone_pitch=sim.pitch, drone_roll=sim.roll, dt=dt_sim)
         sim.step(cmd)
 
         times.append(t)
@@ -198,11 +249,17 @@ def render_simple_chase_video(
     chaser_pitch_all = np.array(chaser_pitch_all)
     chaser_roll_all = np.array(chaser_roll_all)
     cmd_all = np.array(cmd_all)
+    dwell_all = np.array(dwell_all)
+    in_basket_all = np.array(in_basket_all)
 
     # Frame sampling stride
     frame_indices = np.arange(0, total_sim_steps, sim_steps_per_frame)
     num_frames = len(frame_indices)
     print(f"[RENDER] Preparing video: {num_frames} frames ({duration:.1f}s at {fps} FPS)...")
+    if catch_t is not None:
+        print(f"         >>> 3.0s Continuous Catch Lock Achieved at t = {catch_t + 3.0:.2f}s (Dwell start: {catch_t:.2f}s)")
+    else:
+        print("         >>> 3.0s Continuous Catch Lock was NOT achieved during flight.")
 
     # Dimensions for video (1280x720 16:9)
     fig_w, fig_h = 12.8, 7.2
@@ -234,7 +291,7 @@ def render_simple_chase_video(
     # Setup clean, simple Matplotlib figure (white background, no fancy theme)
     plt.style.use("default")
     fig = plt.figure(figsize=(fig_w, fig_h), dpi=dpi, facecolor="#ffffff")
-    gs = fig.add_gridspec(1, 2, width_ratios=[1.75, 1.0], left=0.08, right=0.96, top=0.92, bottom=0.08, wspace=0.18)
+    gs = fig.add_gridspec(1, 2, width_ratios=[1.65, 1.10], left=0.06, right=0.96, top=0.92, bottom=0.08, wspace=0.14)
 
     ax_map = fig.add_subplot(gs[0, 0])
     ax_hud = fig.add_subplot(gs[0, 1])
@@ -287,11 +344,25 @@ def render_simple_chase_video(
         ax_map.scatter(target_pos_all[0, 1], target_pos_all[0, 0], marker="o", color="#d62728", s=45, alpha=0.8, label="Target Start")
         ax_map.scatter(chaser_pos_all[0, 1], chaser_pos_all[0, 0], marker="^", color="black", s=45, alpha=0.8, label="Chaser Origin")
 
+        dwell_now = dwell_all[s_idx]
+        in_b_now = in_basket_all[s_idx]
+        catch_done_now = (catch_t is not None and t_now >= catch_t + 3.0)
+
         # Visual Sightline (connecting line)
-        line_color = "#2ca02c" if telem["in_view"] else "#d95f02"
-        line_lbl = "LOS Locked (In FOV)" if telem["in_view"] else "Target Lost (Coasting)"
+        if in_b_now:
+            line_color = "#2ca02c"
+            line_lbl = "Standoff Basket [5–7m]"
+            line_w = 2.2
+        elif telem["in_view"]:
+            line_color = "#1f77b4" if is_rl else "#3182bd"
+            line_lbl = "LOS In FOV (Seeking Basket)"
+            line_w = 1.3
+        else:
+            line_color = "#d95f02"
+            line_lbl = "Target Lost (Coasting)"
+            line_w = 1.2
         ax_map.plot([chaser_pos[1], target_pos[1]], [chaser_pos[0], target_pos[0]],
-                    color=line_color, linestyle="--", linewidth=1.2, alpha=0.8, label=line_lbl)
+                    color=line_color, linestyle="--", linewidth=line_w, alpha=0.85, label=line_lbl)
 
         # Chaser Drone Marker & Heading Pointer
         ax_map.scatter(chaser_pos[1], chaser_pos[0], color=drone_color, s=75, zorder=5)
@@ -302,12 +373,29 @@ def render_simple_chase_video(
         # Target Drone Marker
         ax_map.scatter(target_pos[1], target_pos[0], color="#d62728", s=85, marker="o", edgecolors="black", linewidths=1.2, zorder=5)
 
+        # Status badge on map
+        if catch_done_now:
+            ax_map.text(
+                0.98, 0.04, f"★ 3.0s CATCH LOCKED (t={catch_t+3.0:.2f}s)",
+                transform=ax_map.transAxes, fontsize=9.2, fontweight="bold",
+                color="#1b7837", ha="right", va="bottom",
+                bbox=dict(boxstyle="round,pad=0.35", facecolor="#e8f5e9", edgecolor="#2ca02c", linewidth=1.5)
+            )
+        elif in_b_now:
+            ax_map.text(
+                0.98, 0.04, f"DWELLING IN BASKET: {dwell_now:.1f}s / 3.0s",
+                transform=ax_map.transAxes, fontsize=8.5, fontweight="bold",
+                color="#2e7d32", ha="right", va="bottom",
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="#f1f8e9", edgecolor="#81c784", linewidth=1.0)
+            )
+
         ax_map.set_xlim(e_center - half_span, e_center + half_span)
         ax_map.set_ylim(n_center - half_span, n_center + half_span)
         ax_map.set_aspect("equal", adjustable="box")
         ax_map.set_xlabel("East Position Y (m)", fontsize=10)
         ax_map.set_ylabel("North Position X (m)", fontsize=10)
-        ax_map.set_title(f"Top-Down Pursuit Arena | {ctrl_short} | t = {t_now:.1f}s", fontsize=11, fontweight="bold", pad=8)
+        title_hdr = f"{scenario_title} | " if scenario_title else ""
+        ax_map.set_title(f"{title_hdr}{ctrl_short} | t = {t_now:.1f}s", fontsize=11, fontweight="bold", pad=8)
         ax_map.legend(loc="upper left", fontsize=8.0, framealpha=0.92)
 
         # ------------------------------------------------------------------
@@ -325,47 +413,59 @@ def render_simple_chase_video(
         chaser_speed = np.linalg.norm(vel)
         altitude_agl = -chaser_pos[2]  # NED: negative Z is altitude
 
+        if catch_done_now:
+            catch_status_str = f"LOCKED (t={catch_t+3.0:4.2f}s)"
+        elif in_b_now:
+            catch_status_str = f"DWELLING ({dwell_now:4.2f} / 3.0s)"
+        else:
+            catch_status_str = "SEARCHING / CLOSING"
+
         hud_text = (
             f"SIMULATION TELEMETRY\n"
             f"─────────────────────────────\n"
             f"Time:             {t_now:5.2f} s\n"
-            f"Profile:          {profile.title()}\n"
-            f"Encounter:        {encounter_label[:22]}\n"
+            f"Profile:          {profile.replace('_', ' ').title()}\n"
+            f"Encounter:        {encounter.replace('_', ' ').title()}\n"
             f"Controller:       {ctrl_label}\n"
             f"Tracking Status:  {status_str}\n"
             f"In Camera FOV:    {'YES' if telem['in_view'] else 'NO (COASTING)'}\n"
             f"\n"
+            f"STANDOFF INTERCEPTION (CATCH)\n"
+            f"─────────────────────────────\n"
+            f"Target Distance:  {current_dist:5.2f} m  (Basket: 5–7 m)\n"
+            f"Inside Basket:    {'YES (IN RANGE)' if in_b_now else 'NO'}\n"
+            f"3.0s Lock Dwell:  {dwell_now:5.2f} / 3.00 s\n"
+            f"Catch Lock:       {catch_status_str}\n"
+            f"\n"
             f"VISUAL SERVOING ERRORS\n"
             f"─────────────────────────────\n"
-            f"Distance to Target: {current_dist:5.2f} m  (Goal: 6.0 m)\n"
-            f"Bounding Box Size:  {target_size:5.1f} px (Goal: 32 px)\n"
-            f"Azimuth Error (ex): {err_x:+5.2f}  [-1, +1]\n"
-            f"Elevation Err (ey): {err_y:+5.2f}  [-1, +1]\n"
+            f"Bounding Box:     {target_size:5.1f} px (Goal: 32 px)\n"
+            f"Azimuth Err (ex): {err_x:+5.2f}  [-1, +1]\n"
+            f"Elevation Err(ey):{err_y:+5.2f}  [-1, +1]\n"
             f"\n"
             f"FLIGHT COMMANDS (MAVLink)\n"
             f"─────────────────────────────\n"
-            f"cmd_vx (Forward):   {cmd[0]:+5.2f} m/s\n"
-            f"cmd_vy (Lateral):   {cmd[1]:+5.2f} m/s\n"
-            f"cmd_vz (Climb/Desc):{cmd[2]:+5.2f} m/s\n"
-            f"cmd_yaw (Turn Rate):{cmd[3]:+5.1f} deg/s\n"
+            f"cmd_vx (Forward): {cmd[0]:+5.2f} m/s\n"
+            f"cmd_vy (Lateral): {cmd[1]:+5.2f} m/s\n"
+            f"cmd_vz (Climb):   {cmd[2]:+5.2f} m/s\n"
+            f"cmd_yaw (Turn):   {cmd[3]:+5.1f} deg/s\n"
             f"\n"
             f"DRONE STATE (Pixhawk)\n"
             f"─────────────────────────────\n"
-            f"Ground Speed:       {chaser_speed:5.2f} m/s\n"
-            f"Altitude (AGL):     {altitude_agl:5.2f} m\n"
-            f"Heading (Yaw):      {np.rad2deg(yaw):+5.1f}°\n"
-            f"Body Pitch:         {np.rad2deg(chaser_pitch_all[s_idx]):+5.1f}°\n"
-            f"Body Roll:          {np.rad2deg(chaser_roll_all[s_idx]):+5.1f}°\n"
-            f"Envelope:           vx[-5,15] vy[-6,6]"
+            f"Ground Speed:     {chaser_speed:5.2f} m/s\n"
+            f"Altitude (AGL):   {altitude_agl:5.2f} m\n"
+            f"Heading (Yaw):    {np.rad2deg(yaw):+5.1f}°\n"
+            f"Body Pitch:       {np.rad2deg(chaser_pitch_all[s_idx]):+5.1f}°\n"
+            f"Body Roll:        {np.rad2deg(chaser_roll_all[s_idx]):+5.1f}°"
         )
 
         ax_hud.text(
-            0.05, 0.95, hud_text,
+            0.02, 0.96, hud_text,
             transform=ax_hud.transAxes,
-            fontsize=9.2,
+            fontsize=8.5,
             fontfamily="monospace",
             verticalalignment="top",
-            bbox=dict(boxstyle="square,pad=0.6", facecolor="#f8f9fa", edgecolor="#ced4da", linewidth=1.0)
+            bbox=dict(boxstyle="square,pad=0.5", facecolor="#f8f9fa", edgecolor="#ced4da", linewidth=1.0)
         )
 
         # Pipe frame directly to ffmpeg
@@ -418,12 +518,14 @@ def render_dual_chase_video(
     encounter: str = "crossing_right",
     target_init_pos: Optional[list] = None,
     target_init_heading_deg: Optional[float] = None,
+    chaser_init_pos: Optional[list] = None,
+    chaser_init_yaw: float = 0.0,
     seed: int = 42,
     model_path: Optional[Union[str, Path]] = None,
     output_gif_path: Optional[Path] = None,
 ):
     """
-    Renders a unified top-down video where BOTH PID and Learned RL (Gen 4) drones
+    Renders a unified top-down video where BOTH PID and Learned RL drones
     pursue the EXACT same target trajectory simultaneously on the same map.
     Includes a side-by-side telemetry HUD.
     """
@@ -436,11 +538,13 @@ def render_dual_chase_video(
     print(f"\n[SIM-DUAL] Initializing Dual Controller Simulation: {duration}s...")
     print(f"           Profile: {profile.upper()} | Encounter: {encounter_label} | Seed: {seed}")
 
-    sim_pid = FastPixhawkQuadSim(dt=dt_sim)
-    sim_pid.reset(initial_pos=[0.0, 0.0, -2.0], initial_yaw=0.0)
+    c_init = [0.0, 0.0, -2.5] if chaser_init_pos is None else chaser_init_pos
 
-    sim_rl = FastPixhawkQuadSim(dt=dt_sim)
-    sim_rl.reset(initial_pos=[0.0, 0.0, -2.0], initial_yaw=0.0)
+    sim_pid = FastPixhawkQuadSim(dt=dt_sim, max_vel_xy=18.0, max_accel_xy=6.5, max_vel_up=4.0, max_vel_down=2.5)
+    sim_pid.reset(initial_pos=np.array(c_init, dtype=np.float64), initial_yaw=chaser_init_yaw)
+
+    sim_rl = FastPixhawkQuadSim(dt=dt_sim, max_vel_xy=18.0, max_accel_xy=6.5, max_vel_up=4.0, max_vel_down=2.5)
+    sim_rl.reset(initial_pos=np.array(c_init, dtype=np.float64), initial_yaw=chaser_init_yaw)
 
     # 1. Classical PID Controller
     ctrl_pid = KinematicVisualServoController(
@@ -456,12 +560,16 @@ def render_dual_chase_video(
         max_lat_vel=6.0,
         max_lat_accel=5.0,
         max_accel=6.5,
-        max_decel=5.0
+        max_decel=5.0,
+        min_limits=np.array([-5.0, -6.0, -4.0, -120.0]),
+        max_limits=np.array([15.0,  6.0,  2.5,  120.0]),
     )
 
     # 2. Learned Recurrent PPO Controller
     if model_path is None:
-        default_p = PROJECT_ROOT / "control" / "weights" / "recurrent_ppo_continuous_potential" / "best_model" / "best_model.zip"
+        default_p = PROJECT_ROOT / "control" / "weights" / "recurrent_ppo_gen5_calibrated" / "best_model" / "best_model.zip"
+        if not default_p.exists():
+            default_p = PROJECT_ROOT / "control" / "weights" / "recurrent_ppo_continuous_potential" / "best_model" / "best_model.zip"
         if not default_p.exists():
             default_p = PROJECT_ROOT / "control" / "weights" / "recurrent_ppo_tail_chase_finetune" / "best_model" / "best_model.zip"
         model_path = default_p
@@ -470,6 +578,24 @@ def render_dual_chase_video(
         ctrl_rl = RecurrentVisualServoController(model_path=str(model_path), w_nominal=0.0505)
     else:
         raise ImportError("RecurrentVisualServoController could not be imported.")
+
+    model_str = str(model_path).lower() if model_path else ""
+    if "gen5" in model_str:
+        if "calibrated" in model_str:
+            rl_label = "Learned Gen 5C RL Chaser"
+            rl_short = "Gen 5C RL"
+        else:
+            rl_label = "Gen 5A Exploit Chaser"
+            rl_short = "Gen 5A"
+    elif "tail_chase" in model_str:
+        rl_label = "Learned Gen 3 RL Chaser"
+        rl_short = "Gen 3 RL"
+    elif "continuous_potential" in model_str:
+        rl_label = "Learned Gen 4 RL Chaser"
+        rl_short = "Gen 4 RL"
+    else:
+        rl_label = "Learned RL Chaser"
+        rl_short = "RL"
 
     # 3. Target Trajectory Oracle (Identical for both!)
     target_oracle = StochasticTargetTrajectory(
@@ -486,14 +612,31 @@ def render_dual_chase_video(
     pid_pos_all, pid_yaw_all, pid_vel_all, pid_telem_all, pid_cmd_all = [], [], [], [], []
     rl_pos_all, rl_yaw_all, rl_vel_all, rl_telem_all, rl_cmd_all = [], [], [], [], []
 
+    dwell_counter_p = 0.0
+    catch_t_p = None
+    dwell_all_p = []
+
+    dwell_counter_r = 0.0
+    catch_t_r = None
+    dwell_all_r = []
+
     for step in range(total_sim_steps):
         t = step * dt_sim
         tgt_world = target_oracle.get_position(t)
 
         # PID step
         telem_p = sim_pid.get_camera_telemetry(tgt_world, target_w_m=0.35, target_h_m=0.20, img_w=640, img_h=480, desired_target_size=32.33)
-        cmd_p = ctrl_pid.compute_cmd(telem_p, drone_pitch=sim_pid.pitch, dt=dt_sim)
+        cmd_p = ctrl_pid.compute_cmd(telem_p, drone_pitch=sim_pid.pitch, drone_roll=sim_pid.roll, dt=dt_sim)
         sim_pid.step(cmd_p)
+
+        in_b_p = bool((5.0 <= telem_p["distance"] <= 7.0) and telem_p["in_view"])
+        if in_b_p:
+            dwell_counter_p += dt_sim
+            if dwell_counter_p >= 3.0 and catch_t_p is None:
+                catch_t_p = t - 3.0
+        else:
+            dwell_counter_p = 0.0
+        dwell_all_p.append(dwell_counter_p)
 
         # RL step
         telem_r = sim_rl.get_camera_telemetry(tgt_world, target_w_m=0.35, target_h_m=0.20, img_w=640, img_h=480, desired_target_size=32.33)
@@ -511,6 +654,15 @@ def render_dual_chase_video(
             current_alt_m=-sim_rl.pos[2]
         )
         sim_rl.step(cmd_r)
+
+        in_b_r = bool((5.0 <= telem_r["distance"] <= 7.0) and telem_r["in_view"])
+        if in_b_r:
+            dwell_counter_r += dt_sim
+            if dwell_counter_r >= 3.0 and catch_t_r is None:
+                catch_t_r = t - 3.0
+        else:
+            dwell_counter_r = 0.0
+        dwell_all_r.append(dwell_counter_r)
 
         times.append(t)
         target_pos_all.append(tgt_world.copy())
@@ -534,10 +686,20 @@ def render_dual_chase_video(
     rl_pos_all = np.array(rl_pos_all)
     rl_yaw_all = np.array(rl_yaw_all)
     rl_vel_all = np.array(rl_vel_all)
+    dwell_all_p = np.array(dwell_all_p)
+    dwell_all_r = np.array(dwell_all_r)
 
     frame_indices = np.arange(0, total_sim_steps, sim_steps_per_frame)
     num_frames = len(frame_indices)
     print(f"[RENDER-DUAL] Rendering {num_frames} frames ({duration:.1f}s at {fps} FPS)...")
+    if catch_t_r is not None:
+        print(f"              >>> RL 3.0s Continuous Lock Achieved at t = {catch_t_r + 3.0:.2f}s")
+    else:
+        print("              >>> RL did NOT achieve continuous 3.0s lock.")
+    if catch_t_p is not None:
+        print(f"              >>> PID 3.0s Continuous Lock Achieved at t = {catch_t_p + 3.0:.2f}s")
+    else:
+        print("              >>> PID did NOT achieve continuous 3.0s lock.")
 
     fig_w, fig_h = 13.6, 7.6
     dpi = 100
@@ -608,17 +770,24 @@ def render_dual_chase_video(
         # Elapsed trails
         ax_map.plot(target_pos_all[:s_idx+1, 1], target_pos_all[:s_idx+1, 0], color="#d62728", linestyle="-", linewidth=2.2, label="Target Drone (Identical)")
         ax_map.plot(pid_pos_all[:s_idx+1, 1], pid_pos_all[:s_idx+1, 0], color="#1f77b4", linestyle="--", linewidth=2.0, label="Classical PID Chaser")
-        ax_map.plot(rl_pos_all[:s_idx+1, 1], rl_pos_all[:s_idx+1, 0], color="#2ca02c", linestyle="-.", linewidth=2.0, label="Learned Gen 4 RL Chaser")
+        ax_map.plot(rl_pos_all[:s_idx+1, 1], rl_pos_all[:s_idx+1, 0], color="#2ca02c", linestyle="-", linewidth=2.2, label=f"Learned {rl_short} Chaser")
 
         # Markers
         ax_map.scatter(target_pos_all[0, 1], target_pos_all[0, 0], color="#d62728", s=50, marker="o", label="Target Start")
-        ax_map.scatter(0.0, 0.0, color="black", s=50, marker="^", label="Chaser Start")
+        ax_map.scatter(c_init[1], c_init[0], color="black", s=50, marker="^", label="Chaser Origin")
+
+        d_p = np.linalg.norm(tgt_p - p_pos)
+        d_r = np.linalg.norm(tgt_p - r_pos)
+        in_b_p = (5.0 <= d_p <= 7.0) and p_tel["in_view"]
+        in_b_r = (5.0 <= d_r <= 7.0) and r_tel["in_view"]
 
         # Sightlines
-        color_p = "#1f77b4" if p_tel["in_view"] else "#a6cee3"
-        color_r = "#2ca02c" if r_tel["in_view"] else "#b2df8a"
-        ax_map.plot([p_pos[1], tgt_p[1]], [p_pos[0], tgt_p[0]], color=color_p, linestyle=":", linewidth=1.1, alpha=0.7)
-        ax_map.plot([r_pos[1], tgt_p[1]], [r_pos[0], tgt_p[0]], color=color_r, linestyle=":", linewidth=1.1, alpha=0.7)
+        color_p = "#2ca02c" if in_b_p else ("#1f77b4" if p_tel["in_view"] else "#d95f02")
+        color_r = "#2ca02c" if in_b_r else ("#238b45" if r_tel["in_view"] else "#d95f02")
+        lw_p = 1.8 if in_b_p else 1.1
+        lw_r = 1.8 if in_b_r else 1.1
+        ax_map.plot([p_pos[1], tgt_p[1]], [p_pos[0], tgt_p[0]], color=color_p, linestyle="--", linewidth=lw_p, alpha=0.75)
+        ax_map.plot([r_pos[1], tgt_p[1]], [r_pos[0], tgt_p[0]], color=color_r, linestyle="--", linewidth=lw_r, alpha=0.75)
 
         # PID Drone marker & pointer
         ax_map.scatter(p_pos[1], p_pos[0], color="#1f77b4", s=75, zorder=6)
@@ -634,38 +803,58 @@ def render_dual_chase_video(
         # Target Drone
         ax_map.scatter(tgt_p[1], tgt_p[0], color="#d62728", s=85, marker="o", edgecolors="black", linewidths=1.2, zorder=6)
 
+        catch_done_r = (catch_t_r is not None and t_now >= catch_t_r + 3.0)
+        catch_done_p = (catch_t_p is not None and t_now >= catch_t_p + 3.0)
+        if catch_done_r:
+            ax_map.text(
+                0.98, 0.04, f"★ RL 3.0s LOCKED (t={catch_t_r+3.0:.2f}s)",
+                transform=ax_map.transAxes, fontsize=8.8, fontweight="bold",
+                color="#1b7837", ha="right", va="bottom",
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="#e8f5e9", edgecolor="#2ca02c", linewidth=1.4)
+            )
+        if catch_done_p:
+            ax_map.text(
+                0.98, 0.11, f"★ PID 3.0s LOCKED (t={catch_t_p+3.0:.2f}s)",
+                transform=ax_map.transAxes, fontsize=8.8, fontweight="bold",
+                color="#08519c", ha="right", va="bottom",
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="#eff3ff", edgecolor="#3182bd", linewidth=1.4)
+            )
+
         ax_map.set_xlim(e_center - half_span, e_center + half_span)
         ax_map.set_ylim(n_center - half_span, n_center + half_span)
         ax_map.set_aspect("equal", adjustable="box")
         ax_map.set_xlabel("East Position Y (m)", fontsize=10)
         ax_map.set_ylabel("North Position X (m)", fontsize=10)
-        ax_map.set_title(f"Dual Head-to-Head Pursuit | t = {t_now:.1f}s", fontsize=11, fontweight="bold", pad=8)
+        ax_map.set_title(f"Dual Simultaneous Pursuit | t = {t_now:.1f}s", fontsize=11, fontweight="bold", pad=8)
         ax_map.legend(loc="upper left", fontsize=8.0, framealpha=0.92)
 
         # HUD Dual Table
         ax_hud.axis("off")
         ax_hud.set_facecolor("#ffffff")
 
-        d_p = np.linalg.norm(tgt_p - p_pos)
-        d_r = np.linalg.norm(tgt_p - r_pos)
         spd_p = np.linalg.norm(p_vel)
         spd_r = np.linalg.norm(r_vel)
+        dwell_p = dwell_all_p[s_idx]
+        dwell_r = dwell_all_r[s_idx]
+
+        status_p = f"LOCKED({catch_t_p+3.0:.1f}s)" if catch_done_p else (f"DWELL({dwell_p:.1f}s)" if in_b_p else "SEEKING")
+        status_r = f"LOCKED({catch_t_r+3.0:.1f}s)" if catch_done_r else (f"DWELL({dwell_r:.1f}s)" if in_b_r else "SEEKING")
 
         hud_text = (
-            f"DUAL COMPARISON TELEMETRY\n"
+            f"DUAL SIMULTANEOUS TELEMETRY\n"
             f"─────────────────────────────────────\n"
             f"Time:       {t_now:5.2f} s\n"
             f"Profile:    {profile.title()}\n"
             f"Encounter:  {encounter_label[:24]}\n"
             f"Target:     Red Drone (Exact Same)\n"
             f"\n"
-            f"METRIC            PID (Blue)   RL (Green)\n"
+            f"METRIC            PID (Blue)   {rl_short} (Green)\n"
             f"─────────────────────────────────────\n"
-            f"In FOV:           {'YES' if p_tel['in_view'] else 'NO':<10}   {'YES' if r_tel['in_view'] else 'NO':<10}\n"
+            f"In Camera FOV:    {'YES' if p_tel['in_view'] else 'NO':<10}   {'YES' if r_tel['in_view'] else 'NO':<10}\n"
             f"Distance:         {d_p:5.2f} m       {d_r:5.2f} m\n"
-            f"Goal Error:       {abs(d_p-6.0):+5.2f} m       {abs(d_r-6.0):+5.2f} m\n"
-            f"Azimuth Err (ex): {p_tel.get('error_x',0.0):+5.2f}        {r_tel.get('error_x',0.0):+5.2f}\n"
-            f"Elevation Err:    {p_tel.get('error_y',0.0):+5.2f}        {r_tel.get('error_y',0.0):+5.2f}\n"
+            f"In Basket (5-7m): {'YES' if in_b_p else 'NO':<10}   {'YES' if in_b_r else 'NO':<10}\n"
+            f"3.0s Lock Dwell:  {dwell_p:4.2f} / 3.0s    {dwell_r:4.2f} / 3.0s\n"
+            f"Catch Lock:       {status_p:<10}   {status_r:<10}\n"
             f"\n"
             f"COMMANDS & VELOCITIES\n"
             f"─────────────────────────────────────\n"
@@ -674,13 +863,13 @@ def render_dual_chase_video(
             f"cmd_vy (Lateral): {p_cmd[1]:+5.2f} m/s     {r_cmd[1]:+5.2f} m/s\n"
             f"cmd_yaw (Rate):   {p_cmd[3]:+5.1f} °/s     {r_cmd[3]:+5.1f} °/s\n"
             f"Altitude (AGL):   {-p_pos[2]:5.2f} m       {-r_pos[2]:5.2f} m\n"
-            f"Physical Limits:  Identical Envelope"
+            f"Physical Limits:  Identical Limits"
         )
 
         ax_hud.text(
             0.04, 0.95, hud_text,
             transform=ax_hud.transAxes,
-            fontsize=8.8,
+            fontsize=8.5,
             fontfamily="monospace",
             verticalalignment="top",
             bbox=dict(boxstyle="square,pad=0.6", facecolor="#f8f9fa", edgecolor="#ced4da", linewidth=1.0)
@@ -784,6 +973,8 @@ def compute_shared_bounds(
     target_init_pos: Optional[list],
     target_init_heading_deg: Optional[float],
     seed: int,
+    chaser_init_pos: Optional[list] = None,
+    chaser_init_yaw: float = 0.0,
     model_path: Optional[Union[str, Path]] = None,
 ) -> Tuple[float, float, float]:
     """Pre-runs both PID and RL to compute a unified bounding box for identical visual scaling."""
@@ -795,19 +986,31 @@ def compute_shared_bounds(
         duration=duration + 5.0, profile=profile, initial_pos=init_pos, initial_heading_rad=init_heading, seed=seed
     )
 
+    c_init = [0.0, 0.0, -2.5] if chaser_init_pos is None else chaser_init_pos
+
     all_e, all_n = [], []
     for ctype in ["pid", "rl"]:
-        sim = FastPixhawkQuadSim(dt=dt_sim)
-        sim.reset(initial_pos=[0.0, 0.0, -2.0], initial_yaw=0.0)
+        sim = FastPixhawkQuadSim(
+            dt=dt_sim,
+            max_vel_xy=18.0,
+            max_accel_xy=6.5,
+            max_vel_up=4.0,
+            max_vel_down=2.5
+        )
+        sim.reset(initial_pos=np.array(c_init, dtype=np.float64), initial_yaw=chaser_init_yaw)
 
         if ctype == "pid":
             ctrl = KinematicVisualServoController(
                 camera_uptilt_deg=15.0, hfov_deg=60.0, vfov_deg=45.0, desired_standoff_dist=6.0,
-                enable_lateral_strafe=True, kp_lat=2.5, kd_lat=0.35, max_lat_vel=6.0, max_lat_accel=5.0, max_accel=6.5, max_decel=5.0
+                enable_lateral_strafe=True, kp_lat=2.5, kd_lat=0.35, max_lat_vel=6.0, max_lat_accel=5.0, max_accel=6.5, max_decel=5.0,
+                min_limits=np.array([-5.0, -6.0, -4.0, -120.0]), max_limits=np.array([15.0, 6.0, 2.5, 120.0])
             )
         else:
             if model_path is None:
-                model_path = PROJECT_ROOT / "control" / "weights" / "recurrent_ppo_continuous_potential" / "best_model" / "best_model.zip"
+                default_p = PROJECT_ROOT / "control" / "weights" / "recurrent_ppo_gen5_calibrated" / "best_model" / "best_model.zip"
+                if not default_p.exists():
+                    default_p = PROJECT_ROOT / "control" / "weights" / "recurrent_ppo_continuous_potential" / "best_model" / "best_model.zip"
+                model_path = default_p
             ctrl = RecurrentVisualServoController(model_path=str(model_path), w_nominal=0.0505)
 
         for step in range(total_sim_steps):
@@ -817,7 +1020,7 @@ def compute_shared_bounds(
             all_n.append(tgt[0])
             telem = sim.get_camera_telemetry(tgt, target_w_m=0.35, target_h_m=0.20, img_w=640, img_h=480, desired_target_size=32.33)
             if ctype == "pid":
-                cmd = ctrl.compute_cmd(telem, drone_pitch=sim.pitch, dt=dt_sim)
+                cmd = ctrl.compute_cmd(telem, drone_pitch=sim.pitch, drone_roll=sim.roll, dt=dt_sim)
             else:
                 c, s = np.cos(sim.yaw), np.sin(sim.yaw)
                 vx_b = c * sim.vel[0] + s * sim.vel[1]
@@ -841,6 +1044,8 @@ def compute_shared_bounds(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Render Simple 2D Top-Down Drone Pursuit Movie")
+    parser.add_argument("--scenario", type=str, default=None,
+                        help="Scenario ID (e.g. eval_042_evasive_tail_chase_s1714) or index from benchmark suite")
     parser.add_argument("--profile", type=str, default="evasive",
                         help="Target trajectory profile: evasive, hyper_evasive, aerobatic, sprint_break, cruising")
     parser.add_argument("--encounter", type=str, default="crossing_right",
@@ -864,7 +1069,50 @@ if __name__ == "__main__":
     out_dir = PROJECT_ROOT / "outputs" / "videos" / "control"
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    chaser_init_pos = None
+    chaser_init_yaw = 0.0
+    scenario_title = None
+    scenario_id_clean = None
+
+    if args.scenario:
+        suite_path = PROJECT_ROOT / "outputs" / "benchmarks" / "datasets" / "benchmark_suite_v1.json"
+        if suite_path.exists():
+            import json
+            with open(suite_path) as f:
+                suite = json.load(f)
+            scenarios = suite.get("scenarios", [])
+            match = None
+            if args.scenario.isdigit():
+                idx = int(args.scenario)
+                if 0 <= idx < len(scenarios):
+                    match = scenarios[idx]
+            else:
+                for sc in scenarios:
+                    if sc["scenario_id"] == args.scenario or sc["scenario_id"].startswith(args.scenario) or args.scenario in sc["scenario_id"]:
+                        match = sc
+                        break
+            if match is not None:
+                print(f"[SCENARIO] Loaded benchmark scenario: {match['scenario_id']}")
+                scenario_id_clean = match["scenario_id"]
+                args.profile = match["profile"]
+                args.encounter = match["encounter_type"]
+                args.seed = match["seed"]
+                args.target_init_pos = match["initial_target_pos"]
+                args.target_init_heading = float(np.rad2deg(match["initial_target_heading_rad"]))
+                chaser_init_pos = match.get("initial_chaser_pos", [0.0, 0.0, -2.5])
+                chaser_init_yaw = float(match.get("initial_chaser_yaw", 0.0))
+                if args.duration == 20.0 and "duration" in match:
+                    args.duration = float(match["duration"])
+                scenario_title = f"{match['scenario_id']}"
+            else:
+                print(f"[WARNING] Scenario '{args.scenario}' not found in suite! Proceeding with CLI flags.")
+
     enc_tag = args.encounter
+    if scenario_id_clean:
+        base_prefix = f"simple_chase_{scenario_id_clean}"
+    else:
+        base_prefix = f"simple_chase_{args.profile}_{enc_tag}_seed{args.seed}"
+
     if args.controller in ("both", "dual"):
         shared_bounds = compute_shared_bounds(
             duration=args.duration,
@@ -873,48 +1121,56 @@ if __name__ == "__main__":
             target_init_pos=args.target_init_pos,
             target_init_heading_deg=args.target_init_heading,
             seed=args.seed,
+            chaser_init_pos=chaser_init_pos,
+            chaser_init_yaw=chaser_init_yaw,
             model_path=args.model,
         )
 
         if args.controller == "both":
             # 1. Render PID video
-            pid_mp4 = out_dir / f"simple_chase_{args.profile}_{enc_tag}_pid_seed{args.seed}.mp4"
+            pid_mp4 = out_dir / f"{base_prefix}_pid.mp4"
             pid_gif = pid_mp4.with_suffix(".gif") if args.gif else None
             render_simple_chase_video(
                 output_path=pid_mp4, duration=args.duration, fps=args.fps, profile=args.profile,
                 encounter=args.encounter, target_init_pos=args.target_init_pos, target_init_heading_deg=args.target_init_heading,
-                seed=args.seed, controller_type="pid", output_gif_path=pid_gif, fixed_bounds=shared_bounds
+                chaser_init_pos=chaser_init_pos, chaser_init_yaw=chaser_init_yaw,
+                seed=args.seed, controller_type="pid", output_gif_path=pid_gif, fixed_bounds=shared_bounds,
+                scenario_title=scenario_title
             )
 
             # 2. Render RL video
-            rl_mp4 = out_dir / f"simple_chase_{args.profile}_{enc_tag}_rl_seed{args.seed}.mp4"
+            rl_mp4 = out_dir / f"{base_prefix}_rl.mp4"
             rl_gif = rl_mp4.with_suffix(".gif") if args.gif else None
             render_simple_chase_video(
                 output_path=rl_mp4, duration=args.duration, fps=args.fps, profile=args.profile,
                 encounter=args.encounter, target_init_pos=args.target_init_pos, target_init_heading_deg=args.target_init_heading,
-                seed=args.seed, controller_type="rl", model_path=args.model, output_gif_path=rl_gif, fixed_bounds=shared_bounds
+                chaser_init_pos=chaser_init_pos, chaser_init_yaw=chaser_init_yaw,
+                seed=args.seed, controller_type="rl", model_path=args.model, output_gif_path=rl_gif, fixed_bounds=shared_bounds,
+                scenario_title=scenario_title
             )
 
             # 3. Side-by-side stitched video
-            sbs_mp4 = out_dir / f"simple_chase_{args.profile}_{enc_tag}_side_by_side_seed{args.seed}.mp4"
+            sbs_mp4 = out_dir / f"{base_prefix}_side_by_side.mp4"
             sbs_gif = sbs_mp4.with_suffix(".gif") if args.gif else None
             render_side_by_side_video(pid_mp4, rl_mp4, sbs_mp4, output_gif_path=sbs_gif)
 
             # 4. Also render dual-overlay
-            dual_mp4 = out_dir / f"simple_chase_{args.profile}_{enc_tag}_dual_overlay_seed{args.seed}.mp4"
+            dual_mp4 = out_dir / f"{base_prefix}_dual_overlay.mp4"
             dual_gif = dual_mp4.with_suffix(".gif") if args.gif else None
             render_dual_chase_video(
                 output_path=dual_mp4, duration=args.duration, fps=args.fps, profile=args.profile,
                 encounter=args.encounter, target_init_pos=args.target_init_pos, target_init_heading_deg=args.target_init_heading,
+                chaser_init_pos=chaser_init_pos, chaser_init_yaw=chaser_init_yaw,
                 seed=args.seed, model_path=args.model, output_gif_path=dual_gif
             )
 
         elif args.controller == "dual":
-            dual_mp4 = out_dir / f"simple_chase_{args.profile}_{enc_tag}_dual_overlay_seed{args.seed}.mp4"
+            dual_mp4 = out_dir / f"{base_prefix}_dual_overlay.mp4"
             dual_gif = dual_mp4.with_suffix(".gif") if args.gif else None
             render_dual_chase_video(
                 output_path=dual_mp4, duration=args.duration, fps=args.fps, profile=args.profile,
                 encounter=args.encounter, target_init_pos=args.target_init_pos, target_init_heading_deg=args.target_init_heading,
+                chaser_init_pos=chaser_init_pos, chaser_init_yaw=chaser_init_yaw,
                 seed=args.seed, model_path=args.model, output_gif_path=dual_gif
             )
     else:
@@ -922,7 +1178,7 @@ if __name__ == "__main__":
         if args.out:
             mp4_path = Path(args.out)
         else:
-            mp4_path = out_dir / f"simple_chase_{args.profile}_{enc_tag}_{ctrl_tag}_seed{args.seed}.mp4"
+            mp4_path = out_dir / f"{base_prefix}_{ctrl_tag}.mp4"
 
         gif_path = mp4_path.with_suffix(".gif") if args.gif else None
 
@@ -934,9 +1190,12 @@ if __name__ == "__main__":
             encounter=args.encounter,
             target_init_pos=args.target_init_pos,
             target_init_heading_deg=args.target_init_heading,
+            chaser_init_pos=chaser_init_pos,
+            chaser_init_yaw=chaser_init_yaw,
             seed=args.seed,
             controller_type=args.controller,
             model_path=args.model,
             output_gif_path=gif_path,
+            scenario_title=scenario_title
         )
 

@@ -1,0 +1,132 @@
+\documentclass[11pt,a4paper]{article}
+
+% --- Packages ---
+\usepackage[utf8]{inputenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{microtype}
+\usepackage{enumitem}
+\usepackage{titlesec}
+
+% --- Hyperref Setup ---
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue!70!black,
+    citecolor=blue!70!black,
+    urlcolor=blue!70!black
+}
+
+% --- Section Styling ---
+\titleformat{\section}{\large\bfseries}{\thesection}{1em}{}[\titlerule]
+\titleformat{\subsection}{\normalsize\bfseries}{\thesubsection}{1em}{}
+
+% --- Document Info ---
+\title{\textbf{Weekly Report - 4}\\[0.2em]
+\large Bachelor Project --- Danmarks Tekniske Universitet (DTU)\\[0.1em]
+\normalsize Autonomous Drone Pursuit \& Vision-Based Interception}
+\author{\textbf{Philip Kierkegaard}}
+\date{October 1, 2026}
+
+\begin{document}
+\maketitle
+
+\vspace{-1.5em}
+\noindent\rule{\textwidth}{0.4pt}
+
+\section*{Summary}
+This week's primary milestones were advancing the learned pursuit guidance policy to outperform our classical control baseline and repackaging the pursuit quadrotor. Multiple policy generations were trained under Recurrent PPO, systematically diagnosing and eliminating failure modes such as spinning reward exploits, cruise plateaus, and braking penalties. The resulting production policy (\textbf{Generation 5C}) established a project record of \textbf{82.5\% catch success on evasive maneuvers} (compared to \textbf{40.0\% for classical PID}), closing the intercept distance over 4 seconds faster. Concurrently, all vehicle electronics were repackaged onto a new, lighter frame (saving $\approx 400$~g) with full onboard battery power, preparing the drone for autonomous flight control by the Jetson.
+
+\section{Reinforcement Learning Guidance Policy}
+The pursuit controller was trained in closed-loop simulation using Recurrent PPO (\texttt{sb3\_contrib.RecurrentPPO}).
+
+\subsection{Network Architecture}
+The policy uses a decoupled Recurrent Actor-Critic network (\texttt{MlpLstmPolicy}):
+\begin{itemize}[leftmargin=1.5em, itemsep=0.2em]
+    \item \textbf{Actor Branch:} Maps a 13D observation vector (visual errors, standoff scale, body velocities, and optical rates) through an \texttt{LSTM(13, 128)} layer and dense head to output 4 continuous body setpoints $[v_x, v_y, v_z, \dot{\psi}]$.
+    \item \textbf{Temporal Memory:} The 128-unit recurrent hidden state acts as an internal observer across camera frame drops and sharp cuts, enabling smooth lead pursuit when the target temporarily leaves the field of view.
+    \item \textbf{Computational Footprint:} With 180,105 parameters ($\approx 720$~KB), forward inference takes $\approx 0.16$~ms on CPU ($< 1.0$~ms on the Jetson Orin Nano), taking under 5\% of the 50~Hz control window and leaving the GPU entirely dedicated to YOLOv8.
+\end{itemize}
+
+\subsection{Key Policy Generations \& Behavioral Diagnostics}
+\begin{itemize}[leftmargin=1.5em, itemsep=0.4em]
+    \item \textbf{Classical PID Baseline (Deterministic Reference):} Implements Image-Based Visual Servoing (IBVS) with pitch feedforward compensation:
+    \begin{equation}
+        \mathbf{v}_{\text{cmd}} = \begin{bmatrix} k_{p, x} \cdot (d - d^*) \\ -k_{p, \text{lat}} \cdot e_x - k_{d, \text{lat}} \cdot \dot{e}_x \\ k_{p, z} \cdot e_y \\ -k_{p, \psi} \cdot e_x \end{bmatrix}
+    \end{equation}
+    Achieves \textbf{45.8\% overall catch success}. While reliable on straight lines (97.5\%), it drops to 40.0\% on evasive targets because reactive feedback cannot yaw quickly enough to prevent targets sweeping outside the camera's $60^\circ$ FOV.
+
+    \item \textbf{The ``Lighthouse Radar'' Exploit (Generation 5A):} To encourage target recovery, an ungrounded $+25.0$ re-acquisition bounty was introduced:
+    \begin{equation}
+        R_{\text{reacquire}} = +25.0 \quad \text{(awarded on lost} \to \text{in-view transitions)}
+    \end{equation}
+    While episode returns surged to an all-time high ($\bar{R} = 1,830$), catch rate collapsed to \textbf{0.8\%} with 24 collisions. The agent learned to spin continuously at $115^\circ/\text{s}$, harvesting the $+25.0$ windfall every 3 seconds as the target swept through view, demonstrating that discrete transition bounties induce cyclic exploits.
+
+    \item \textbf{Continuous Dual-Scale Gaussian Potential (Generation 4):} Enforces tail-chase geometry by anchoring reward to a rear point:
+    \begin{equation}
+        \mathbf{p}_{\text{trail}} = \mathbf{p}_{\text{target}} - 6.0 \cdot \mathbf{\hat{h}}_{\text{target}}
+    \end{equation}
+    To eliminate dead zones where the drone hung back, Gen 4 replaced discrete distance thresholds with a smooth potential field:
+    \begin{equation}
+        R_{\text{trail}}(d_{\text{trail}}) = 3.0 \cdot \exp\left(-\frac{d_{\text{trail}}^2}{2 \cdot 3.5^2}\right) + 6.0 \cdot \exp\left(-\frac{d_{\text{trail}}^2}{2 \cdot 1.2^2}\right)
+    \end{equation}
+    where $d_{\text{trail}} = \|\mathbf{p}_{\text{chaser}} - \mathbf{p}_{\text{trail}}\|$. The wide Gaussian ($\sigma = 3.5\text{m}$) pulls the drone inward from afar, while the tight well ($\sigma = 1.2\text{m}$) holds exact standoff, outperforming PID for the first time (\textbf{48.3\% catch}, TTC: \textbf{8.34s}).
+
+    \item \textbf{The Production Champion (Generation 5C):} Added three calibrated mechanisms:
+    \begin{enumerate}[leftmargin=1.2em, itemsep=0.1em]
+        \item \textit{In-Basket Dwell Bonus ($R_{\text{dwell}}$):} Awards $+2.0$/step for sustaining 5--7m standoff in view, directly reinforcing the 3-second thesis benchmark criteria.
+        \item \textit{Two-Tier Proximity Barrier ($P_{\text{prox}}$):} A soft repulsive quadratic penalty between 3--5m and a steep barrier below 3.0m, reducing collisions from 24 down to 2.
+        \item \textit{Symmetric Control Effort ($P_{\text{effort}}$):} Penalizes squared inputs ($0.01 a_0^2 + 0.01 a_2^2 + 0.02(a_1^2 + a_3^2)$), ensuring pulling back to brake incurs no extra cost when tracking slow targets.
+    \end{enumerate}
+\end{itemize}
+
+\subsection{Benchmark Performance Summary}
+Evaluating across 120 standardized flights (`\texttt{benchmark\_suite\_v1.json}') for a sustained 3.0-second lock in 5--7m standoff:
+
+\begin{table}[h!]
+\centering
+\small
+\begin{tabularx}{\textwidth}{lXccccr}
+\toprule
+\textbf{Model} & \textbf{Core Architecture / Reward} & \textbf{Catch \% (3s)} & \textbf{TTC (s)} & \textbf{In-FOV \%} & \textbf{Yaw Jerk} & \textbf{Crash} \\
+\midrule
+\textbf{Classical PID} & Kinematic IBVS Baseline & 45.8\% & 8.97s & 75.2\% & 24.8$^\circ$/s$^2$ & 2 \\
+\textbf{Gen 1} & Isotropic 5--7m Radial Shell & 38.3\% & 9.45s & 75.9\% & 108.5$^\circ$/s$^2$ & 4 \\
+\textbf{Gen 2} & Heavy Jerk Penalty ($0.20$) & 0.0\% & N/A & 31.2\% & \textbf{0.8}$^\circ$/s$^2$ & \textbf{0} \\
+\textbf{Gen 3} & Geometric Trail Anchor Basket & 40.8\% & 8.98s & 79.3\% & 23.4$^\circ$/s$^2$ & 2 \\
+\textbf{Gen 4} & Dual-Scale Gaussian Potential & 48.3\% & \textbf{8.34s} & \textbf{82.5\%} & 26.6$^\circ$/s$^2$ & \textbf{1} \\
+\textbf{Gen 5A} & Transition Bounty (+25.0) & 0.8\% & 14.10s & 42.0\% & 71.0$^\circ$/s$^2$ & 24 \\
+\textbf{Gen 5C} & Calibrated Dwell + Symmetric Effort & \textbf{49.2\%} & 9.13s & 79.4\% & 27.7$^\circ$/s$^2$ & 2 \\
+\bottomrule
+\end{tabularx}
+\caption{Benchmark evaluation across 120 flights. On evasive maneuvers, \textbf{Gen 5C reached 82.5\% catch success} (vs. 40.0\% for PID), maintaining lock for 10.89s (vs. 5.65s for PID) and closing in 8.72s (vs. 12.97s for PID).}
+\label{tab:rl_benchmark}
+\end{table}
+
+\section{Airframe Repackaging \& Hardware Status}
+During this week, all vehicle components were repackaged onto a new, lighter airframe---cutting approximately 400~grams in total vehicle weight. All electronics (Pixhawk autopilot, NVIDIA Jetson Orin Nano companion computer, and camera) are now fully powered onboard from the flight battery via a dedicated step-down BEC, making the system completely self-contained, untethered, and ready for closed-loop control by the Jetson.
+
+\section{Qualitative Perception Validation}
+The perception stack (YOLOv8n + 8D Kalman multi-track filter) was validated against a secondary drone and recorded flight sequences:
+\begin{itemize}[leftmargin=1.5em, itemsep=0.2em]
+    \item \textbf{Target Detection:} Tested against a secondary quadrotor; while the detector struggled in cluttered indoor settings with artificial lighting, performance was significantly more reliable once tested outdoors against natural backgrounds.
+    \item \textbf{Kalman Filtering:} Smooth optical state estimates bridging single-frame dropouts with continuous coasting.
+    \item \textbf{Ground Station Stream:} Verified live browser video streaming at 30~FPS, displaying the target bounding box and flight commands for real-time field monitoring with zero impact on the 50~Hz control loop.
+\end{itemize}
+
+\section{System Identification Status \& Plan for Week 5}
+\begin{itemize}[leftmargin=1.5em, itemsep=0.2em]
+    \item \textbf{System Identification Status:} Airframe packaging is complete, and manual step-input flights are scheduled for this afternoon's flight window to collect high-rate \texttt{.ulg} logs (\texttt{SDLOG\_PROFILE = 1}) for estimating command delay ($\tau$) and drag ($k_d$).
+    \item \textbf{Week 5 Objectives:}
+    \begin{enumerate}[leftmargin=1.2em, itemsep=0.1em]
+        \item Fit empirical $\tau$ and $k_d$ parameters to update \texttt{control/environment.py}.
+        \item Fine-tune Generation 5C under calibrated airframe dynamics.
+        \item Conduct autonomous pursuit flight tests in offboard mode against stationary and moving targets.
+        \item Record synchronized onboard video to compare physical tracking against the simulation benchmark.
+    \end{enumerate}
+\end{itemize}
+
+\end{document}
