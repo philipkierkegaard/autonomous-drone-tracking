@@ -82,7 +82,7 @@ def run_benchmark(
     for _ in range(n_warmup):
         pipeline.process_frame(dummy_frame, draw_hud=False, ego_telemetry=ego_telemetry)
         telemetry = dict(pipeline.telemetry) if hasattr(pipeline, "telemetry") else {}
-        controller.compute_commands(telemetry, dt=1.0 / 30.0)
+        controller.compute_cmd(telemetry, dt=1.0 / 30.0)
 
     print("[BENCHMARK] Warmup complete. Profiling active...\n")
 
@@ -110,7 +110,7 @@ def run_benchmark(
 
         # Step B: Control Evaluation (IBVS Kinematic Controller)
         t_ctrl_start = time.perf_counter()
-        cmd_vel = controller.compute_commands(telemetry, dt=1.0 / 30.0)
+        cmd_vel = controller.compute_cmd(telemetry, dt=1.0 / 30.0)
         t_ctrl_end = time.perf_counter()
 
         t_end = time.perf_counter()
