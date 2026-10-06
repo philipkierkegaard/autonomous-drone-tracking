@@ -18,6 +18,7 @@ import argparse
 import asyncio
 import threading
 from pathlib import Path
+from collections import deque
 from typing import Optional, Dict, Any, Tuple, Union
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
@@ -196,6 +197,10 @@ class AutonomousTrackerNode:
 
         if self.args.dry_run:
             self.vehicle_state.altitude_rel_m = float(args.sim_alt)
+
+        # 6. Target Motion Trajectory Tail (Breadcrumb ribbon)
+        self.target_trail: deque = deque(maxlen=24)
+        self.prev_trail_id: Optional[int] = None
 
     def _start_stream_server(self, port: int):
         """Starts a background HTTP MJPEG stream server for live browser viewing over SSH or USB-C."""
@@ -551,13 +556,38 @@ class AutonomousTrackerNode:
         cv2.line(out, (cx, cy - 28), (cx, cy - 18), reticle_color, 1, cv2.LINE_AA)
         cv2.line(out, (cx, cy + 18), (cx, cy + 28), reticle_color, 1, cv2.LINE_AA)
 
-        # Target Bounding Box, Tactical Brackets, & Tracking Lead Line
+        # Target Bounding Box, Tactical Brackets, Motion Tail, & Tracking Lead Line
         bbox = telemetry.get("bbox")
         if bbox is not None:
             bx1, by1, bx2, by2 = [int(v) for v in bbox]
             tcx, tcy = (bx1 + bx2) // 2, (by1 + by2) // 2
             trk_id = telemetry.get("target_id", 1)
             box_color = (46, 213, 115) if status == "LOCKED" else (255, 165, 2)
+
+            # Update motion trajectory breadcrumb tail
+            if self.prev_trail_id != trk_id:
+                self.target_trail.clear()
+                self.prev_trail_id = trk_id
+            self.target_trail.append((tcx, tcy))
+
+            # Draw dynamic motion tail with gradient alpha and fading line thickness
+            n_pts = len(self.target_trail)
+            if n_pts > 1:
+                pts_list = list(self.target_trail)
+                for i in range(n_pts - 1):
+                    # Progress from oldest (0.15) to newest (1.0)
+                    alpha = (i + 1) / n_pts
+                    # Gradient color matching target status: fade from subtle to bright
+                    r = int(box_color[0] * (0.15 + 0.85 * alpha))
+                    g = int(box_color[1] * (0.15 + 0.85 * alpha))
+                    b = int(box_color[2] * (0.15 + 0.85 * alpha))
+                    seg_color = (r, g, b)
+                    seg_thick = max(1, int(round(1.0 + 2.0 * alpha)))
+                    cv2.line(out, pts_list[i], pts_list[i + 1], seg_color, seg_thick, cv2.LINE_AA)
+                    # Micro breadcrumb dot along key waypoints
+                    if i % 4 == 0 or i == 0:
+                        dot_radius = max(1, int(round(1.0 + 1.5 * alpha)))
+                        cv2.circle(out, pts_list[i], dot_radius, seg_color, -1, cv2.LINE_AA)
 
             # Tactical corner brackets around target
             c_len = max(8, min(24, int(abs(bx2 - bx1) * 0.25)))
@@ -586,6 +616,8 @@ class AutonomousTrackerNode:
             cv2.rectangle(out, (bx1, max(10, by1 - 22)), (bx1 + badge_w, max(10, by1)), box_color, 1)
             cv2.putText(out, tag_str, (bx1 + 5, max(24, by1 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.42, box_color, 1, cv2.LINE_AA)
         else:
+            if len(self.target_trail) > 0:
+                self.target_trail.popleft()  # Gracefully decay tail when target is lost
             cv2.putText(out, "[SEARCHING FOR TARGET]", (cx - 90, cy + 38), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (120, 120, 120), 1, cv2.LINE_AA)
 
         return out
