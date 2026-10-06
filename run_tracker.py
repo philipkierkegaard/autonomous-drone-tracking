@@ -1029,6 +1029,11 @@ class AutonomousTrackerNode:
                 [control_task, display_task],
                 return_when=asyncio.FIRST_COMPLETED
             )
+            for t in done:
+                if not t.cancelled() and t.exception():
+                    print(f"\n[ERROR] Task crashed with exception: {t.exception()}")
+                    import traceback
+                    traceback.print_exception(type(t.exception()), t.exception(), t.exception().__traceback__)
         except (KeyboardInterrupt, asyncio.CancelledError):
             print("\n[STOP] Termination signal received.")
         finally:
