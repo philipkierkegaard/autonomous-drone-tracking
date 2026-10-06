@@ -121,6 +121,7 @@ class PerceptionState:
         self.lock = threading.Lock()
         self.telemetry: Dict[str, Any] = {"status": "SEARCHING"}
         self.latest_frame: Optional[np.ndarray] = None
+        self.latest_raw_frame: Optional[np.ndarray] = None
         self.last_update_time: float = 0.0
         self.frame_idx: int = 0
         self.fps: float = 0.0
@@ -172,21 +173,47 @@ class AutonomousTrackerNode:
         self.latest_cmd_safe = np.zeros(4, dtype=np.float64)
         self.vision_thread: Optional[threading.Thread] = None
 
-        # 4. Video Recording Setup (HUD & Bounding Boxes)
+        # 4. Video Recording Setup (HUD & Bounding Boxes + Optional Clean Raw Stream)
         self.record_path: Optional[Path] = None
+        self.record_raw_path: Optional[Path] = None
         self.video_writer: Optional[cv2.VideoWriter] = None
+        self.video_writer_raw: Optional[cv2.VideoWriter] = None
         self.record_fps: float = float(getattr(args, "record_fps", 30.0))
-        if getattr(args, "record", None):
-            if args.record == "auto":
-                from datetime import datetime
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                rec_dir = ROOT_DIR / "outputs" / "recordings"
+
+        record_arg = getattr(args, "record", None)
+        record_raw_arg = getattr(args, "record_raw", None)
+        record_both = getattr(args, "record_both", False)
+
+        if record_both:
+            if not record_arg:
+                record_arg = "auto"
+            if not record_raw_arg:
+                record_raw_arg = "auto"
+
+        from datetime import datetime
+        shared_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        rec_dir = ROOT_DIR / "outputs" / "recordings"
+
+        if record_arg:
+            if record_arg == "auto":
                 rec_dir.mkdir(parents=True, exist_ok=True)
-                self.record_path = rec_dir / f"flight_tracking_{timestamp}.mp4"
+                self.record_path = rec_dir / f"flight_tracking_{shared_ts}.mp4"
             else:
-                self.record_path = Path(args.record)
+                self.record_path = Path(record_arg)
                 self.record_path.parent.mkdir(parents=True, exist_ok=True)
-            print(f"[RECORD] Target video recording destination: {self.record_path}")
+            print(f"[RECORD] Target tracked video recording destination: {self.record_path}")
+
+        if record_raw_arg:
+            if record_raw_arg == "auto":
+                rec_dir.mkdir(parents=True, exist_ok=True)
+                if self.record_path and record_arg != "auto":
+                    self.record_raw_path = self.record_path.parent / f"{self.record_path.stem}_raw{self.record_path.suffix}"
+                else:
+                    self.record_raw_path = rec_dir / f"flight_raw_{shared_ts}.mp4"
+            else:
+                self.record_raw_path = Path(record_raw_arg)
+                self.record_raw_path.parent.mkdir(parents=True, exist_ok=True)
+            print(f"[RECORD-RAW] Clean raw camera recording destination: {self.record_raw_path}")
 
         # 5. Live MJPEG Web Streamer Setup (Browser / SSH Port Forwarding)
         self.stream_server: Optional[ThreadingHTTPServer] = None
@@ -801,6 +828,7 @@ class AutonomousTrackerNode:
             }
 
             # Ingest YOLOv8 + Kalman Tracking (with active ego-motion compensation)
+            clean_raw_frame = frame.copy()
             annotated_frame, telemetry = self.pipeline.process_frame(
                 frame, draw_hud=False, ego_telemetry=ego_telemetry
             )
@@ -808,6 +836,7 @@ class AutonomousTrackerNode:
             with self.perception_state.lock:
                 self.perception_state.telemetry = telemetry
                 self.perception_state.latest_frame = annotated_frame
+                self.perception_state.latest_raw_frame = clean_raw_frame
                 self.perception_state.last_update_time = time.perf_counter()
                 self.perception_state.frame_idx = self.pipeline.frame_idx
                 self.perception_state.fps = fps
@@ -933,19 +962,17 @@ class AutonomousTrackerNode:
 
         while self.running:
             new_frame_available = False
+            raw_frame_to_write = None
             with self.perception_state.lock:
+                frame = self.perception_state.latest_frame
+                raw_frame = self.perception_state.latest_raw_frame
+                telemetry = dict(self.perception_state.telemetry)
+                fps = self.perception_state.fps
+                is_stale = self.perception_state.is_stale
                 if self.perception_state.has_new_frame:
-                    frame = self.perception_state.latest_frame
-                    telemetry = dict(self.perception_state.telemetry)
-                    fps = self.perception_state.fps
-                    is_stale = self.perception_state.is_stale
                     self.perception_state.has_new_frame = False
                     new_frame_available = True
-                else:
-                    frame = self.perception_state.latest_frame
-                    telemetry = dict(self.perception_state.telemetry)
-                    fps = self.perception_state.fps
-                    is_stale = self.perception_state.is_stale
+                    raw_frame_to_write = raw_frame
 
             if frame is not None:
                 if is_stale:
@@ -967,8 +994,17 @@ class AutonomousTrackerNode:
                         h, w = display_frame.shape[:2]
                         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
                         self.video_writer = cv2.VideoWriter(str(self.record_path), fourcc, self.record_fps, (w, h))
-                        print(f"[RECORD] Video writer initialized: {self.record_path} ({w}x{h} @ {self.record_fps:.1f} FPS)")
+                        print(f"[RECORD] Tracked video writer initialized: {self.record_path} ({w}x{h} @ {self.record_fps:.1f} FPS)")
                     self.video_writer.write(display_frame)
+
+                # Clean Raw Video Recording (No HUD, no bounding boxes, pure sensor feed for offline re-evaluation)
+                if self.record_raw_path is not None and new_frame_available and raw_frame_to_write is not None:
+                    if self.video_writer_raw is None:
+                        rh, rw = raw_frame_to_write.shape[:2]
+                        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                        self.video_writer_raw = cv2.VideoWriter(str(self.record_raw_path), fourcc, self.record_fps, (rw, rh))
+                        print(f"[RECORD-RAW] Clean video writer initialized: {self.record_raw_path} ({rw}x{rh} @ {self.record_fps:.1f} FPS)")
+                    self.video_writer_raw.write(raw_frame_to_write)
 
                 if not self.args.headless:
                     cv2.imshow("Autonomous Drone Tracker - Companion Node", display_frame)
@@ -1089,11 +1125,16 @@ class AutonomousTrackerNode:
             if not self.args.headless:
                 cv2.destroyAllWindows()
 
-            # Flush and release video recording
+            # Flush and release video recordings
             if self.video_writer is not None:
                 self.video_writer.release()
                 self.video_writer = None
-                print(f"[RECORD] ✓ Tracked video successfully saved to: {self.record_path}")
+                print(f"[RECORD] ✓ Tracked HUD video successfully saved to: {self.record_path}")
+
+            if self.video_writer_raw is not None:
+                self.video_writer_raw.release()
+                self.video_writer_raw = None
+                print(f"[RECORD-RAW] ✓ Clean raw camera video successfully saved to: {self.record_raw_path}")
 
             # Shutdown live MJPEG stream server
             if self.stream_server is not None:
@@ -1152,6 +1193,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--record", nargs="?", const="auto", default=None,
         help="Record video with bounding boxes and flight HUD. Pass flag alone ('--record') to auto-generate timestamped MP4 in outputs/recordings/, or provide a path ('--record my_flight.mp4')."
+    )
+    parser.add_argument(
+        "--record-raw", nargs="?", const="auto", default=None,
+        help="Record pristine raw camera feed with NO HUD or bounding boxes for offline re-evaluation or retraining. Pass flag alone ('--record-raw') or provide a path."
+    )
+    parser.add_argument(
+        "--record-both", action="store_true",
+        help="Simultaneously record both the annotated HUD video (flight_tracking_*.mp4) and the clean raw video (flight_raw_*.mp4)."
     )
     parser.add_argument(
         "--record-fps", type=float, default=30.0,
