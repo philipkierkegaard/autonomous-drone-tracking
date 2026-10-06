@@ -99,6 +99,10 @@ class VehicleState:
         self.pitch_rad: float = 0.0
         self.roll_rad: float = 0.0
         self.yaw_deg: float = 0.0
+        self.vx_m_s: float = 0.0               # North (NED) velocity from EKF2
+        self.vy_m_s: float = 0.0               # East (NED) velocity from EKF2
+        self.vz_m_s: float = 0.0               # Down (NED) vertical velocity (baro+accel)
+        self.has_gps_vel: bool = False         # True when horizontal EKF velocity is actively aiding
         self.altitude_rel_m: float = 0.0       # Relative to takeoff/home (EKF2)
         self.altitude_amsl_m: float = 0.0      # Absolute altitude above MSL
         self.distance_sensor_m: Optional[float] = None  # Downward lidar/sonar rangefinder
@@ -164,7 +168,7 @@ class AutonomousTrackerNode:
 
         # 3. Decoupled Threading & State Containers
         self.perception_state = PerceptionState()
-        self.latest_cmd_safe = np.zeros(3, dtype=np.float64)
+        self.latest_cmd_safe = np.zeros(4, dtype=np.float64)
         self.vision_thread: Optional[threading.Thread] = None
 
         # 4. Video Recording Setup (HUD & Bounding Boxes)
@@ -347,6 +351,23 @@ class AutonomousTrackerNode:
             except Exception:
                 pass
 
+        async def watch_velocity_ned():
+            try:
+                async for vel in self.drone.telemetry.velocity_ned():
+                    if not self.running:
+                        break
+                    vn = float(vel.north_m_s)
+                    ve = float(vel.east_m_s)
+                    vd = float(vel.down_m_s)
+                    self.vehicle_state.vx_m_s = vn
+                    self.vehicle_state.vy_m_s = ve
+                    self.vehicle_state.vz_m_s = vd
+                    # Active horizontal aiding is verified if non-zero velocity/variance is reported
+                    if abs(vn) > 1e-4 or abs(ve) > 1e-4:
+                        self.vehicle_state.has_gps_vel = True
+            except Exception as e:
+                print(f"[WARN] Velocity NED stream interrupted: {e}")
+
         async def watch_in_air():
             try:
                 async for in_air in self.drone.telemetry.in_air():
@@ -361,6 +382,7 @@ class AutonomousTrackerNode:
             watch_flight_mode(),
             watch_position(),
             watch_distance_sensor(),
+            watch_velocity_ned(),
             watch_in_air()
         )
 
@@ -477,8 +499,15 @@ class AutonomousTrackerNode:
         cv2.putText(hud, info_str, (128, 34), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (220, 220, 220), 1, cv2.LINE_AA)
 
         # MAVLink link badge (top right)
-        link_str = "PX4: " + ("DRY-RUN" if self.args.dry_run or not self.vehicle_state.is_connected else self.vehicle_state.flight_mode)
-        link_color = (120, 120, 120) if (self.args.dry_run or not self.vehicle_state.is_connected) else (46, 213, 115)
+        if self.args.dry_run and self.vehicle_state.is_connected:
+            link_str = "PX4: DRY-RUN (TEL)"
+            link_color = (46, 213, 115)  # Green: Live IMU telemetry streaming!
+        elif self.args.dry_run or not self.vehicle_state.is_connected:
+            link_str = "PX4: DRY-RUN"
+            link_color = (120, 120, 120)  # Gray: Standalone desktop dry-run
+        else:
+            link_str = f"PX4: {self.vehicle_state.flight_mode}"
+            link_color = (46, 213, 115)
         cv2.putText(hud, link_str, (w - 180, 34), cv2.FONT_HERSHEY_SIMPLEX, 0.48, link_color, 1, cv2.LINE_AA)
 
         # Altitude Limit Warning Alert Banner (if floor/ceiling active)
@@ -704,8 +733,40 @@ class AutonomousTrackerNode:
             prev_time = now
             fps = 1.0 / max(1e-4, raw_dt)
 
-            # Ingest YOLOv8 + Kalman Tracking (draw_hud=False for clean raw annotated output)
-            annotated_frame, telemetry = self.pipeline.process_frame(frame, draw_hud=False)
+            # Compute ego-motion telemetry (Dual Mode: GPS EKF velocity or Option A commanded dead-reckoning)
+            if self.vehicle_state.has_gps_vel:
+                # Rotate NED velocities into Body frame using drone heading
+                yaw_rad = np.deg2rad(self.vehicle_state.yaw_deg)
+                vn = self.vehicle_state.vx_m_s
+                ve = self.vehicle_state.vy_m_s
+                vx_body = float(np.cos(yaw_rad) * vn + np.sin(yaw_rad) * ve)
+                vy_body = float(-np.sin(yaw_rad) * vn + np.cos(yaw_rad) * ve)
+                vz_body = float(self.vehicle_state.vz_m_s)
+            else:
+                # Option A: Dead-reckoning translation proxy from latest safe command
+                if hasattr(self, "latest_cmd_safe") and self.latest_cmd_safe is not None:
+                    vx_body = float(self.latest_cmd_safe[0])
+                    vy_body = float(self.latest_cmd_safe[1]) if len(self.latest_cmd_safe) >= 4 else 0.0
+                    cmd_down = float(self.latest_cmd_safe[2]) if len(self.latest_cmd_safe) >= 4 else float(self.latest_cmd_safe[1])
+                    vz_body = float(self.vehicle_state.vz_m_s) if abs(self.vehicle_state.vz_m_s) > 1e-3 else cmd_down
+                else:
+                    vx_body, vy_body, vz_body = 0.0, 0.0, 0.0
+
+            ego_telemetry = {
+                "pitch_rad": float(self.vehicle_state.pitch_rad),
+                "roll_rad": float(self.vehicle_state.roll_rad),
+                "yaw_deg": float(self.vehicle_state.yaw_deg),
+                "vx_body": vx_body,
+                "vy_body": vy_body,
+                "vz_body": vz_body,
+                "altitude_m": float(self.get_current_altitude()),
+                "dt": float(raw_dt)
+            }
+
+            # Ingest YOLOv8 + Kalman Tracking (with active ego-motion compensation)
+            annotated_frame, telemetry = self.pipeline.process_frame(
+                frame, draw_hud=False, ego_telemetry=ego_telemetry
+            )
 
             with self.perception_state.lock:
                 self.perception_state.telemetry = telemetry
@@ -819,7 +880,7 @@ class AutonomousTrackerNode:
                     pass
 
             # 9. Store latest safe command for HUD rendering & diagnostics
-            self.latest_cmd_safe = np.array([v_fwd, v_down, yawspeed], dtype=np.float64)
+            self.latest_cmd_safe = np.array([v_fwd, v_right, v_down, yawspeed], dtype=np.float64)
 
             # 10. Precise sleep to maintain deterministic frequency
             elapsed = time.perf_counter() - loop_start
@@ -911,21 +972,11 @@ class AutonomousTrackerNode:
         """Entry point that coordinates the decoupled threads and asyncio tasks."""
         self.running = True
 
-        # Check MAVSDK availability
-        if not self.args.dry_run:
-            if not MAVSDK_AVAILABLE:
-                print("\n[NOTICE] 'mavsdk' is not installed in the current Python environment.")
-                print("[NOTICE] Automatically switching to DRY-RUN Mode (Desktop Benchtop Test).\n")
-                self.args.dry_run = True
-            elif not self.args.connection:
-                print("\n[NOTICE] No MAVLink connection string provided via --connection.")
-                print("[NOTICE] Running in DRY-RUN Mode. Pass e.g. '--connection serial:///dev/ttyTHS1:921600' for flight.\n")
-                self.args.dry_run = True
-
-        # Connect to Pixhawk if in live mode
+        # Check MAVSDK availability & connection mode
         telemetry_task = None
-        if not self.args.dry_run and MAVSDK_AVAILABLE:
-            print(f"[MAVLINK] Connecting to Pixhawk via {self.args.connection}...")
+        if self.args.connection and MAVSDK_AVAILABLE:
+            mode_desc = "LISTEN-ONLY DRY-RUN (Telemetry active, motor commands disabled)" if self.args.dry_run else "LIVE AUTOPILOT CONTROL"
+            print(f"[MAVLINK] Connecting to Pixhawk via {self.args.connection} [{mode_desc}]...")
             self.drone = System()
             try:
                 await self.drone.connect(system_address=self.args.connection)
@@ -938,7 +989,15 @@ class AutonomousTrackerNode:
                 telemetry_task = asyncio.create_task(self.telemetry_listener())
             except Exception as e:
                 print(f"[ERROR] Could not connect to Pixhawk: {e}")
-                print("[FALLBACK] Switching to Dry-Run mode.\n")
+                print("[FALLBACK] Switching to standalone Dry-Run mode.\n")
+                self.args.dry_run = True
+        else:
+            if not self.args.dry_run:
+                if not MAVSDK_AVAILABLE:
+                    print("\n[NOTICE] 'mavsdk' is not installed in the current Python environment.")
+                elif not self.args.connection:
+                    print("\n[NOTICE] No MAVLink connection string provided via --connection.")
+                print("[NOTICE] Running in standalone DRY-RUN Mode (Desktop Benchtop Test).\n")
                 self.args.dry_run = True
 
         # Startup banner

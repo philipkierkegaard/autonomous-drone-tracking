@@ -82,3 +82,101 @@ def unproject_camera_to_horizon(
         err_y_horizon = 1.0 if rz_horizon >= 0.0 else -1.0
 
     return err_x_horizon, err_y_horizon, azimuth_rad, elevation_rad
+
+
+def compute_ego_motion_compensation(
+    cx: float,
+    cy: float,
+    w: float,
+    h: float,
+    delta_pitch_rad: float,
+    delta_roll_rad: float,
+    delta_yaw_rad: float,
+    vx_body: float = 0.0,
+    vy_body: float = 0.0,
+    vz_body: float = 0.0,
+    dt: float = 1.0 / 30.0,
+    estimated_distance_m: float = 6.0,
+    img_width: float = 640.0,
+    img_height: float = 480.0,
+    camera_uptilt_rad: float = np.deg2rad(15.0),
+    half_hfov: float = np.tan(np.deg2rad(30.0)),
+    half_vfov: float = np.tan(np.deg2rad(22.5)),
+) -> Tuple[float, float, float, float]:
+    """
+    Computes image-plane shift [delta_cx, delta_cy, delta_w, delta_h] in pixels
+    induced by chaser drone ego-motion (attitude increments + translational velocity) over dt.
+
+    Features:
+    1. Full 3D back-projection through mount uptilt (+15 deg) to Body frame.
+    2. Subtracts translation displacement (vx_body, vy_body, vz_body) * dt.
+    3. Inverts body rotation increments (delta_roll, delta_pitch, delta_yaw).
+    4. Projects back through mount uptilt to camera sensor.
+    5. Returns exact differential pixel shifts and box scale expansion/contraction.
+    """
+    # 1. Normalized image error [-1, 1]
+    err_x = (cx - img_width / 2.0) / (img_width / 2.0)
+    err_y = (cy - img_height / 2.0) / (img_height / 2.0)
+
+    # 2. Camera optical ray [Right, Down, Forward]
+    rx_cam = err_x * half_hfov
+    ry_cam = err_y * half_vfov
+
+    # Scale to 3D metric position in camera frame
+    dist = max(0.5, estimated_distance_m)
+    P_cam_x = rx_cam * dist
+    P_cam_y = ry_cam * dist
+    P_cam_z = dist
+
+    # 3. Transform to Body frame [Forward, Right, Down] with mount uptilt (+15 deg)
+    cu, su = np.cos(camera_uptilt_rad), np.sin(camera_uptilt_rad)
+    X_body = cu * P_cam_z + su * P_cam_y   # Body Forward
+    Y_body = P_cam_x                       # Body Right
+    Z_body = cu * P_cam_y - su * P_cam_z   # Body Down
+
+    # 4. Translation step (relative motion: target appears to move opposite drone translation)
+    X_body -= vx_body * dt
+    Y_body -= vy_body * dt
+    Z_body -= vz_body * dt
+
+    # 5. Rotation step: apply incremental body attitude changes
+    # Yaw rotation around Body Z (heading clockwise: + yaw)
+    if abs(delta_yaw_rad) > 1e-6:
+        cyaw, syaw = np.cos(delta_yaw_rad), np.sin(delta_yaw_rad)
+        X_body, Y_body = cyaw * X_body + syaw * Y_body, -syaw * X_body + cyaw * Y_body
+
+    # Pitch rotation around Body Y (nose-down is pitch > 0)
+    if abs(delta_pitch_rad) > 1e-6:
+        cp, sp = np.cos(delta_pitch_rad), np.sin(delta_pitch_rad)
+        X_body, Z_body = cp * X_body + sp * Z_body, -sp * X_body + cp * Z_body
+
+    # Roll rotation around Body X (right-wing-down is roll > 0)
+    if abs(delta_roll_rad) > 1e-6:
+        cr, sr = np.cos(delta_roll_rad), np.sin(delta_roll_rad)
+        Y_body, Z_body = cr * Y_body + sr * Z_body, -sr * Y_body + cr * Z_body
+
+    # 6. Transform back from Body to Camera frame
+    P_cam_x_new = Y_body
+    P_cam_y_new = cu * Z_body + su * X_body
+    P_cam_z_new = cu * X_body - su * Z_body
+
+    if P_cam_z_new <= 0.1:  # Target behind camera
+        return 0.0, 0.0, 0.0, 0.0
+
+    # 7. Project back to image plane
+    new_err_x = (P_cam_x_new / P_cam_z_new) / half_hfov
+    new_err_y = (P_cam_y_new / P_cam_z_new) / half_vfov
+
+    new_cx = (img_width / 2.0) + new_err_x * (img_width / 2.0)
+    new_cy = (img_height / 2.0) + new_err_y * (img_height / 2.0)
+
+    delta_cx = float(new_cx - cx)
+    delta_cy = float(new_cy - cy)
+
+    # 8. Scale change (apparent box size dilation/contraction)
+    scale_factor = float(dist / P_cam_z_new)
+    delta_w = float(w * (scale_factor - 1.0))
+    delta_h = float(h * (scale_factor - 1.0))
+
+    return delta_cx, delta_cy, delta_w, delta_h
+

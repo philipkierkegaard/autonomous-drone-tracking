@@ -18,6 +18,14 @@ import numpy as np
 from scipy.optimize import linear_sum_assignment
 from ultralytics import YOLO
 
+try:
+    from control.spatial import compute_ego_motion_compensation
+except ImportError:
+    try:
+        from spatial import compute_ego_motion_compensation
+    except ImportError:
+        compute_ego_motion_compensation = None
+
 
 # ==============================================================================
 # 1. 8D State Kalman Filter for Bounding Box Tracking
@@ -88,12 +96,23 @@ class KalmanBoxTracker:
         self.history = deque(maxlen=40)  # Stores trajectory history of (cx, cy)
         self.history.append((float(cx), float(cy)))
 
-    def predict(self) -> np.ndarray:
+    def predict(self, ego_shift: Optional[Tuple[float, float, float, float]] = None) -> np.ndarray:
         """
-        Advance state forward by dt. Returns predicted [x1, y1, x2, y2].
+        Advance state forward by dt with optional ego-motion compensation.
+        ego_shift: (delta_cx, delta_cy, delta_w, delta_h) shift induced by drone movement
+        Returns predicted [x1, y1, x2, y2].
         """
         # x = F * x
         self.x = np.dot(self.F, self.x)
+
+        # Apply deterministic ego-motion control shift
+        if ego_shift is not None:
+            dcx, dcy, dw, dh = ego_shift
+            self.x[0, 0] += dcx
+            self.x[1, 0] += dcy
+            self.x[2, 0] = max(1.0, self.x[2, 0] + dw)
+            self.x[3, 0] = max(1.0, self.x[3, 0] + dh)
+
         # P = F * P * F^T + Q
         self.P = np.dot(np.dot(self.F, self.P), self.F.T) + self.Q
 
@@ -203,16 +222,23 @@ class DroneTracker:
         self.trackers: List[KalmanBoxTracker] = []
         self.primary_track_id: Optional[int] = None
 
-    def update(self, detections: np.ndarray, confs: np.ndarray) -> List[Dict[str, Any]]:
+    def update(
+        self,
+        detections: np.ndarray,
+        confs: np.ndarray,
+        ego_shifts: Optional[Dict[int, Tuple[float, float, float, float]]] = None
+    ) -> List[Dict[str, Any]]:
         """
         Updates the tracker with new detections in the current frame.
         detections: array of [x1, y1, x2, y2]
         confs: array of detection confidences
+        ego_shifts: optional dict of {track_id: (dcx, dcy, dw, dh)} for ego-motion compensation
         """
-        # 1. Predict new positions for all active trackers
+        # 1. Predict new positions for all active trackers (incorporating ego-motion)
         predicted_boxes = []
         for trk in self.trackers:
-            predicted_boxes.append(trk.predict())
+            shift = ego_shifts.get(trk.id, None) if ego_shifts is not None else None
+            predicted_boxes.append(trk.predict(ego_shift=shift))
         predicted_boxes = np.array(predicted_boxes) if len(predicted_boxes) > 0 else np.empty((0, 4))
 
         # 2. Hungarian matching between predictions and detections
@@ -397,24 +423,81 @@ class DroneTrackingPipeline:
         self.frame_idx = 0
         self.fps_history = deque(maxlen=20)
         self.prev_time = None
+        self.prev_ego_telemetry: Optional[Dict[str, float]] = None
 
     def process_frame(
         self,
         frame: np.ndarray,
-        draw_hud: bool = True
+        draw_hud: bool = True,
+        ego_telemetry: Optional[Dict[str, Any]] = None
     ) -> Tuple[np.ndarray, Dict[str, Any]]:
         """
         Processes a single BGR video frame:
         1. Determines Foveal Digital Zoom based on Constant Apparent Size Regulation
         2. Runs YOLOv8 inference (on high-res crop if zoomed, or full frame)
         3. Maps crop detections back to Global Sensor Coordinates
-        4. Updates 8D Kalman filter in continuous global space
+        4. Updates 8D Kalman filter in continuous global space (with optional ego-motion compensation)
         5. Extracts visual servoing telemetry errors (e_x, e_y, velocities, range/size error)
         6. Renders aeronautical HUD overlay in True Zoom POV or Wide FOV
         """
         t_start = time.perf_counter()
         h, w = frame.shape[:2]
         img_center = (w / 2.0, h / 2.0)
+
+        # ----------------------------------------------------------------------
+        # 0. Drone Ego-Motion Compensation (Rotation + Translation Decoupling)
+        # ----------------------------------------------------------------------
+        ego_shifts: Dict[int, Tuple[float, float, float, float]] = {}
+        target_pred_shift = (0.0, 0.0, 0.0, 0.0)
+
+        if ego_telemetry is not None and compute_ego_motion_compensation is not None:
+            curr_pitch = float(ego_telemetry.get("pitch_rad", 0.0))
+            curr_roll = float(ego_telemetry.get("roll_rad", 0.0))
+            curr_yaw_rad = float(np.deg2rad(ego_telemetry.get("yaw_deg", 0.0)))
+            vx_body = float(ego_telemetry.get("vx_body", 0.0))
+            vy_body = float(ego_telemetry.get("vy_body", 0.0))
+            vz_body = float(ego_telemetry.get("vz_body", 0.0))
+            ego_dt = float(ego_telemetry.get("dt", self.tracker.dt))
+            est_dist = float(ego_telemetry.get("distance_m", ego_telemetry.get("altitude_m", 6.0)))
+
+            if self.prev_ego_telemetry is not None:
+                d_pitch = curr_pitch - self.prev_ego_telemetry["pitch_rad"]
+                d_roll = curr_roll - self.prev_ego_telemetry["roll_rad"]
+                d_yaw = curr_yaw_rad - self.prev_ego_telemetry["yaw_rad"]
+                d_yaw = float((d_yaw + np.pi) % (2.0 * np.pi) - np.pi)
+
+                for trk in self.tracker.trackers:
+                    box = trk.get_state()
+                    tcx = (box[0] + box[2]) / 2.0
+                    tcy = (box[1] + box[3]) / 2.0
+                    tw = max(1.0, box[2] - box[0])
+                    th = max(1.0, box[3] - box[1])
+
+                    shift = compute_ego_motion_compensation(
+                        cx=tcx, cy=tcy, w=tw, h=th,
+                        delta_pitch_rad=d_pitch,
+                        delta_roll_rad=d_roll,
+                        delta_yaw_rad=d_yaw,
+                        vx_body=vx_body,
+                        vy_body=vy_body,
+                        vz_body=vz_body,
+                        dt=ego_dt,
+                        estimated_distance_m=est_dist,
+                        img_width=float(w),
+                        img_height=float(h)
+                    )
+                    ego_shifts[trk.id] = shift
+
+                if self.tracker.primary_track_id in ego_shifts:
+                    target_pred_shift = ego_shifts[self.tracker.primary_track_id]
+                elif len(ego_shifts) > 0:
+                    target_pred_shift = next(iter(ego_shifts.values()))
+
+            self.prev_ego_telemetry = {
+                "pitch_rad": curr_pitch,
+                "roll_rad": curr_roll,
+                "yaw_rad": curr_yaw_rad
+            }
 
         # ----------------------------------------------------------------------
         # 1. Active Foveal Zoom Decision (Constant Apparent Target Size Regulation)
@@ -430,8 +513,8 @@ class DroneTrackingPipeline:
                 if trk.id == self.tracker.primary_track_id:
                     primary_trk = trk
                     pred_box = trk.get_state()
-                    tcx = (pred_box[0] + pred_box[2]) / 2.0
-                    tcy = (pred_box[1] + pred_box[3]) / 2.0
+                    tcx = (pred_box[0] + pred_box[2]) / 2.0 + target_pred_shift[0]
+                    tcy = (pred_box[1] + pred_box[3]) / 2.0 + target_pred_shift[1]
                     target_pred_center = (tcx, tcy)
                     current_target_size = max(pred_box[2] - pred_box[0], pred_box[3] - pred_box[1])
 
@@ -523,7 +606,7 @@ class DroneTrackingPipeline:
         # 3. Update 8D Kalman Filter in Global Sensor Coordinates (or Pure Raw Mode)
         # ----------------------------------------------------------------------
         if self.enable_kalman:
-            active_tracks = self.tracker.update(detections, confs)
+            active_tracks = self.tracker.update(detections, confs, ego_shifts=ego_shifts)
             primary_track = None
             for trk in active_tracks:
                 if trk["id"] == self.tracker.primary_track_id:
@@ -590,6 +673,9 @@ class DroneTrackingPipeline:
             "is_zoomed": is_zoomed,
             "view_mode": self.view_mode,
             "active_tracks_count": len(active_tracks),
+            "ego_compensated": bool(len(ego_shifts) > 0),
+            "ego_shift_x": float(target_pred_shift[0]),
+            "ego_shift_y": float(target_pred_shift[1]),
             "fps": 0.0
         }
 

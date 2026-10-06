@@ -88,6 +88,7 @@ control-model/
 # YOLO Weights (*.pt): ignore all checkpoints by default, but track the deployment model for Jetson
 *.pt
 !perception/weights/yolov8n_v3_best.pt
+!perception/weights/yolov8n_v4_continued_best.pt
 perception/yolov8n.pt
 
 # RL Control Weights (*.zip): ignore all checkpoints, runs, and eval archives, tracking only the best models
