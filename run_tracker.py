@@ -829,9 +829,14 @@ class AutonomousTrackerNode:
 
             # Ingest YOLOv8 + Kalman Tracking (with active ego-motion compensation)
             clean_raw_frame = frame.copy()
-            annotated_frame, telemetry = self.pipeline.process_frame(
-                frame, draw_hud=False, ego_telemetry=ego_telemetry
-            )
+            try:
+                annotated_frame, telemetry = self.pipeline.process_frame(
+                    frame, draw_hud=False, ego_telemetry=ego_telemetry
+                )
+            except TypeError:
+                annotated_frame, telemetry = self.pipeline.process_frame(
+                    frame, draw_hud=False
+                )
 
             with self.perception_state.lock:
                 self.perception_state.telemetry = telemetry
