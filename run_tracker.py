@@ -222,6 +222,12 @@ class AutonomousTrackerNode:
         if getattr(args, "stream", False):
             self._start_stream_server(int(getattr(args, "stream_port", 8080)))
 
+        # Auto-detect headless environment (SSH session without an X11/GTK display)
+        if not getattr(self.args, "headless", False):
+            if not os.environ.get("DISPLAY"):
+                print("[DISPLAY] No active X11 display server detected ($DISPLAY unset). Automatically running in --headless mode.")
+                self.args.headless = True
+
         if self.args.dry_run:
             self.vehicle_state.altitude_rel_m = float(args.sim_alt)
 
@@ -1012,13 +1018,17 @@ class AutonomousTrackerNode:
                     self.video_writer_raw.write(raw_frame_to_write)
 
                 if not self.args.headless:
-                    cv2.imshow("Autonomous Drone Tracker - Companion Node", display_frame)
+                    try:
+                        cv2.imshow("Autonomous Drone Tracker - Companion Node", display_frame)
 
-                    key = cv2.waitKey(1) & 0xFF
-                    if key == ord('q'):
-                        print("\n[USER] Quit key pressed.")
-                        self.running = False
-                        break
+                        key = cv2.waitKey(1) & 0xFF
+                        if key == ord('q'):
+                            print("\n[USER] Quit key pressed.")
+                            self.running = False
+                            break
+                    except (cv2.error, Exception) as e:
+                        print(f"\n[DISPLAY] GUI window initialization failed ({e}). Automatically switching to --headless mode.")
+                        self.args.headless = True
 
             if self.args.headless:
                 now = time.perf_counter()
