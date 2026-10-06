@@ -1183,19 +1183,26 @@ def parse_args() -> argparse.Namespace:
         "--source", type=str, default="0",
         help="Video source: camera index (e.g. '0'), video file path, or GStreamer string."
     )
-    default_weights = (
-        str(DETECTION_DIR / "weights/yolov8n_v3_best.pt")
-        if (DETECTION_DIR / "weights/yolov8n_v3_best.pt").exists()
-        else str(DETECTION_DIR / "runs/detect/yolov8n_drone/weights/best.pt")
-    )
+    engine_v4 = DETECTION_DIR / "weights/yolov8n_drone_v4_continued_best.engine"
+    pt_v4 = DETECTION_DIR / "weights/yolov8n_drone_v4_continued_best.pt"
+    pt_v3 = DETECTION_DIR / "weights/yolov8n_v3_best.pt"
+    if engine_v4.exists():
+        default_weights = str(engine_v4)
+    elif pt_v4.exists():
+        default_weights = str(pt_v4)
+    elif pt_v3.exists():
+        default_weights = str(pt_v3)
+    else:
+        default_weights = str(DETECTION_DIR / "runs/detect/yolov8n_drone/weights/best.pt")
+
     parser.add_argument(
         "--weights", type=str,
         default=default_weights,
         help=f"Path to trained YOLOv8 drone detector weights (default: {default_weights})."
     )
     parser.add_argument(
-        "--conf", type=float, default=0.35,
-        help="YOLO detection confidence threshold (default: 0.35)."
+        "--conf", type=float, default=0.25,
+        help="YOLO detection confidence threshold (default: 0.25 for high recall with Kalman filtering)."
     )
     parser.add_argument(
         "--target-size", type=float, default=35.0,
