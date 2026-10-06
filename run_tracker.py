@@ -298,12 +298,17 @@ class AutonomousTrackerNode:
                 else:
                     self.send_error(404)
 
+        class ReusableThreadingHTTPServer(ThreadingHTTPServer):
+            allow_reuse_address = True
+            daemon_threads = True
+
         try:
-            self.stream_server = ThreadingHTTPServer(("0.0.0.0", port), MJPEGHandler)
+            self.stream_server = ReusableThreadingHTTPServer(("0.0.0.0", port), MJPEGHandler)
             stream_thread = threading.Thread(target=self.stream_server.serve_forever, daemon=True)
             stream_thread.start()
-            print(f"[STREAM] Live MJPEG web stream active at: http://0.0.0.0:{port}/")
-            print(f"         On your Mac, open: http://192.168.55.1:{port}/")
+            print(f"[STREAM] Live MJPEG web stream active on port {port}:")
+            print(f"         • Over Wi-Fi Hotspot: http://10.42.0.1:{port}/")
+            print(f"         • Over USB-C Cable:   http://192.168.55.1:{port}/")
         except Exception as e:
             print(f"[WARN] Failed to start HTTP stream server on port {port}: {e}")
 
@@ -1094,6 +1099,7 @@ class AutonomousTrackerNode:
             if self.stream_server is not None:
                 try:
                     self.stream_server.shutdown()
+                    self.stream_server.server_close()
                 except Exception:
                     pass
                 self.stream_server = None
