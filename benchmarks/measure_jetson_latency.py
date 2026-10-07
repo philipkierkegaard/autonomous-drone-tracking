@@ -41,14 +41,24 @@ def run_benchmark(
     print(f"Profiling iterations: {n_frames} timed frames ({n_warmup} warmup frames)\n")
 
     # 1. Initialize Controller
-    controller = KinematicVisualServoController(
-        camera_uptilt_deg=0.0,
-        hfov_deg=82.0,
-        vfov_deg=52.0,
-        desired_bbox_size=63.0,
-        desired_standoff_dist=3.5,
-        deadband_dist=0.35,
-    )
+    import inspect
+    sig = inspect.signature(KinematicVisualServoController.__init__)
+    ctrl_kwargs = {
+        "camera_uptilt_deg": 0.0,
+        "hfov_deg": 82.0,
+        "vfov_deg": 52.0,
+        "desired_bbox_size": 63.0,
+    }
+    if "desired_standoff_dist" in sig.parameters:
+        ctrl_kwargs["desired_standoff_dist"] = 3.5
+    if "deadband_dist" in sig.parameters:
+        ctrl_kwargs["deadband_dist"] = 0.35
+
+    controller = KinematicVisualServoController(**ctrl_kwargs)
+    if hasattr(controller, "deadband_dist"):
+        controller.deadband_dist = 0.35
+    if hasattr(controller, "standoff_dist"):
+        controller.standoff_dist = 3.5
 
     # 2. Initialize Perception Pipeline
     print(f"[INIT] Loading perception pipeline with {weights_path}...")
