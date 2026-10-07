@@ -90,9 +90,15 @@ def run_benchmark(
     }
 
     # 3. GPU Warm-up Phase (stabilize dynamic CUDA kernels & thermal clocks)
-    print(f"[WARMUP] Running {n_warmup} warmup cycles...")
+    perc_sig = inspect.signature(pipeline.process_frame)
+    supports_ego = "ego_telemetry" in perc_sig.parameters
+
+    print(f"[WARMUP] Running {n_warmup} warmup cycles (ego_motion_compensation={supports_ego})...")
     for _ in range(n_warmup):
-        pipeline.process_frame(dummy_frame, draw_hud=False, ego_telemetry=ego_telemetry)
+        if supports_ego:
+            pipeline.process_frame(dummy_frame, draw_hud=False, ego_telemetry=ego_telemetry)
+        else:
+            pipeline.process_frame(dummy_frame, draw_hud=False)
         telemetry = dict(pipeline.telemetry) if hasattr(pipeline, "telemetry") else {}
         controller.compute_cmd(telemetry, dt=1.0 / 30.0)
 
@@ -115,9 +121,14 @@ def run_benchmark(
 
         # Step A: Perception Pipeline (Preprocessing + YOLOv8 TensorRT + NMS + Kalman Filter)
         t_perc_start = time.perf_counter()
-        annotated_frame, telemetry = pipeline.process_frame(
-            test_frame, draw_hud=False, ego_telemetry=ego_telemetry
-        )
+        if supports_ego:
+            annotated_frame, telemetry = pipeline.process_frame(
+                test_frame, draw_hud=False, ego_telemetry=ego_telemetry
+            )
+        else:
+            annotated_frame, telemetry = pipeline.process_frame(
+                test_frame, draw_hud=False
+            )
         t_perc_end = time.perf_counter()
 
         # Step B: Control Evaluation (IBVS Kinematic Controller)
