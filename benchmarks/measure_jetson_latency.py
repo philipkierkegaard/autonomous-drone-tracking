@@ -45,7 +45,9 @@ def run_benchmark(
         camera_uptilt_deg=0.0,
         hfov_deg=82.0,
         vfov_deg=52.0,
-        desired_bbox_size=35.0
+        desired_bbox_size=63.0,
+        desired_standoff_dist=3.5,
+        deadband_dist=0.35,
     )
 
     # 2. Initialize Perception Pipeline
@@ -55,7 +57,7 @@ def run_benchmark(
         conf_threshold=0.25,
         iou_threshold=0.45,
         max_lost_frames=15,
-        desired_target_size=35.0,
+        desired_target_size=63.0,
         enable_dynamic_zoom=False
     )
 
