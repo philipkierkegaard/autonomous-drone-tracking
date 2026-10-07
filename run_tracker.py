@@ -224,13 +224,16 @@ class AutonomousTrackerNode:
             print("       ✓ TensorRT FP16 Hardware-Accelerated Engine Active (Target: 30+ FPS)!")
         else:
             print("       ! Notice: Running standard PyTorch model (Use .engine on Jetson for max FPS)")
+        enable_zoom = bool(getattr(args, "foveal_zoom", False))
+        max_zoom = float(getattr(args, "max_zoom", 2.0))
         self.pipeline = DroneTrackingPipeline(
             weights=args.weights,
             conf_threshold=args.conf,
             iou_threshold=0.45,
             max_lost_frames=args.max_lost_frames,
             desired_target_size=args.target_size,
-            enable_dynamic_zoom=False  # Full sensor frame for flight control
+            enable_dynamic_zoom=enable_zoom,
+            max_zoom=max_zoom
         )
 
         # 3. Decoupled Threading & State Containers
@@ -1328,6 +1331,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--adaptive-shadows", action="store_true",
         help="Enable real-time (<0.8ms) adaptive shadow compensation. Automatically lifts crushed ground shadows when facing bright sky, while completely bypassing normal lighting to avoid washout."
+    )
+    parser.add_argument(
+        "--foveal-zoom", action="store_true",
+        help="Enable dynamic digital PTZ (foveal zoom). Crops native sensor pixels around Kalman-predicted target when far away (<63px / >3.5m) and smoothly unzooms to wide FOV at standoff."
+    )
+    parser.add_argument(
+        "--max-zoom", type=float, default=2.0,
+        help="Maximum magnification factor for dynamic foveal zoom (default: 2.0 to maintain peripheral safety margin)."
     )
     parser.add_argument(
         "--cam-flip", type=int, default=0,

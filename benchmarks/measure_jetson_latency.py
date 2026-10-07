@@ -31,13 +31,15 @@ def run_benchmark(
     n_frames: int = 200,
     n_warmup: int = 25,
     img_w: int = 1280,
-    img_h: int = 720
+    img_h: int = 720,
+    enable_zoom: bool = False
 ):
     print("=" * 72)
     print("       NVIDIA JETSON ORIN NANO — PIPELINE LATENCY PROFILER        ")
     print("=" * 72)
     print(f"Weights target:     {weights_path}")
     print(f"Sensor resolution:  {img_w}x{img_h} (HD)")
+    print(f"Foveal PTZ Zoom:    {'ENABLED' if enable_zoom else 'DISABLED (Full Frame)'}")
     print(f"Profiling iterations: {n_frames} timed frames ({n_warmup} warmup frames)\n")
 
     # 1. Initialize Controller
@@ -68,7 +70,7 @@ def run_benchmark(
         iou_threshold=0.45,
         max_lost_frames=15,
         desired_target_size=63.0,
-        enable_dynamic_zoom=False
+        enable_dynamic_zoom=enable_zoom
     )
 
     # Synthetic realistic frame (1280x720 RGB with a simulated drone target)
@@ -234,9 +236,15 @@ def main():
     parser.add_argument("--weights", type=str, default=chosen_weights, help="Path to .engine or .pt weights")
     parser.add_argument("--frames", type=int, default=200, help="Number of timed benchmark frames (default: 200)")
     parser.add_argument("--warmup", type=int, default=25, help="Number of warmup iterations (default: 25)")
+    parser.add_argument("--foveal-zoom", action="store_true", help="Enable dynamic foveal zoom during latency benchmark")
     args = parser.parse_args()
 
-    run_benchmark(weights_path=args.weights, n_frames=args.frames, n_warmup=args.warmup)
+    run_benchmark(
+        weights_path=args.weights,
+        n_frames=args.frames,
+        n_warmup=args.warmup,
+        enable_zoom=args.foveal_zoom
+    )
 
 
 if __name__ == "__main__":
