@@ -157,8 +157,28 @@ class AutonomousTrackerNode:
             max_lat_vel=args.max_lat_speed
         )
 
-        # 2. Initialize Perception Pipeline (YOLOv8 + 8D Kalman Filter)
+        # 2. Check if compiled TensorRT .engine is available on the edge device
+        weights_p = Path(args.weights)
+        if weights_p.suffix == ".pt":
+            engine_p = weights_p.with_suffix(".engine")
+            if engine_p.exists():
+                print(f"[MODEL] Detected compiled TensorRT engine: {engine_p.name}")
+                print(f"        Automatically upgrading from PyTorch (.pt) -> TensorRT (.engine) for 30+ FPS hardware acceleration!")
+                args.weights = str(engine_p)
+            else:
+                # Check default v4 engine in weights dir
+                v4_engine = DETECTION_DIR / "weights/yolov8n_drone_v4_continued_best.engine"
+                if v4_engine.exists():
+                    print(f"[MODEL] Detected production TensorRT engine: {v4_engine.name}")
+                    print(f"        Automatically switching to TensorRT engine for 30+ FPS hardware acceleration!")
+                    args.weights = str(v4_engine)
+
+        # Initialize Perception Pipeline (YOLOv8 + 8D Kalman Filter)
         print(f"[INIT] Initializing Perception Pipeline with model: {args.weights}")
+        if str(args.weights).endswith(".engine"):
+            print("       ✓ TensorRT FP16 Hardware-Accelerated Engine Active (Target: 30+ FPS)!")
+        else:
+            print("       ! Notice: Running standard PyTorch model (Use .engine on Jetson for max FPS)")
         self.pipeline = DroneTrackingPipeline(
             weights=args.weights,
             conf_threshold=args.conf,
