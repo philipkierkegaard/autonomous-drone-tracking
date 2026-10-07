@@ -53,9 +53,10 @@ class KinematicVisualServoController:
         camera_uptilt_deg: float = 15.0,
         hfov_deg: float = 60.0,
         vfov_deg: float = 45.0,
-        desired_bbox_size: float = 32.33,    # Desired target bounding box size (pixels, 640x480 frame at 6.0m standoff)
-        desired_standoff_dist: float = 6.0,  # Target standoff distance in meters (6.0m)
-        use_bbox_size: bool = False,         # If False, regulates direct metric distance (6.0m)
+        desired_bbox_size: float = 63.0,     # Desired target bounding box size (pixels, 63px at 3.5m standoff)
+        desired_standoff_dist: float = 3.5,  # Target standoff distance in meters (3.5m)
+        use_bbox_size: bool = False,         # If False, regulates direct metric distance (3.5m)
+        deadband_dist: float = 0.35,         # Deadband cushion in meters (+/- 0.35m around standoff)
         # 3D/4D PID Gains: [Forward (X), Lateral (Y), Vertical (Z), Yaw (Psi)]
         kp: np.ndarray = None,
         ki: np.ndarray = None,
@@ -68,7 +69,7 @@ class KinematicVisualServoController:
         ki_z: float = None,
         kd_z: float = None,
         # Output Saturation Limits per axis: [Forward, Lateral, Vertical, Yaw]
-        min_limits: np.ndarray = None,       # Default: [-5.0 m/s fwd (reverse brake), -6.0 m/s lat, -4.0 m/s climb, -120 deg/s yaw]
+        min_limits: np.ndarray = None,       # Default: [-0.5 m/s fwd (gentle reverse cushion), -6.0 m/s lat, -4.0 m/s climb, -120 deg/s yaw]
         max_limits: np.ndarray = None,       # Default: [15.0 m/s fwd, +6.0 m/s lat, +2.5 m/s desc, +120 deg/s yaw]
         # Integrator Anti-Windup Clamping Bounds
         int_limits: np.ndarray = None,       # Forward and Lateral integrators are 0.0 (kinematic surge + PD sway)
@@ -92,6 +93,7 @@ class KinematicVisualServoController:
         self.desired_bbox_size = desired_bbox_size
         self.standoff_dist = desired_standoff_dist
         self.use_bbox_size = use_bbox_size
+        self.deadband_dist = float(deadband_dist)
 
         self.lost_time = 0.0
 
@@ -134,13 +136,13 @@ class KinematicVisualServoController:
             if len(min_limits) == 4:
                 self.min_limits = np.array(min_limits, dtype=np.float64)
             elif len(min_limits) == 3:
-                # [vx_min, vz_min, yaw_min] -> allow active reverse braking if vx_min == 0.0
-                vx_min = float(min_limits[0]) if min_limits[0] < 0.0 else -5.0
+                # [vx_min, vz_min, yaw_min]
+                vx_min = float(min_limits[0])
                 self.min_limits = np.array([vx_min, -lat_limit, min_limits[1], min_limits[2]], dtype=np.float64)
             else:
-                self.min_limits = np.array([-5.0, -lat_limit, -4.0, -yaw_limit], dtype=np.float64)
+                self.min_limits = np.array([-0.5, -lat_limit, -4.0, -yaw_limit], dtype=np.float64)
         else:
-            self.min_limits = np.array([-5.0, -lat_limit, -4.0, -yaw_limit], dtype=np.float64)
+            self.min_limits = np.array([-0.5, -lat_limit, -4.0, -yaw_limit], dtype=np.float64)
 
         if max_limits is not None:
             if len(max_limits) == 4:
@@ -365,27 +367,38 @@ class KinematicVisualServoController:
         # ----------------------------------------------------------------------
         raw_output = p_term + i_term + d_term
 
-        # Kinematic approach & recession curve on Axis 0 (Forward Speed) with active reverse braking
+        # Kinematic approach & recession curve on Axis 0 (Forward Speed) with deadband cushion
         if self.use_bbox_size:
             scale_err = e[0]  # normalized scale error: (s* - s) / s*
             denom = max(0.05, 1.0 - scale_err) if scale_err < 1.0 else 0.05
             ratio = scale_err / denom
             approx_dist_err = self.standoff_dist * ratio
-
-            if approx_dist_err >= 0.0:
-                v_kinematic = min(self.max_limits[0], np.sqrt(2.0 * self.max_decel * approx_dist_err))
-            else:
-                # Active reverse braking when target is closer than standoff cushion
-                v_kinematic = -min(abs(self.min_limits[0]), np.sqrt(2.0 * self.max_decel * abs(approx_dist_err)))
+            dist_signal = approx_dist_err
         else:
             dist_err = e[0]
-            if dist_err >= 0.0:
-                v_kinematic = min(self.max_limits[0], np.sqrt(2.0 * self.max_decel * dist_err))
+            dist_signal = dist_err
+
+        # Deadband cushion to prevent hunting, chatter, and violent reversals around setpoint
+        if abs(dist_signal) <= self.deadband_dist:
+            v_kinematic = 0.0
+        elif dist_signal > self.deadband_dist:
+            eff_err = dist_signal - self.deadband_dist
+            v_kinematic = min(self.max_limits[0], np.sqrt(2.0 * self.max_decel * eff_err))
+        else:
+            # Active gentle reverse cushion when target penetrates inside deadband
+            eff_err = abs(dist_signal) - self.deadband_dist
+            max_rev = abs(min(0.0, self.min_limits[0]))
+            if max_rev > 0.0:
+                v_kinematic = -min(max_rev, np.sqrt(2.0 * min(self.max_decel, 1.5) * eff_err))
             else:
-                v_kinematic = -min(abs(self.min_limits[0]), np.sqrt(2.0 * self.max_decel * abs(dist_err)))
+                v_kinematic = 0.0
 
         # Blend kinematic velocity with derivative damping and feedforward
         raw_output[0] = v_kinematic + d_term[0] + target_vx_ff
+
+        # Prevent reverse retreat when target is within deadband or further away
+        if dist_signal >= -self.deadband_dist:
+            raw_output[0] = max(0.0, raw_output[0])
 
         # Centering damping: ease forward acceleration gently during sharp turns without killing pursuit momentum
         if raw_output[0] > 0.0:
@@ -457,7 +470,7 @@ DroneVisualPIDController = KinematicVisualServoController
 def run_simulation_and_plot():
     """
     Simulates 20 seconds of autonomous closed-loop pursuit using KinematicVisualServoController.
-    Uses pure bounding-box pixel regulation (desired_bbox_size = 35 px on 640x480).
+    Uses pure bounding-box pixel regulation (desired_bbox_size = 63 px, ~3.5m standoff).
     """
     dt = 0.02
     total_time = 20.0
@@ -468,7 +481,8 @@ def run_simulation_and_plot():
         camera_uptilt_deg=15.0,
         hfov_deg=60.0,
         vfov_deg=45.0,
-        desired_bbox_size=35.0,  # 35px corresponds to ~6m standoff on 640x480
+        desired_bbox_size=63.0,  # 63px corresponds to ~3.5m standoff
+        desired_standoff_dist=3.5,
     )
 
     sim.reset(initial_pos=[0.0, 0.0, 0.0], initial_yaw=0.0)
@@ -508,7 +522,7 @@ def run_simulation_and_plot():
             target_h_m=0.20,
             img_w=640,
             img_h=480,
-            desired_target_size=35.0
+            desired_target_size=63.0
         )
 
         # 2. Compute 3D Control Vector using bounding box pixel errors

@@ -145,12 +145,17 @@ class AutonomousTrackerNode:
 
         # 1. Initialize Kinematic Visual Servoing Controller
         print("\n[INIT] Initializing Kinematic Visual Servoing Controller...")
+        max_rev = float(getattr(args, "max_reverse", 0.5))
+        standoff = float(getattr(args, "standoff_dist", 3.5))
+        deadband = float(getattr(args, "deadband", 0.35))
         self.controller = KinematicVisualServoController(
             camera_uptilt_deg=args.uptilt,
             hfov_deg=args.hfov,
             vfov_deg=args.vfov,
             desired_bbox_size=args.target_size,
-            min_limits=np.array([0.0, -args.max_climb, -args.max_yawspeed]),
+            desired_standoff_dist=standoff,
+            deadband_dist=deadband,
+            min_limits=np.array([-abs(max_rev), -args.max_climb, -args.max_yawspeed]),
             max_limits=np.array([args.max_speed, args.max_desc, args.max_yawspeed]),
             use_bbox_size=True,
             enable_lateral_strafe=args.lateral_strafe,
@@ -1065,14 +1070,17 @@ class AutonomousTrackerNode:
                         status = "STALE_WD"
 
                     current_alt = self.get_current_altitude()
-                    alt_status = self.vehicle_state.alt_safety_status
                     cmd = getattr(self, "latest_cmd_safe", np.zeros(3))
+                    if len(cmd) == 4:
+                        cmd_str = f"Cmd: [vx={cmd[0]:4.1f}, vy={cmd[1]:+4.2f}, vz={cmd[2]:+4.2f}, yaw={cmd[3]:+5.1f}]"
+                    else:
+                        cmd_str = f"Cmd: [vx={cmd[0]:4.1f}, vz={cmd[1]:+4.2f}, yaw={cmd[2]:+5.1f}]"
 
                     print(f"Frame {f_idx:5d} ({v_fps:4.1f}fps) | "
                           f"Status: {status:8s} | "
                           f"Alt: {current_alt:4.1f}m ({alt_status:13s}) | "
                           f"Size: {sz:4.0f}px | "
-                          f"Cmd: [vx={cmd[0]:4.1f}, vz={cmd[1]:+4.2f}, yaw={cmd[2]:+5.1f}]")
+                          f"{cmd_str}")
 
             await asyncio.sleep(0.01)  # ~100 Hz responsive check
 
@@ -1114,12 +1122,12 @@ class AutonomousTrackerNode:
         print("=======================================================")
         print(f"• Flight Mode:        {'DRY-RUN (Desktop Test)' if self.args.dry_run else 'LIVE MAVSDK AUTOPILOT'}")
         print(f"• MAVLink Loop Rate:  {self.args.ctrl_rate:.0f} Hz (Decoupled Deterministic Stream)")
-        print(f"• Target Pixel Size:  {self.args.target_size:.0f} px")
+        print(f"• Target Standoff:    {getattr(self.args, 'standoff_dist', 3.5):.1f} m ({self.args.target_size:.0f} px, deadband +/-{getattr(self.args, 'deadband', 0.35):.2f}m)")
         print(f"• Altitude Floor:     {self.args.min_alt:.1f} m AGL (Cushion: {self.args.alt_cushion:.1f} m)")
         print(f"• Altitude Ceiling:   {self.args.max_alt:.1f} m AGL")
         print(f"• Watchdog Timeout:   {self.args.watchdog_timeout * 1000:.0f} ms")
         print(f"• Acceleration Caps:  XY={self.args.max_accel_xy:.1f} m/s^2 | Z={self.args.max_accel_z:.1f} m/s^2 | Yaw={self.args.max_accel_yaw:.0f} deg/s^2")
-        print(f"• Forward Speed Cap:  {self.args.max_speed:.1f} m/s")
+        print(f"• Forward Speed Cap:  {self.args.max_speed:.1f} m/s (Max Reverse: {getattr(self.args, 'max_reverse', 0.5):.1f} m/s)")
         print(f"• Press 'q' in video window or Ctrl+C to terminate.")
         print("=======================================================\n")
 
@@ -1225,8 +1233,20 @@ def parse_args() -> argparse.Namespace:
         help="YOLO detection confidence threshold (default: 0.25 for high recall with Kalman filtering)."
     )
     parser.add_argument(
-        "--target-size", type=float, default=35.0,
-        help="Desired bounding box size in pixels on 640x480 frame (default: 35 px for ~6m standoff)."
+        "--target-size", type=float, default=63.0,
+        help="Desired bounding box size in pixels on camera frame (default: 63 px for ~3.5m standoff)."
+    )
+    parser.add_argument(
+        "--standoff-dist", type=float, default=3.5,
+        help="Target pursuit standoff distance in meters (default: 3.5m)."
+    )
+    parser.add_argument(
+        "--deadband", type=float, default=0.35,
+        help="Position deadband cushion in meters (+/- 0.35m around standoff) to prevent hunting/chatter (default: 0.35m)."
+    )
+    parser.add_argument(
+        "--max-reverse", type=float, default=0.5,
+        help="Maximum gentle reverse velocity in m/s if target penetrates inside deadband. Set 0.0 to disable reverse flight (default: 0.5 m/s)."
     )
     parser.add_argument(
         "--max-lost-frames", type=int, default=15,
