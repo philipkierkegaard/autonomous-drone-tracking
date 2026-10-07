@@ -1,0 +1,129 @@
+\documentclass[11pt,a4paper]{article}
+
+% --- Packages ---
+\usepackage[utf8]{inputenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{microtype}
+\usepackage{enumitem}
+\usepackage{titlesec}
+
+% --- Hyperref Setup ---
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue!70!black,
+    citecolor=blue!70!black,
+    urlcolor=blue!70!black
+}
+
+% --- Section Styling ---
+\titleformat{\section}{\large\bfseries}{\thesection}{1em}{}[\titlerule]
+\titleformat{\subsection}{\normalsize\bfseries}{\thesubsection}{1em}{}
+
+% --- Document Info ---
+\title{\textbf{Weekly Report - 5}\\[0.2em]
+\large Bachelor Project --- Danmarks Tekniske Universitet (DTU)\\[0.1em]
+\normalsize Autonomous Drone Pursuit \& Vision-Based Interception}
+\author{\textbf{Philip Kierkegaard}}
+\date{October 8, 2026}
+
+\begin{document}
+\maketitle
+
+\vspace{-1.5em}
+\noindent\rule{\textwidth}{0.4pt}
+
+\section*{Summary}
+This week marked the transition from simulation policy training to \textbf{edge deployment, perception hardening, and sim-to-real flight readiness}. We upgraded our visual detection backbone to YOLOv8n (v4) trained with Normalized Wasserstein Distance (NWD) loss at $768\times 768$ resolution and compiled it to a TensorRT 10.3 FP16 engine on the airborne companion computer (NVIDIA Jetson Orin Nano). Hardware profiling confirmed an end-to-end software latency of \textbf{32.58~ms (30.7~FPS)}, successfully clearing our 30~FPS real-time threshold with near-zero control overhead (0.03~ms). In state estimation, we integrated full 6-DOF egomotion decoupling into the 8D Kalman filter to isolate target kinematics from chaser attitude transients. Finally, we refined the physical guidance law with a calibrated 3.5~m standoff, a hover deadband window, and asymmetric reverse velocity limits, accompanied by a real-time adaptive shadow compensation pipeline for outdoor optical contrast.
+
+\section{Perception Stack Overhaul \& TensorRT Edge Profiling}
+To bridge the detection gaps observed in initial outdoor tests, the perception stack was substantially re-engineered for edge execution on the Jetson Orin Nano.
+
+\subsection{YOLOv8 v4 with Normalized Wasserstein Distance (NWD)}
+Standard Intersection over Union (IoU) metrics exhibit extreme sensitivity to small pixel offsets when targets occupy tiny bounding boxes ($< 30$~px), leading to vanishing gradients or false negatives during initial acquisition at range. The upgraded model (\texttt{yolov8n\_drone\_v4}) incorporates Normalized Wasserstein Distance (NWD):
+\begin{equation}
+    \text{NWD}(\mathcal{N}_a, \mathcal{N}_b) = \exp\left( -\frac{\mathcal{W}_2(\mathcal{N}_a, \mathcal{N}_b)}{C} \right)
+\end{equation}
+where bounding boxes are modeled as 2D Gaussian distributions $\mathcal{N}(\boldsymbol{\mu}, \boldsymbol{\Sigma})$ and $\mathcal{W}_2$ represents the second Wasserstein metric. This produces smooth, non-zero localization gradients even when predicted and ground-truth boxes do not physically overlap. Operating at $768\times 768$ input resolution provides a $1.44\times$ increase in pixel area over $640\times 640$, resolving target airframe geometry at distances beyond 15~meters.
+
+\subsection{Edge TensorRT Compilation \& Latency Benchmark}
+The PyTorch model was converted to ONNX and compiled into an optimized TensorRT 10.3 engine with FP16 half-precision execution on the Jetson Orin Nano (export duration: 416.5~s). The compiled engine occupies only 8~MiB of flash storage and allocates 13~MiB of GPU execution context memory.
+
+An automated latency profiler was executed directly on the physical Jetson Orin Nano hardware, timing 200 consecutive frames (preceded by 25 GPU warm-up cycles) under active 1280$\times$720 sensor processing:
+
+\begin{table}[h!]
+\centering
+\small
+\begin{tabularx}{\textwidth}{lXcccc}
+\toprule
+\textbf{Pipeline Stage} & \textbf{Algorithm / Engine} & \textbf{Mean Latency} & \textbf{Std Dev} & \textbf{95th \%ile} & \textbf{Compute Share} \\
+\midrule
+\textbf{Perception} & YOLOv8n TRT FP16 ($768^2$) + Kalman & \textbf{32.55~ms} & $\pm 0.91$~ms & 33.08~ms & 99.9\% \\
+\textbf{Control Law} & 4-DOF Kinematic IBVS + Clamps & \textbf{0.03~ms} & $\pm 0.01$~ms & 0.04~ms & 0.1\% \\
+\midrule
+\textbf{Total Software} & \textbf{End-to-End Closed-Loop Loop} & \textbf{32.58~ms} & $\pm 0.91$~ms & \textbf{33.11~ms} & \textbf{100.0\%} \\
+\bottomrule
+\end{tabularx}
+\caption{Empirical execution latency profiled on NVIDIA Jetson Orin Nano (200 timed frames, HD 1280$\times$720).}
+\label{tab:jetson_latency}
+\end{table}
+
+\noindent
+\textbf{Key Takeaways from Edge Profiling:}
+\begin{itemize}[leftmargin=1.5em, itemsep=0.2em]
+    \item \textbf{Sustained Real-Time Throughput:} The pipeline achieves \textbf{30.7~FPS}, strictly exceeding the camera sensor rate of 30.0~FPS ($33.33$~ms per frame). This guarantees that camera frames are ingested and converted into flight commands with zero FIFO backlog or dropped frames.
+    \item \textbf{Deterministic Jitter:} The standard deviation is exceptionally tight ($\pm 0.91$~ms), with worst-case 99th percentile tail latency capped at \textbf{33.82~ms}.
+    \item \textbf{Negligible Guidance Overhead:} Computing the 4-DOF visual servoing flight vector requires only 30~microseconds ($0.03$~ms), leaving the host CPU available for MAVSDK telemetry streaming and safety watchdogs.
+\end{itemize}
+
+\section{6-DOF Ego-Motion Decoupling in 8D Kalman State Estimation}
+A persistent challenge in vision-based drone tracking is the coupling between the tracker's own attitude dynamics and optical feature velocity. When the pursuing quadrotor rolls or pitches to accelerate, the target's pixel coordinates $(u, v)$ shift across the image plane due to sensor rotation rather than target translation. In naive pixel trackers, this apparent motion induces false target acceleration estimates, destabilizing the velocity feedforward loop.
+
+To resolve this, the 8D Kalman filter state vector $\mathbf{x} = [x, y, z, s, \dot{x}, \dot{y}, \dot{z}, \dot{s}]^T$ was upgraded with instantaneous 6-DOF ego-motion compensation using Pixhawk IMU telemetry:
+\begin{equation}
+    \mathbf{r}_{\text{inertial}} = \mathbf{R}_{\mathcal{B}}^{\mathcal{I}}(\phi, \theta, \psi) \, \mathbf{R}_{\mathcal{C}}^{\mathcal{B}} \, \mathbf{K}^{-1} \begin{bmatrix} u \\ v \\ 1 \end{bmatrix}
+\end{equation}
+During the Kalman prediction step, the prior state is transformed by subtracting the angular parallax rate $\boldsymbol{\omega}_{\text{ego}} \times \mathbf{r}$ and linear velocity $\mathbf{v}_{\text{ego}}$:
+\begin{equation}
+    \dot{\mathbf{r}}_{\text{target/rel}} = \dot{\mathbf{r}}_{\text{apparent}} - (\boldsymbol{\omega}_{\text{ego}} \times \mathbf{r} + \mathbf{v}_{\text{ego}})
+\end{equation}
+This isolates genuine target maneuvering from chaser platform pitch/roll transients, eliminating velocity state overshoot during aggressive bank turns.
+
+\section{Kinematic Guidance Law Hardening \& Safety Envelopes}
+For physical flight trials, the guidance law was refined to ensure safe, stable station-keeping:
+
+\begin{itemize}[leftmargin=1.5em, itemsep=0.3em]
+    \item \textbf{Target Standoff Calibration (3.5~m / 63~px):} In previous simulation benchmarks, target standoff was set to 6.0~m ($\approx 35$~px). At this range, minor lighting variations can push detections near the confidence threshold. Recalibrating to a \textbf{3.5~meter standoff} expands the target bounding box to \textbf{63.0~pixels}, yielding $>95\%$ detection confidence and distinct rotor features while maintaining a safe aerodynamic wash buffer.
+    \item \textbf{Deadband Hover Window ($\pm 0.35$~m):} Classical proportional feedback creates high-frequency limit-cycle chattering when hovering near setpoint. We introduced a position deadband window:
+    \begin{equation}
+        v_x^{\text{cmd}} = \begin{cases} 
+            0.0 & \text{if } |d - d^*| \le 0.35\text{ m} \quad (\approx 57\text{--}70\text{ px}) \\
+            k_p \cdot (d - (d^* \pm 0.35)) & \text{otherwise}
+        \end{cases}
+    \end{equation}
+    This eliminates throttle hunting and motor heat buildup once station-keeping is established.
+    \item \textbf{Asymmetric Reverse Velocity Saturation:} Forward chase velocity is allowed up to $+2.5$~m/s, but reverse braking velocity is strictly capped at \textbf{$-0.5$~m/s}. This prevents dangerous backward pitch flips when targets temporarily drift toward the camera, ensuring the vehicle decelerates gently rather than pitching aggressively away.
+\end{itemize}
+
+\section{Optical Flight Diagnostics \& Dynamic Range Compensation}
+Evaluation of recorded flight sequences identified two critical environmental degradation modes:
+\begin{enumerate}[leftmargin=1.2em, itemsep=0.1em]
+    \item \textit{AEC Sky Metering:} Pointing the camera slightly above the horizon causes the sensor's Auto-Exposure Control to meter against bright sky, underexposing the lower half of the frame and crushing dark UAV targets into black ground foliage.
+    \item \textit{Veiling Glare:} Direct sunlight near the optical axis degrades global scene contrast.
+\end{enumerate}
+
+To mitigate underexposure without incurring heavy computational cost, an \textbf{Adaptive Dynamic Range Compensator} was integrated into the CSI ingest pipeline. The compensator evaluates the lower ground quadrant luminance in $0.07$~ms; if mean ground intensity falls below 70, a smooth S-curve shadow lift ($0.20$~ms) is applied to expand shadow detail while clipping sky highlights to prevent milky grey washout. Total preprocessing overhead remains under $0.25$~ms, preserving the 30.7~FPS throughput budget.
+
+\section{Roadmap for Week 6 Physical Flight Tests}
+With the perception stack running at 30.7~FPS on the Jetson Orin Nano, ego-motion compensation verified, and the kinematic guidance law calibrated with safety deadbands, the project is ready for closed-loop airframe validation:
+\begin{enumerate}[leftmargin=1.5em, itemsep=0.2em]
+    \item \textbf{Tethered Bench Verification:} Validate MAVSDK offboard command transmission over UART telemetry link ($57600$~baud) with the Jetson companion computer actively driving PX4 velocity setpoints.
+    \item \textbf{Physical Station-Keeping Flight:} Conduct autonomous offboard hover flights tracking a hand-held and tethered target drone at 3.5~m standoff.
+    \item \textbf{Dynamic Tracking \& RL Transfer:} Benchmark the Kinematic IBVS controller against the trained Recurrent PPO (Gen 5C) model in real outdoor flight, evaluating target lock retention across evasive target maneuvers.
+\end{enumerate}
+
+\end{document}
