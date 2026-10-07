@@ -150,19 +150,29 @@ class AutonomousTrackerNode:
         max_rev = float(getattr(args, "max_reverse", 0.5))
         standoff = float(getattr(args, "standoff_dist", 3.5))
         deadband = float(getattr(args, "deadband", 0.35))
-        self.controller = KinematicVisualServoController(
-            camera_uptilt_deg=args.uptilt,
-            hfov_deg=args.hfov,
-            vfov_deg=args.vfov,
-            desired_bbox_size=args.target_size,
-            desired_standoff_dist=standoff,
-            deadband_dist=deadband,
-            min_limits=np.array([-abs(max_rev), -args.max_climb, -args.max_yawspeed]),
-            max_limits=np.array([args.max_speed, args.max_desc, args.max_yawspeed]),
-            use_bbox_size=True,
-            enable_lateral_strafe=args.lateral_strafe,
-            max_lat_vel=args.max_lat_speed
-        )
+        import inspect
+        sig = inspect.signature(KinematicVisualServoController.__init__)
+        ctrl_kwargs = {
+            "camera_uptilt_deg": args.uptilt,
+            "hfov_deg": args.hfov,
+            "vfov_deg": args.vfov,
+            "desired_bbox_size": args.target_size,
+            "min_limits": np.array([-abs(max_rev), -args.max_climb, -args.max_yawspeed]),
+            "max_limits": np.array([args.max_speed, args.max_desc, args.max_yawspeed]),
+            "use_bbox_size": True,
+            "enable_lateral_strafe": args.lateral_strafe,
+            "max_lat_vel": args.max_lat_speed
+        }
+        if "desired_standoff_dist" in sig.parameters:
+            ctrl_kwargs["desired_standoff_dist"] = standoff
+        if "deadband_dist" in sig.parameters:
+            ctrl_kwargs["deadband_dist"] = deadband
+
+        self.controller = KinematicVisualServoController(**ctrl_kwargs)
+        if hasattr(self.controller, "deadband_dist"):
+            self.controller.deadband_dist = deadband
+        if hasattr(self.controller, "standoff_dist"):
+            self.controller.standoff_dist = standoff
 
         # 2. Check if compiled TensorRT .engine is available on the edge device
         weights_p = Path(args.weights)
