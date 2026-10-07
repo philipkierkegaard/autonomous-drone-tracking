@@ -1086,6 +1086,7 @@ class AutonomousTrackerNode:
                         status = "STALE_WD"
 
                     current_alt = self.get_current_altitude()
+                    alt_status = getattr(self.vehicle_state, "alt_safety_status", "NORMAL")
                     cmd = getattr(self, "latest_cmd_safe", np.zeros(3))
                     if len(cmd) == 4:
                         cmd_str = f"Cmd: [vx={cmd[0]:4.1f}, vy={cmd[1]:+4.2f}, vz={cmd[2]:+4.2f}, yaw={cmd[3]:+5.1f}]"
