@@ -35,6 +35,7 @@ def build_jetson_csi_pipeline(
     display_width: int = 1280,
     display_height: int = 720,
     ee_strength: float = 1.0,
+    exposure_compensation: float = 0.0,
 ) -> str:
     """
     Builds hardware-accelerated GStreamer pipeline for NVIDIA Jetson CSI cameras.
@@ -42,8 +43,9 @@ def build_jetson_csi_pipeline(
     activates Tegra ISP Edge Enhancement (sharpening), and supersamples down to display resolution
     using nvvidconv for pin-sharp clarity.
     """
+    exp_prop = f"exposurecompensation={exposure_compensation:.2f} " if exposure_compensation != 0.0 else ""
     return (
-        f"nvarguscamerasrc sensor-id={sensor_id} ee-mode=2 ee-strength={ee_strength} tnr-mode=1 tnr-strength=0.0 ! "
+        f"nvarguscamerasrc sensor-id={sensor_id} {exp_prop}ee-mode=2 ee-strength={ee_strength} tnr-mode=1 tnr-strength=0.0 ! "
         f"video/x-raw(memory:NVMM), width=(int){capture_width}, height=(int){capture_height}, "
         f"format=(string)NV12, framerate=(fraction){framerate}/1 ! "
         f"nvvidconv flip-method={flip_method} ! "
@@ -725,6 +727,7 @@ class AutonomousTrackerNode:
                     sensor_id = int(source_str.split(":")[-1])
                 except ValueError:
                     sensor_id = 0
+            exp_comp = float(getattr(self.args, "exposure_comp", 0.0))
             pipe = build_jetson_csi_pipeline(
                 sensor_id=sensor_id,
                 capture_width=sensor_cap_w,
@@ -733,8 +736,9 @@ class AutonomousTrackerNode:
                 flip_method=cam_flip,
                 display_width=cam_w,
                 display_height=cam_h,
+                exposure_compensation=exp_comp,
             )
-            print(f"[VISION] Opening Jetson CSI camera (sensor-id={sensor_id}, Mode: {sensor_cap_w}x{sensor_cap_h}@{sensor_fps}fps) via nvarguscamerasrc...")
+            print(f"[VISION] Opening Jetson CSI camera (sensor-id={sensor_id}, Mode: {sensor_cap_w}x{sensor_cap_h}@{sensor_fps}fps, EV: {exp_comp:+.1f}) via nvarguscamerasrc...")
             cap = cv2.VideoCapture(pipe, cv2.CAP_GSTREAMER)
             if cap.isOpened():
                 ret, test_frame = cap.read()
@@ -773,6 +777,7 @@ class AutonomousTrackerNode:
                         print(f"\n[NOTICE] Detected solid green frame on /dev/video{src_idx} (uninitialized V4L2 DMA buffer).")
                         print("[NOTICE] CSI ribbon camera detected without ISP! Automatically switching to Jetson hardware ISP (nvarguscamerasrc)...")
                         cap.release()
+                        exp_comp = float(getattr(self.args, "exposure_comp", 0.0))
                         pipe = build_jetson_csi_pipeline(
                             sensor_id=src_idx,
                             capture_width=sensor_cap_w,
@@ -781,6 +786,7 @@ class AutonomousTrackerNode:
                             flip_method=cam_flip,
                             display_width=cam_w,
                             display_height=cam_h,
+                            exposure_compensation=exp_comp,
                         )
                         csi_cap = cv2.VideoCapture(pipe, cv2.CAP_GSTREAMER)
                         if csi_cap.isOpened():
@@ -1271,6 +1277,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--csi", action="store_true",
         help="Use NVIDIA Jetson hardware ISP pipeline (nvarguscamerasrc) for CSI ribbon cameras (e.g. Raspberry Pi HQ / IMX477 / IMX219)."
+    )
+    parser.add_argument(
+        "--exposure-comp", type=float, default=0.0,
+        help="Hardware ISP auto-exposure compensation in EV (-2.0 to 2.0, e.g. 1.0 or 1.5 to lift dark ground/shadows when facing bright sky)."
     )
     parser.add_argument(
         "--cam-flip", type=int, default=0,
