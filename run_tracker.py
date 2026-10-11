@@ -309,6 +309,15 @@ class AutonomousTrackerNode:
         self.target_trail: deque = deque(maxlen=24)
         self.prev_trail_id: Optional[int] = None
 
+        # 7. Real-Time CLAHE Optical De-Haze Filter
+        self.enable_dehaze = getattr(args, "de_haze", False)
+        self.dehaze_clip = float(getattr(args, "dehaze_clip", 2.0))
+        if self.enable_dehaze:
+            self.clahe = cv2.createCLAHE(clipLimit=self.dehaze_clip, tileGridSize=(8, 8))
+            print(f"[VISION] Real-time CLAHE De-Haze active (ClipLimit={self.dehaze_clip}, Tiles=8x8)")
+        else:
+            self.clahe = None
+
     def _start_stream_server(self, port: int):
         """Starts a background HTTP MJPEG stream server for live browser viewing over SSH or USB-C."""
         node = self
@@ -612,7 +621,8 @@ class AutonomousTrackerNode:
         goal_sz = self.args.target_size
         pitch_deg = -np.rad2deg(self.vehicle_state.pitch_rad)
         cam_fps = 1.0 / max(1e-4, dt)
-        info_str = f"SZ: {curr_sz:3.0f}/{goal_sz:.0f}px | PITCH: {pitch_deg:+4.1f}* | ALT: {current_alt:4.1f}m | CAM: {cam_fps:4.1f}fps | MAV: {self.args.ctrl_rate:.0f}Hz"
+        dehaze_tag = " | DEHAZE: ON" if getattr(self, "enable_dehaze", False) else ""
+        info_str = f"SZ: {curr_sz:3.0f}/{goal_sz:.0f}px | PITCH: {pitch_deg:+4.1f}* | ALT: {current_alt:4.1f}m | CAM: {cam_fps:4.1f}fps | MAV: {self.args.ctrl_rate:.0f}Hz{dehaze_tag}"
         cv2.putText(hud, info_str, (128, 34), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (220, 220, 220), 1, cv2.LINE_AA)
 
         # MAVLink link badge (top right)
@@ -879,6 +889,13 @@ class AutonomousTrackerNode:
                 print("[VISION] Video source reached end or disconnected.")
                 self.running = False
                 break
+
+            # Optical De-Haze Filter (cuts through ambient sky flare / backlighting)
+            if self.enable_dehaze and self.clahe is not None and frame is not None:
+                lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+                l_chan, a_chan, b_chan = cv2.split(lab)
+                l_chan = self.clahe.apply(l_chan)
+                frame = cv2.cvtColor(cv2.merge((l_chan, a_chan, b_chan)), cv2.COLOR_LAB2BGR)
 
             now = time.perf_counter()
             raw_dt = now - prev_time
@@ -1378,6 +1395,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--stream-port", type=int, default=8080,
         help="HTTP port for live MJPEG stream (default: 8080)."
+    )
+    parser.add_argument(
+        "--de-haze", action="store_true",
+        help="Enable real-time CLAHE local contrast restoration on L-channel to cut through ambient optical haze (~1.2ms)."
+    )
+    parser.add_argument(
+        "--dehaze-clip", type=float, default=2.5,
+        help="CLAHE contrast clip limit for de-hazing (default: 2.5, subtle=1.5, aggressive=3.5)."
     )
 
     # Controller & Flight Tuning Options

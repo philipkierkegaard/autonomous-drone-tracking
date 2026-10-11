@@ -121,6 +121,8 @@ def parse_args():
     parser.add_argument("--ee-strength", type=float, default=0.3, help="Tegra ISP Edge Enhancement (0.0=none, 0.3=natural, 1.0=strong)")
     parser.add_argument("--stream", action="store_true", default=True, help="Stream to web browser (default: True)")
     parser.add_argument("--port", type=int, default=8080, help="Web stream HTTP port (default: 8080)")
+    parser.add_argument("--de-haze", action="store_true", help="Enable CLAHE optical de-hazing")
+    parser.add_argument("--dehaze-clip", type=float, default=2.5, help="CLAHE contrast clip limit (default: 2.5)")
     parser.add_argument("--no-gui", action="store_true", help="Headless mode (don't attempt cv2.imshow)")
     return parser.parse_args()
 
@@ -169,6 +171,7 @@ def main():
 
     max_score = 0.0
     has_display = not args.no_gui
+    clahe = cv2.createCLAHE(clipLimit=args.dehaze_clip, tileGridSize=(8, 8)) if args.de_haze else None
 
     try:
         while True:
@@ -176,6 +179,12 @@ def main():
             if not ret or frame is None:
                 time.sleep(0.01)
                 continue
+
+            if clahe is not None:
+                lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+                l_chan, a_chan, b_chan = cv2.split(lab)
+                l_chan = clahe.apply(l_chan)
+                frame = cv2.cvtColor(cv2.merge((l_chan, a_chan, b_chan)), cv2.COLOR_LAB2BGR)
 
             h, w = frame.shape[:2]
 
