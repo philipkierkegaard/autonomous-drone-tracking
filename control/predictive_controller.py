@@ -30,6 +30,57 @@ if str(PROJECT_ROOT) not in sys.path:
 from control.spatial import unproject_camera_to_horizon
 
 
+class StandaloneRecurrentPolicy(torch.nn.Module):
+    """
+    Standalone PyTorch implementation of the Recurrent Actor policy.
+    Completely independent of stable-baselines3, cloudpickle, and Python/NumPy version mismatches.
+    """
+    def __init__(self, obs_dim: int = 10, hidden_dim: int = 128, act_dim: int = 4):
+        super().__init__()
+        self.obs_dim = obs_dim
+        self.hidden_dim = hidden_dim
+        self.act_dim = act_dim
+        self.lstm = torch.nn.LSTM(obs_dim, hidden_dim, batch_first=True)
+        self.mlp = torch.nn.Sequential(
+            torch.nn.Linear(hidden_dim, hidden_dim),
+            torch.nn.Tanh()
+        )
+        self.action_net = torch.nn.Linear(hidden_dim, act_dim)
+
+    def forward(self, obs: torch.Tensor, hidden: Optional[Tuple[torch.Tensor, torch.Tensor]] = None):
+        out, next_hidden = self.lstm(obs, hidden)
+        feat = self.mlp(out)
+        action = self.action_net(feat)
+        return action, next_hidden
+
+    def predict(
+        self,
+        obs: np.ndarray,
+        state: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        episode_start: Optional[np.ndarray] = None,
+        deterministic: bool = True
+    ) -> Tuple[np.ndarray, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
+        with torch.no_grad():
+            if not isinstance(obs, torch.Tensor):
+                obs_t = torch.as_tensor(obs, dtype=torch.float32)
+            else:
+                obs_t = obs.float()
+
+            if obs_t.ndim == 1:
+                obs_t = obs_t.unsqueeze(0).unsqueeze(0)
+            elif obs_t.ndim == 2:
+                obs_t = obs_t.unsqueeze(1)
+
+            if episode_start is not None and np.any(episode_start):
+                state = None
+
+            act_t, next_state = self(obs_t, state)
+            action = act_t.squeeze(1).numpy()
+            if action.shape[0] == 1 and obs.ndim == 1:
+                return action[0], next_state
+            return action, next_state
+
+
 class RecurrentVisualServoController:
     """
     Learned Recurrent Guidance Controller for Autonomous Drone Interception.
@@ -87,22 +138,76 @@ class RecurrentVisualServoController:
             self.load_model(model_path)
 
     def load_model(self, model_path: Union[str, Path]):
-        """Loads a trained RecurrentPPO policy from disk."""
+        """Loads a trained RecurrentPPO policy from disk (supporting standalone PyTorch weights or SB3 zip)."""
         path = Path(model_path)
         if not path.exists():
-            # Check with .zip extension if omitted
             if path.with_suffix(".zip").exists():
                 path = path.with_suffix(".zip")
+            elif path.with_suffix(".pt").exists():
+                path = path.with_suffix(".pt")
             else:
                 print(f"[WARN] Recurrent model not found at {path}, controller uninitialized.")
                 return
 
+        # 1. First check if standalone PyTorch actor weights are available (immune to SB3 / NumPy issues)
+        weights_candidates = [
+            path if path.suffix == ".pt" else None,
+            path.parent / "actor_weights.pt",
+            path.parent / "policy_state_dict.pth",
+        ]
+        standalone_weights = next((p for p in weights_candidates if p and p.exists()), None)
+
+        if standalone_weights is not None:
+            print(f"[RECURRENT_CONTROLLER] Loading standalone PyTorch actor from: {standalone_weights}")
+            try:
+                state_dict = torch.load(str(standalone_weights), map_location="cpu")
+                if "lstm.weight_ih_l0" in state_dict:
+                    obs_dim = state_dict["lstm.weight_ih_l0"].shape[1]
+                    hidden_dim = state_dict["lstm.weight_ih_l0"].shape[0] // 4
+                    act_dim = state_dict["action_net.weight"].shape[0]
+                    actor = StandaloneRecurrentPolicy(obs_dim=obs_dim, hidden_dim=hidden_dim, act_dim=act_dim)
+                    actor.load_state_dict(state_dict)
+                    actor.eval()
+                    self.model = actor
+                    self.obs_dim = obs_dim
+                    print(f"[RECURRENT_CONTROLLER] Successfully loaded StandaloneRecurrentPolicy (obs_dim={self.obs_dim}, hidden={hidden_dim})")
+                    self.reset()
+                    return
+            except Exception as e:
+                print(f"[WARN] Failed loading standalone weights ({e}), falling back to SB3 loader...")
+
+        # 2. Backwards compatibility fix for models pickled with NumPy 2.x on Python 3.11+
+        import sys
+        try:
+            import numpy as np
+            if not hasattr(np, "_core") and hasattr(np, "core"):
+                import numpy.core as _np_core
+                sys.modules["numpy._core"] = _np_core
+                if hasattr(_np_core, "numeric"):
+                    sys.modules["numpy._core.numeric"] = _np_core.numeric
+                if hasattr(_np_core, "multiarray"):
+                    sys.modules["numpy._core.multiarray"] = _np_core.multiarray
+                if hasattr(_np_core, "umath"):
+                    sys.modules["numpy._core.umath"] = _np_core.umath
+        except Exception:
+            pass
+
         from sb3_contrib import RecurrentPPO
         print(f"[RECURRENT_CONTROLLER] Loading policy checkpoint from: {path}")
-        self.model = RecurrentPPO.load(str(path), device="cpu")
+        custom_objects = {
+            "learning_rate": 0.0,
+            "lr_schedule": lambda _: 0.0,
+            "clip_range": lambda _: 0.2,
+        }
+        try:
+            self.model = RecurrentPPO.load(str(path), device="cpu", custom_objects=custom_objects)
+        except Exception as e:
+            print(f"[WARN] First load attempt failed ({e}), retrying default RecurrentPPO.load...")
+            self.model = RecurrentPPO.load(str(path), device="cpu")
+
         if hasattr(self.model, "observation_space") and hasattr(self.model.observation_space, "shape"):
             self.obs_dim = int(self.model.observation_space.shape[0])
-        print(f"[RECURRENT_CONTROLLER] Loaded policy checkpoint (obs_dim={self.obs_dim}) from: {path}")
+        print(f"[RECURRENT_CONTROLLER] Loaded SB3 policy checkpoint (obs_dim={self.obs_dim}) from: {path}")
         self.reset()
 
     def reset(self):

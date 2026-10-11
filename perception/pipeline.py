@@ -15,6 +15,7 @@ from typing import Optional, Union, List, Tuple, Dict, Any
 
 import cv2
 import numpy as np
+import torch
 from scipy.optimize import linear_sum_assignment
 from ultralytics import YOLO
 
@@ -164,7 +165,7 @@ class KalmanBoxTracker:
         """
         Returns estimated velocity (vx, vy) in pixels/sec.
         """
-        return float(self.x[4, 0] / self.dt), float(self.x[5, 0] / self.dt)
+        return float(self.x[4, 0]), float(self.x[5, 0])
 
 
 # ==============================================================================
@@ -366,11 +367,22 @@ class DroneTrackingPipeline:
         q_vel: float = 18.0,
         r_pos: float = 2.0,
         enable_kalman: bool = True,
+        imgsz: int = 768,
         device: Optional[str] = None
     ):
         self.conf_threshold = conf_threshold
         self.iou_threshold = iou_threshold
         self.enable_kalman = enable_kalman
+        self.imgsz = imgsz
+        if device is not None:
+            self.device = device
+        elif torch.backends.mps.is_available():
+            self.device = "mps"
+        elif torch.cuda.is_available():
+            self.device = "cuda"
+        else:
+            self.device = "cpu"
+
         self.raw_prev_target = None
         self.raw_trajectory = deque(maxlen=40)
 
@@ -390,8 +402,11 @@ class DroneTrackingPipeline:
         if not weights_path.exists():
             # Fallback checks
             alternatives = [
+                Path("perception/weights/yolov8n_drone_768_ciou_best.pt"),
+                Path("perception/weights/yolov8n_drone_v4_1_trees_best.pt"),
+                Path("perception/weights/yolov8n_drone_v4_continued_best.pt"),
+                Path("perception/weights/yolov8n_v3_best.pt"),
                 Path("runs/detect/runs/detect/yolov8n_drone-2/weights/best.pt"),
-                Path("runs/detect/yolov8n_drone-3/weights/best.pt"),
                 Path("yolov8n.pt")
             ]
             for alt in alternatives:
@@ -399,7 +414,7 @@ class DroneTrackingPipeline:
                     weights_path = alt
                     break
 
-        print(f"[INIT] Loading YOLOv8 drone detector: {weights_path}")
+        print(f"[INIT] Loading YOLOv8 drone detector: {weights_path} (imgsz={self.imgsz}, device={self.device})")
         self.model = YOLO(str(weights_path))
 
         if self.enable_kalman:
@@ -580,6 +595,8 @@ class DroneTrackingPipeline:
         # Run YOLOv8 inference (on crop or full frame)
         results = self.model.predict(
             source=inference_input,
+            imgsz=self.imgsz,
+            device=self.device,
             conf=self.conf_threshold,
             iou=self.iou_threshold,
             verbose=False
@@ -886,11 +903,17 @@ class DroneTrackingPipeline:
                 color = (255, 200, 0)      # Cyan: Secondary
                 status_lbl = f"TRK #{trk['id']}"
 
-            # Flight trajectory trail
+            # Flight trajectory trail (Gradient breadcrumb tail)
             pts = [to_screen(pt[0], pt[1]) for pt in trk["trajectory"]]
-            if len(pts) > 1:
-                for i in range(1, len(pts)):
-                    cv2.line(frame, pts[i - 1], pts[i], color, 2, cv2.LINE_AA)
+            n_pts = len(pts)
+            if n_pts > 1:
+                for i in range(1, n_pts):
+                    frac = i / float(n_pts)
+                    thickness = max(1, int(3 * frac))
+                    tail_color = tuple(int(c * (0.35 + 0.65 * frac)) for c in color)
+                    cv2.line(frame, pts[i - 1], pts[i], tail_color, thickness, cv2.LINE_AA)
+                    if i % 3 == 0 or i == n_pts - 1:
+                        cv2.circle(frame, pts[i], 2, (255, 255, 255), -1, cv2.LINE_AA)
 
             # Targeting corner brackets
             line_len = max(8, min(24, int(abs(sx2 - sx1) * 0.25)))
@@ -1074,6 +1097,8 @@ if __name__ == "__main__":
     parser.add_argument("--q-vel", type=float, default=18.0, help="Kalman process velocity noise (Q_vel)")
     parser.add_argument("--r-pos", type=float, default=2.0, help="Kalman measurement position noise (R_pos)")
     parser.add_argument("--no-kalman", action="store_true", help="Disable Kalman filtering (Pure Raw YOLO Mode)")
+    parser.add_argument("--imgsz", type=int, default=768, help="Inference image resolution (default: 768)")
+    parser.add_argument("--device", type=str, default=None, help="Inference device: 'mps', 'cuda', 'cpu'")
     args = parser.parse_args()
 
     pipeline = DroneTrackingPipeline(
@@ -1087,7 +1112,9 @@ if __name__ == "__main__":
         q_pos=args.q_pos,
         q_vel=args.q_vel,
         r_pos=args.r_pos,
-        enable_kalman=(not args.no_kalman)
+        enable_kalman=(not args.no_kalman),
+        imgsz=args.imgsz,
+        device=args.device
     )
 
     pipeline.run(

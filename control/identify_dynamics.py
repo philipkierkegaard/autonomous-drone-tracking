@@ -70,29 +70,25 @@ def load_flight_log(log_path: str):
 
 def simulate_fopdt(t, u_target, y_init, tau, T_d):
     dt = np.mean(np.diff(t))
-    shift_steps = int(round(T_d / dt))
-    if shift_steps > 0:
-        u_delayed = np.zeros_like(u_target)
-        u_delayed[shift_steps:] = u_target[:-shift_steps]
-        u_delayed[:shift_steps] = u_target[0]
-    else:
-        u_delayed = u_target
-        
+    # Continuous fractional delay via linear interpolation
+    u_delayed = np.interp(t - T_d, t, u_target, left=u_target[0])
+    
+    # Unconditionally stable exact discrete exponential filter
+    alpha = np.exp(-dt / max(tau, 1e-4))
     y_sim = np.zeros_like(u_target)
     y_sim[0] = y_init
     for i in range(len(t) - 1):
-        dy = (u_delayed[i] - y_sim[i]) / max(tau, 0.005)
-        y_sim[i+1] = y_sim[i] + dy * dt
+        y_sim[i+1] = alpha * y_sim[i] + (1.0 - alpha) * u_delayed[i]
     return y_sim
 
 
-def fit_first_order_delay(t, u_target, y_actual, bounds=((0.01, 0.60), (0.00, 0.15))):
+def fit_first_order_delay(t, u_target, y_actual, bounds=((0.005, 0.80), (0.00, 0.15)), x0=[0.05, 0.02]):
     def cost(params):
         tau, T_d = params
         y_sim = simulate_fopdt(t, u_target, y_actual[0], tau, T_d)
         return np.mean((y_sim - y_actual) ** 2)
 
-    res = minimize(cost, x0=[0.05, 0.04], bounds=bounds, method='L-BFGS-B')
+    res = minimize(cost, x0=x0, bounds=bounds, method='L-BFGS-B')
     best_tau, best_td = res.x
     y_sim = simulate_fopdt(t, u_target, y_actual[0], best_tau, best_td)
     rmse = np.sqrt(res.fun)
@@ -206,6 +202,23 @@ def main():
     out_file = "logs/flight_logs/flight_4axis_sysid_plot.png"
     plt.savefig(out_file, dpi=150)
     print(f"\nSaved 4-Axis SysID plot to: {out_file}")
+
+    # Generate Clean Standalone Yaw Rate Figure (original style)
+    fig_yaw, ay = plt.subplots(figsize=(10, 4.5))
+    ay.plot(tw, u_yaw[win_mask], 'k--', label='Desired Yaw Rate (Stick)', linewidth=1.6)
+    ay.plot(tw, y_yaw[win_mask], 'C2-', label='Actual Yaw Rate (Gyro)', linewidth=2.0)
+    ay.plot(tw, y_sim_y[win_mask], 'C3:', label=f'Model Fit (tau={tau_y*1000:.1f}ms, T_d={td_y*1000:.1f}ms)', linewidth=2.2)
+
+    ay.set_title(f"Yaw Rate Dynamics (tau = {tau_y*1000:.1f} ms, Delay T_d = {td_y*1000:.1f} ms | RMSE = {rmse_y:.2f}°/s)", fontsize=11, fontweight='bold')
+    ay.set_xlabel("Time in Window (seconds)", fontsize=10)
+    ay.set_ylabel("Yaw Rate (°/s)", fontsize=10)
+    ay.grid(True, linestyle=':', alpha=0.6)
+    ay.legend(loc='upper right', fontsize=9)
+
+    fig_yaw.tight_layout()
+    yaw_out = "docs/reports/figures/flight_yaw_sysid_plot.png"
+    fig_yaw.savefig(yaw_out, dpi=300)
+    print(f"Saved Clean Yaw SysID plot to: {yaw_out}")
 
 if __name__ == "__main__":
     main()

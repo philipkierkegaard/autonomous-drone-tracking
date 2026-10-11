@@ -34,18 +34,19 @@ def build_jetson_csi_pipeline(
     flip_method: int = 0,
     display_width: int = 1280,
     display_height: int = 720,
-    ee_strength: float = 1.0,
+    ee_strength: float = 0.0,
     exposure_compensation: float = 0.0,
 ) -> str:
     """
     Builds hardware-accelerated GStreamer pipeline for NVIDIA Jetson CSI cameras.
     Locks into the sensor's exact native hardware mode (3840x2160 @ 30fps or 1920x1080 @ 60fps),
-    activates Tegra ISP Edge Enhancement (sharpening), and supersamples down to display resolution
-    using nvvidconv for pin-sharp clarity.
+    supersamples down to display resolution using nvvidconv for pristine clarity.
+    If ee_strength > 0.0, activates Tegra ISP Edge Enhancement (sharpening).
     """
     exp_prop = f"exposurecompensation={exposure_compensation:.2f} " if exposure_compensation != 0.0 else ""
+    ee_prop = f"ee-mode=2 ee-strength={ee_strength:.2f} " if ee_strength > 0.0 else "ee-mode=0 ee-strength=0.0 "
     return (
-        f"nvarguscamerasrc sensor-id={sensor_id} {exp_prop}ee-mode=2 ee-strength={ee_strength} tnr-mode=1 tnr-strength=0.0 ! "
+        f"nvarguscamerasrc sensor-id={sensor_id} {exp_prop}{ee_prop}tnr-mode=1 tnr-strength=0.0 ! "
         f"video/x-raw(memory:NVMM), width=(int){capture_width}, height=(int){capture_height}, "
         f"format=(string)NV12, framerate=(fraction){framerate}/1 ! "
         f"nvvidconv flip-method={flip_method} ! "
@@ -211,12 +212,17 @@ class AutonomousTrackerNode:
                 print(f"        Automatically upgrading from PyTorch (.pt) -> TensorRT (.engine) for 30+ FPS hardware acceleration!")
                 args.weights = str(engine_p)
             else:
-                # Check default v4 engine in weights dir
-                v4_engine = DETECTION_DIR / "weights/yolov8n_drone_v4_continued_best.engine"
-                if v4_engine.exists():
-                    print(f"[MODEL] Detected production TensorRT engine: {v4_engine.name}")
-                    print(f"        Automatically switching to TensorRT engine for 30+ FPS hardware acceleration!")
-                    args.weights = str(v4_engine)
+                # Check default production v4 engines in weights dir
+                for engine_candidate in [
+                    DETECTION_DIR / "weights/yolov8n_drone_768_ciou_best.engine",
+                    DETECTION_DIR / "weights/yolov8n_drone_v4_continued_best.engine",
+                    DETECTION_DIR / "weights/yolov8n_drone_v4_1_trees_best.engine",
+                ]:
+                    if engine_candidate.exists():
+                        print(f"[MODEL] Detected production TensorRT engine: {engine_candidate.name}")
+                        print(f"        Automatically switching to TensorRT engine for 30+ FPS hardware acceleration!")
+                        args.weights = str(engine_candidate)
+                        break
 
         # Initialize Perception Pipeline (YOLOv8 + 8D Kalman Filter)
         print(f"[INIT] Initializing Perception Pipeline with model: {args.weights}")
@@ -769,6 +775,7 @@ class AutonomousTrackerNode:
                 except ValueError:
                     sensor_id = 0
             exp_comp = float(getattr(self.args, "exposure_comp", 0.0))
+            ee_strength = float(getattr(self.args, "ee_strength", 0.0))
             pipe = build_jetson_csi_pipeline(
                 sensor_id=sensor_id,
                 capture_width=sensor_cap_w,
@@ -777,6 +784,7 @@ class AutonomousTrackerNode:
                 flip_method=cam_flip,
                 display_width=cam_w,
                 display_height=cam_h,
+                ee_strength=ee_strength,
                 exposure_compensation=exp_comp,
             )
             print(f"[VISION] Opening Jetson CSI camera (sensor-id={sensor_id}, Mode: {sensor_cap_w}x{sensor_cap_h}@{sensor_fps}fps, EV: {exp_comp:+.1f}) via nvarguscamerasrc...")
@@ -819,6 +827,7 @@ class AutonomousTrackerNode:
                         print("[NOTICE] CSI ribbon camera detected without ISP! Automatically switching to Jetson hardware ISP (nvarguscamerasrc)...")
                         cap.release()
                         exp_comp = float(getattr(self.args, "exposure_comp", 0.0))
+                        ee_strength = float(getattr(self.args, "ee_strength", 0.0))
                         pipe = build_jetson_csi_pipeline(
                             sensor_id=src_idx,
                             capture_width=sensor_cap_w,
@@ -827,6 +836,7 @@ class AutonomousTrackerNode:
                             flip_method=cam_flip,
                             display_width=cam_w,
                             display_height=cam_h,
+                            ee_strength=ee_strength,
                             exposure_compensation=exp_comp,
                         )
                         csi_cap = cv2.VideoCapture(pipe, cv2.CAP_GSTREAMER)
@@ -1070,7 +1080,7 @@ class AutonomousTrackerNode:
 
                 # Live Web Stream: broadcast latest annotated HUD frame to browser / SSH port forward
                 if self.stream_server is not None and new_frame_available:
-                    ret_enc, buf = cv2.imencode(".jpg", display_frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                    ret_enc, buf = cv2.imencode(".jpg", display_frame, [cv2.IMWRITE_JPEG_QUALITY, 88])
                     if ret_enc:
                         with self.jpeg_lock:
                             self.latest_jpeg = buf.tobytes()
@@ -1263,17 +1273,18 @@ def parse_args() -> argparse.Namespace:
         "--source", type=str, default="0",
         help="Video source: camera index (e.g. '0'), video file path, or GStreamer string."
     )
-    engine_v4 = DETECTION_DIR / "weights/yolov8n_drone_v4_continued_best.engine"
-    pt_v4 = DETECTION_DIR / "weights/yolov8n_drone_v4_continued_best.pt"
-    pt_v3 = DETECTION_DIR / "weights/yolov8n_v3_best.pt"
-    if engine_v4.exists():
-        default_weights = str(engine_v4)
-    elif pt_v4.exists():
-        default_weights = str(pt_v4)
-    elif pt_v3.exists():
-        default_weights = str(pt_v3)
-    else:
-        default_weights = str(DETECTION_DIR / "runs/detect/yolov8n_drone/weights/best.pt")
+    # Priority search for best production weights
+    candidate_weights = [
+        DETECTION_DIR / "weights/yolov8n_drone_768_ciou_best.engine",
+        DETECTION_DIR / "weights/yolov8n_drone_768_ciou_best.pt",
+        DETECTION_DIR / "weights/yolov8n_drone_v4_continued_best.engine",
+        DETECTION_DIR / "weights/yolov8n_drone_v4_continued_best.pt",
+        DETECTION_DIR / "weights/yolov8n_drone_v4_1_trees_best.engine",
+        DETECTION_DIR / "weights/yolov8n_drone_v4_1_trees_best.pt",
+        DETECTION_DIR / "weights/yolov8n_v3_best.pt",
+        DETECTION_DIR / "runs/detect/yolov8n_drone/weights/best.pt"
+    ]
+    default_weights = str(next((w for w in candidate_weights if w.exists()), candidate_weights[-1]))
 
     parser.add_argument(
         "--weights", type=str,
@@ -1355,6 +1366,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--cam-fps", type=int, default=30,
         help="Camera framerate (default: 30)."
+    )
+    parser.add_argument(
+        "--ee-strength", type=float, default=0.3,
+        help="Jetson Tegra ISP Edge Enhancement (sharpening) strength: 0.0=off/pure natural, 0.3=natural crisp, 1.0=heavy (default: 0.3)."
     )
     parser.add_argument(
         "--stream", action="store_true",
