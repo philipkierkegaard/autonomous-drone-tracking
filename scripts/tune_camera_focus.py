@@ -181,10 +181,9 @@ def main():
                 continue
 
             if clahe is not None:
-                lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
-                l_chan, a_chan, b_chan = cv2.split(lab)
-                l_chan = clahe.apply(l_chan)
-                frame = cv2.cvtColor(cv2.merge((l_chan, a_chan, b_chan)), cv2.COLOR_LAB2BGR)
+                yuv = cv2.cvtColor(frame, cv2.COLOR_BGR2YUV)
+                yuv[:, :, 0] = clahe.apply(yuv[:, :, 0])
+                frame = cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR)
 
             h, w = frame.shape[:2]
 

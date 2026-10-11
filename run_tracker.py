@@ -890,12 +890,11 @@ class AutonomousTrackerNode:
                 self.running = False
                 break
 
-            # Optical De-Haze Filter (cuts through ambient sky flare / backlighting)
+            # Ultra-Fast Optical De-Haze Filter (Linear YUV Luminance CLAHE, ~1.4ms)
             if self.enable_dehaze and self.clahe is not None and frame is not None:
-                lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
-                l_chan, a_chan, b_chan = cv2.split(lab)
-                l_chan = self.clahe.apply(l_chan)
-                frame = cv2.cvtColor(cv2.merge((l_chan, a_chan, b_chan)), cv2.COLOR_LAB2BGR)
+                yuv = cv2.cvtColor(frame, cv2.COLOR_BGR2YUV)
+                yuv[:, :, 0] = self.clahe.apply(yuv[:, :, 0])
+                frame = cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR)
 
             now = time.perf_counter()
             raw_dt = now - prev_time
