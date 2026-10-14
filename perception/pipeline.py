@@ -368,7 +368,8 @@ class DroneTrackingPipeline:
         r_pos: float = 2.0,
         enable_kalman: bool = True,
         imgsz: int = 768,
-        device: Optional[str] = None
+        device: Optional[str] = None,
+        enable_ego_ablation: bool = False
     ):
         self.conf_threshold = conf_threshold
         self.iou_threshold = iou_threshold
@@ -434,6 +435,26 @@ class DroneTrackingPipeline:
             q_vel=q_vel,
             r_pos=r_pos
         )
+        self.enable_ego_ablation = enable_ego_ablation
+        if self.enable_ego_ablation:
+            print("[INIT] Tri-Filter Ego-Motion Ablation: ACTIVE (Parallel SO(3), Vanilla, and Full 6-DOF Trackers Initialized)")
+            self.uncomp_tracker = DroneTracker(
+                max_lost_frames=max_lost_frames,
+                min_hits_to_confirm=min_hits_to_confirm,
+                q_pos=q_pos,
+                q_vel=q_vel,
+                r_pos=r_pos
+            )
+            self.full_tracker = DroneTracker(
+                max_lost_frames=max_lost_frames,
+                min_hits_to_confirm=min_hits_to_confirm,
+                q_pos=q_pos,
+                q_vel=q_vel,
+                r_pos=r_pos
+            )
+        else:
+            self.uncomp_tracker = None
+            self.full_tracker = None
 
         self.frame_idx = 0
         self.fps_history = deque(maxlen=20)
@@ -460,20 +481,21 @@ class DroneTrackingPipeline:
         img_center = (w / 2.0, h / 2.0)
 
         # ----------------------------------------------------------------------
-        # 0. Drone Ego-Motion Compensation (Rotation + Translation Decoupling)
+        # 0. Drone Ego-Motion Compensation (Pure SO(3) Gyroscopic Attitude Feedforward)
         # ----------------------------------------------------------------------
         ego_shifts: Dict[int, Tuple[float, float, float, float]] = {}
+        ego_shifts_full: Dict[int, Tuple[float, float, float, float]] = {}
         target_pred_shift = (0.0, 0.0, 0.0, 0.0)
 
         if ego_telemetry is not None and compute_ego_motion_compensation is not None:
             curr_pitch = float(ego_telemetry.get("pitch_rad", 0.0))
             curr_roll = float(ego_telemetry.get("roll_rad", 0.0))
             curr_yaw_rad = float(np.deg2rad(ego_telemetry.get("yaw_deg", 0.0)))
+            ego_dt = float(ego_telemetry.get("dt", self.tracker.dt))
             vx_body = float(ego_telemetry.get("vx_body", 0.0))
             vy_body = float(ego_telemetry.get("vy_body", 0.0))
             vz_body = float(ego_telemetry.get("vz_body", 0.0))
-            ego_dt = float(ego_telemetry.get("dt", self.tracker.dt))
-            est_dist = float(ego_telemetry.get("distance_m", ego_telemetry.get("altitude_m", 6.0)))
+            target_dist = float(ego_telemetry.get("target_dist", 4.5))
 
             if self.prev_ego_telemetry is not None:
                 d_pitch = curr_pitch - self.prev_ego_telemetry["pitch_rad"]
@@ -481,6 +503,7 @@ class DroneTrackingPipeline:
                 d_yaw = curr_yaw_rad - self.prev_ego_telemetry["yaw_rad"]
                 d_yaw = float((d_yaw + np.pi) % (2.0 * np.pi) - np.pi)
 
+                # 1. Depth-invariant SO(3) gyroscopic homography for primary tracker (vx, vy, vz = 0.0)
                 for trk in self.tracker.trackers:
                     box = trk.get_state()
                     tcx = (box[0] + box[2]) / 2.0
@@ -493,15 +516,38 @@ class DroneTrackingPipeline:
                         delta_pitch_rad=d_pitch,
                         delta_roll_rad=d_roll,
                         delta_yaw_rad=d_yaw,
-                        vx_body=vx_body,
-                        vy_body=vy_body,
-                        vz_body=vz_body,
+                        vx_body=0.0,
+                        vy_body=0.0,
+                        vz_body=0.0,
                         dt=ego_dt,
-                        estimated_distance_m=est_dist,
                         img_width=float(w),
                         img_height=float(h)
                     )
                     ego_shifts[trk.id] = shift
+
+                # 2. Full 6-DOF compensation for parallel full_tracker (rotations + body translations)
+                if getattr(self, "enable_ego_ablation", False) and getattr(self, "full_tracker", None) is not None:
+                    for trk in self.full_tracker.trackers:
+                        box = trk.get_state()
+                        tcx = (box[0] + box[2]) / 2.0
+                        tcy = (box[1] + box[3]) / 2.0
+                        tw = max(1.0, box[2] - box[0])
+                        th = max(1.0, box[3] - box[1])
+
+                        shift_full = compute_ego_motion_compensation(
+                            cx=tcx, cy=tcy, w=tw, h=th,
+                            delta_pitch_rad=d_pitch,
+                            delta_roll_rad=d_roll,
+                            delta_yaw_rad=d_yaw,
+                            vx_body=vx_body,
+                            vy_body=vy_body,
+                            vz_body=vz_body,
+                            dt=ego_dt,
+                            estimated_distance_m=target_dist,
+                            img_width=float(w),
+                            img_height=float(h)
+                        )
+                        ego_shifts_full[trk.id] = shift_full
 
                 if self.tracker.primary_track_id in ego_shifts:
                     target_pred_shift = ego_shifts[self.tracker.primary_track_id]
@@ -629,6 +675,24 @@ class DroneTrackingPipeline:
                 if trk["id"] == self.tracker.primary_track_id:
                     primary_track = trk
                     break
+
+            # Parallel uncompensated and full 6-DOF trackers for ablation testing
+            uncomp_primary = None
+            full_primary = None
+            if getattr(self, "enable_ego_ablation", False):
+                if getattr(self, "uncomp_tracker", None) is not None:
+                    uncomp_active_tracks = self.uncomp_tracker.update(detections, confs, ego_shifts=None)
+                    for trk in uncomp_active_tracks:
+                        if trk["id"] == self.uncomp_tracker.primary_track_id:
+                            uncomp_primary = trk
+                            break
+
+                if getattr(self, "full_tracker", None) is not None:
+                    full_active_tracks = self.full_tracker.update(detections, confs, ego_shifts=ego_shifts_full)
+                    for trk in full_active_tracks:
+                        if trk["id"] == self.full_tracker.primary_track_id:
+                            full_primary = trk
+                            break
         else:
             active_tracks = []
             primary_track = None
@@ -734,6 +798,65 @@ class DroneTrackingPipeline:
                 "velocity_y": vy,
                 "area_ratio": float(area_ratio)
             })
+
+        telemetry["comp_velocity_mag"] = float(np.hypot(telemetry.get("velocity_x", 0.0), telemetry.get("velocity_y", 0.0)))
+        telemetry["raw_yolo_detections_count"] = len(detections)
+        if len(detections) > 0:
+            best_det = detections[0]
+            telemetry["raw_yolo_center"] = (float((best_det[0] + best_det[2]) / 2.0), float((best_det[1] + best_det[3]) / 2.0))
+        else:
+            telemetry["raw_yolo_center"] = None
+
+        if getattr(self, "enable_ego_ablation", False):
+            if uncomp_primary is not None:
+                ubbox = uncomp_primary["bbox"]
+                utcx = (ubbox[0] + ubbox[2]) / 2.0
+                utcy = (ubbox[1] + ubbox[3]) / 2.0
+                uvx, uvy = uncomp_primary["velocity"]
+                telemetry.update({
+                    "uncomp_status": "COASTING" if uncomp_primary["is_coasting"] else "LOCKED",
+                    "uncomp_target_id": uncomp_primary["id"],
+                    "uncomp_bbox": [float(b) for b in ubbox],
+                    "uncomp_center": (float(utcx), float(utcy)),
+                    "uncomp_velocity_x": float(uvx),
+                    "uncomp_velocity_y": float(uvy),
+                    "uncomp_velocity_mag": float(np.hypot(uvx, uvy))
+                })
+            else:
+                telemetry.update({
+                    "uncomp_status": "SEARCHING",
+                    "uncomp_target_id": None,
+                    "uncomp_bbox": None,
+                    "uncomp_center": None,
+                    "uncomp_velocity_x": 0.0,
+                    "uncomp_velocity_y": 0.0,
+                    "uncomp_velocity_mag": 0.0
+                })
+
+            if full_primary is not None:
+                fbbox = full_primary["bbox"]
+                ftcx = (fbbox[0] + fbbox[2]) / 2.0
+                ftcy = (fbbox[1] + fbbox[3]) / 2.0
+                fvx, fvy = full_primary["velocity"]
+                telemetry.update({
+                    "full_status": "COASTING" if full_primary["is_coasting"] else "LOCKED",
+                    "full_target_id": full_primary["id"],
+                    "full_bbox": [float(b) for b in fbbox],
+                    "full_center": (float(ftcx), float(ftcy)),
+                    "full_velocity_x": float(fvx),
+                    "full_velocity_y": float(fvy),
+                    "full_velocity_mag": float(np.hypot(fvx, fvy))
+                })
+            else:
+                telemetry.update({
+                    "full_status": "SEARCHING",
+                    "full_target_id": None,
+                    "full_bbox": None,
+                    "full_center": None,
+                    "full_velocity_x": 0.0,
+                    "full_velocity_y": 0.0,
+                    "full_velocity_mag": 0.0
+                })
 
         # Calculate FPS
         t_elapsed = time.perf_counter() - t_start

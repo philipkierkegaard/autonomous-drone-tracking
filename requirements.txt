@@ -28,4 +28,4 @@ tensorboard>=2.13.0
 PyYAML>=6.0
 
 # Pixhawk Autopilot & MAVLink Hardware Interface (Optional for Desktop Simulation)
-mavsdk>=2.0.0
+mavsdk>=2.0.0,<3.0.0

@@ -34,9 +34,10 @@ def load_flight_log(log_path: str):
             continue
         t_sec = t_us / 1e6
         
-        if mtype == 'ATT':
+        if mtype in ['ANG', 'ATT']:
             d = m.to_dict()
             att_data.append({
+                'msg_type': mtype,
                 'time': t_sec,
                 'des_roll': d.get('DesRoll', 0.0),
                 'roll': d.get('Roll', 0.0),
@@ -62,7 +63,15 @@ def load_flight_log(log_path: str):
                 'alt': d.get('Alt', 0.0)
             })
             
-    df_att = pd.DataFrame(att_data)
+    df_att_raw = pd.DataFrame(att_data)
+    if not df_att_raw.empty and 'ANG' in df_att_raw['msg_type'].values:
+        # Prioritize 400 Hz ANG messages over legacy down-sampled 10 Hz ATT
+        df_att = df_att_raw[df_att_raw['msg_type'] == 'ANG'].drop(columns=['msg_type']).reset_index(drop=True)
+    elif not df_att_raw.empty:
+        df_att = df_att_raw.drop(columns=['msg_type']).reset_index(drop=True)
+    else:
+        df_att = pd.DataFrame()
+
     df_rate = pd.DataFrame(rate_data)
     df_ctun = pd.DataFrame(ctun_data)
     return df_att, df_rate, df_ctun
@@ -103,23 +112,54 @@ def calculate_metrics(y_true, y_pred):
 
 
 def main():
-    log_file = "logs/flight_logs/flight_00000073.BIN"
+    import argparse
+    parser = argparse.ArgumentParser(description="4-Axis FOPDT System Identification from ArduPilot .BIN log")
+    parser.add_argument("log", nargs="?", default="logs/flight_logs/flight_00000073.BIN", help="Path to .BIN flight log")
+    args = parser.parse_args()
+
+    log_file = args.log
     df_att, df_rate, df_ctun = load_flight_log(log_file)
     
-    # Filter armed flight period (127s to 434s)
-    mask_att = (df_att['time'] >= 127.0) & (df_att['time'] <= 434.0)
+    if df_att.empty:
+        print("[ERROR] No attitude (ANG/ATT) data found in log file.")
+        return
+
+    # Filter armed flight period if Flight 73, else auto-detect valid range
+    if "flight_00000073.BIN" in str(log_file):
+        t_start, t_end = 127.0, 434.0
+    else:
+        t_start = df_att['time'].min()
+        t_end = df_att['time'].max()
+        # Trim first and last 2 seconds if log is long enough
+        if (t_end - t_start) > 10.0:
+            t_start += 2.0
+            t_end -= 1.0
+
+    mask_att = (df_att['time'] >= t_start) & (df_att['time'] <= t_end)
     df_att = df_att[mask_att].reset_index(drop=True)
     
-    mask_rate = (df_rate['time'] >= 127.0) & (df_rate['time'] <= 434.0)
-    df_rate = df_rate[mask_rate].reset_index(drop=True)
+    if not df_rate.empty:
+        mask_rate = (df_rate['time'] >= t_start) & (df_rate['time'] <= t_end)
+        df_rate = df_rate[mask_rate].reset_index(drop=True)
     
-    mask_ctun = (df_ctun['time'] >= 127.0) & (df_ctun['time'] <= 434.0)
-    df_ctun = df_ctun[mask_ctun].reset_index(drop=True)
+    if not df_ctun.empty:
+        mask_ctun = (df_ctun['time'] >= t_start) & (df_ctun['time'] <= t_end)
+        df_ctun = df_ctun[mask_ctun].reset_index(drop=True)
     
-    # Uniform 50 Hz interpolation
-    t_min = max(df_att['time'].min(), df_rate['time'].min(), df_ctun['time'].min())
-    t_max = min(df_att['time'].max(), df_rate['time'].max(), df_ctun['time'].max())
-    t_uniform = np.arange(t_min, t_max, 0.02)
+    # Adaptive high-rate uniform grid (preserves up to 400 Hz data)
+    raw_dt = np.median(df_att['time'].diff().dropna())
+    grid_dt = max(0.0025, float(raw_dt)) if not np.isnan(raw_dt) else 0.01
+    
+    t_min = df_att['time'].min()
+    t_max = df_att['time'].max()
+    if not df_rate.empty:
+        t_min = max(t_min, df_rate['time'].min())
+        t_max = min(t_max, df_rate['time'].max())
+    if not df_ctun.empty:
+        t_min = max(t_min, df_ctun['time'].min())
+        t_max = min(t_max, df_ctun['time'].max())
+
+    t_uniform = np.arange(t_min, t_max, grid_dt)
     
     # 1. Pitch
     u_pitch = np.interp(t_uniform, df_att['time'], df_att['des_pitch'])
@@ -154,9 +194,15 @@ def main():
     print(f"4. CLIMB (Vz): tau = {tau_z*1000:5.1f} ms, T_d = {td_z*1000:4.1f} ms | RMSE = {rmse_z:5.2f} m/s  | VAF = {vaf_z:5.1f}%")
     print("="*70)
 
-    # Generate Comprehensive 4-Subplot Figure (Active 20-second Window with all 4 axes active)
-    win_start = 138.0
-    win_mask = (t_uniform >= win_start) & (t_uniform < win_start + 20.0)
+    # Generate Comprehensive 4-Subplot Figure
+    from pathlib import Path
+    if "flight_00000073.BIN" in str(log_file):
+        win_start = 138.0
+    else:
+        win_start = t_uniform[0]
+
+    win_len = min(20.0, float(t_uniform[-1] - win_start))
+    win_mask = (t_uniform >= win_start) & (t_uniform <= win_start + win_len)
     tw = t_uniform[win_mask] - win_start
 
     fig, axes = plt.subplots(4, 1, figsize=(14, 11), sharex=True)
@@ -199,11 +245,12 @@ def main():
     axes[3].legend(loc='upper right', fontsize=9)
 
     plt.tight_layout()
-    out_file = "logs/flight_logs/flight_4axis_sysid_plot.png"
+    stem = Path(log_file).stem
+    out_file = f"logs/flight_logs/{stem}_4axis_sysid_plot.png"
     plt.savefig(out_file, dpi=150)
     print(f"\nSaved 4-Axis SysID plot to: {out_file}")
 
-    # Generate Clean Standalone Yaw Rate Figure (original style)
+    # Generate Clean Standalone Yaw Rate Figure
     fig_yaw, ay = plt.subplots(figsize=(10, 4.5))
     ay.plot(tw, u_yaw[win_mask], 'k--', label='Desired Yaw Rate (Stick)', linewidth=1.6)
     ay.plot(tw, y_yaw[win_mask], 'C2-', label='Actual Yaw Rate (Gyro)', linewidth=2.0)
@@ -216,7 +263,7 @@ def main():
     ay.legend(loc='upper right', fontsize=9)
 
     fig_yaw.tight_layout()
-    yaw_out = "docs/reports/figures/flight_yaw_sysid_plot.png"
+    yaw_out = f"docs/reports/figures/{stem}_yaw_sysid_plot.png"
     fig_yaw.savefig(yaw_out, dpi=300)
     print(f"Saved Clean Yaw SysID plot to: {yaw_out}")
 
