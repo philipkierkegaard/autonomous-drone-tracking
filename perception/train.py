@@ -71,10 +71,15 @@ def setup_low_contrast_augmentations(enabled: bool = True):
 # 2. Hybrid CIoU + NWD (Normalized Wasserstein Distance) Bounding Box Loss
 # ==============================================================================
 
-def setup_hybrid_nwd_loss(alpha: float = 0.5, C: float = 12.0):
+def setup_hybrid_nwd_loss(alpha: float = 0.5, C: float = 51.3):
     """
     Patches Ultralytics BboxLoss with a Hybrid CIoU + NWD loss formulation.
     Protects small/tiny target regression against vanishing gradients when IoU = 0.
+
+    Scale parameter C is calibrated using the empirical dataset root-mean-square bounding box area:
+        C = sqrt( (1 / N) * \\sum_{i=1}^N (w_i * h_i) )
+    For the Anti-UAV dataset resized to 768x768 input resolution (N = 28,462 targets):
+        Mean bbox area = 2634.25 px²  ==>  C = 51.325 px (default: 51.3).
     """
     try:
         import ultralytics.utils.loss as u_loss
@@ -88,7 +93,7 @@ def setup_hybrid_nwd_loss(alpha: float = 0.5, C: float = 12.0):
         def __init__(self, reg_max: int = 16):
             super().__init__(reg_max)
             self.alpha = alpha  # Weight for NWD vs CIoU (e.g., 0.5 = 50% CIoU, 50% NWD)
-            self.C = C          # NWD scale parameter calibrated for tiny objects
+            self.C = C          # NWD scale parameter calibrated in pixel units for tiny drone targets
 
         def forward(
             self,
@@ -106,20 +111,26 @@ def setup_hybrid_nwd_loss(alpha: float = 0.5, C: float = 12.0):
             pbox = pred_bboxes[fg_mask]
             tbox = target_bboxes[fg_mask]
 
-            # 1. Standard CIoU Loss (Tight rectangular boundary alignment)
+            # 1. Standard CIoU Loss (Tight rectangular boundary alignment, scale-invariant)
             iou = bbox_iou(pbox, tbox, xywh=False, CIoU=True)
             loss_ciou = 1.0 - iou
 
-            # 2. Normalized Wasserstein Distance (Smooth non-zero Gaussian gradient for tiny boxes)
-            cx1 = (pbox[..., 0] + pbox[..., 2]) / 2.0
-            cy1 = (pbox[..., 1] + pbox[..., 3]) / 2.0
-            w1 = (pbox[..., 2] - pbox[..., 0]).clamp(min=1e-6)
-            h1 = (pbox[..., 3] - pbox[..., 1]).clamp(min=1e-6)
+            # 2. Normalized Wasserstein Distance in Pixel Coordinates
+            # Note: Ultralytics passes target_bboxes divided by stride, and pred_bboxes in grid units.
+            # We scale by stride to convert coordinates to absolute input pixel space (0..imgsz),
+            # ensuring dimensional consistency with the calibrated scale parameter C in pixels.
+            pbox_px = (pred_bboxes * stride)[fg_mask]
+            tbox_px = (target_bboxes * stride)[fg_mask]
 
-            cx2 = (tbox[..., 0] + tbox[..., 2]) / 2.0
-            cy2 = (tbox[..., 1] + tbox[..., 3]) / 2.0
-            w2 = (tbox[..., 2] - tbox[..., 0]).clamp(min=1e-6)
-            h2 = (tbox[..., 3] - tbox[..., 1]).clamp(min=1e-6)
+            cx1 = (pbox_px[..., 0] + pbox_px[..., 2]) / 2.0
+            cy1 = (pbox_px[..., 1] + pbox_px[..., 3]) / 2.0
+            w1 = (pbox_px[..., 2] - pbox_px[..., 0]).clamp(min=1e-6)
+            h1 = (pbox_px[..., 3] - pbox_px[..., 1]).clamp(min=1e-6)
+
+            cx2 = (tbox_px[..., 0] + tbox_px[..., 2]) / 2.0
+            cy2 = (tbox_px[..., 1] + tbox_px[..., 3]) / 2.0
+            w2 = (tbox_px[..., 2] - tbox_px[..., 0]).clamp(min=1e-6)
+            h2 = (tbox_px[..., 3] - tbox_px[..., 1]).clamp(min=1e-6)
 
             w2_dist = (cx1 - cx2)**2 + (cy1 - cy2)**2 + ((w1 - w2)**2 + (h1 - h2)**2) / 4.0
             nwd = torch.exp(-torch.sqrt(w2_dist.clamp(min=1e-6)) / self.C)
@@ -143,7 +154,7 @@ def setup_hybrid_nwd_loss(alpha: float = 0.5, C: float = 12.0):
 
     # Inject into Ultralytics loss module
     u_loss.BboxLoss = HybridNWD_BboxLoss
-    print(f"[INFO] Successfully activated Hybrid CIoU + NWD Bbox Loss (alpha={alpha}, C={C})")
+    print(f"[INFO] Successfully activated Hybrid CIoU + NWD Bbox Loss (alpha={alpha}, C={C} px)")
 
 
 # ==============================================================================
@@ -155,10 +166,10 @@ def train_drone_detector(
     data_yaml: str = None,
     epochs: int = 40,
     imgsz: int = 768,
-    batch_size: int = 32,
+    batch_size: int = 16,
     device: str = None,
     project: str = None,
-    name: str = "yolov8n_drone_v4_nwd_768",
+    name: str = "yolov8n_drone_768_hybrid_nwd_c51",
     save_period: int = 10,
     workers: int = 4,
     patience: int = 0,
@@ -166,7 +177,7 @@ def train_drone_detector(
     lr0: float = None,
     use_nwd: bool = True,
     nwd_alpha: float = 0.5,
-    nwd_c: float = 12.0,
+    nwd_c: float = 51.3,
     low_contrast: bool = True
 ):
     if data_yaml is None:
@@ -202,7 +213,8 @@ def train_drone_detector(
     yaml_path = str(Path(data_yaml).resolve())
     project_path = str(Path(project).resolve())
     print(f"Starting training on device='{device}' using dataset: {yaml_path}")
-    print(f"Hyperparameters: epochs={epochs}, batch={batch_size}, imgsz={imgsz}, patience={patience}")
+    print(f"Hyperparameters: epochs={epochs}, batch={batch_size}, imgsz={imgsz}, patience={patience} (early stopping disabled={patience == 0})")
+    print(f"Loss configuration: use_nwd={use_nwd}, alpha={nwd_alpha}, C={nwd_c} px")
     print(f"Output directory: {project_path}/{name}\n")
 
     train_kwargs = dict(
@@ -282,18 +294,18 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, default="yolov8n.pt", help="Base pretrained YOLO model or checkpoint path")
     parser.add_argument("--data", type=str, default=str(BASE_DIR / "datasets/anti_uav_yolo/data.yaml"), help="Path to data.yaml")
     parser.add_argument("--project", type=str, default=str(BASE_DIR / "runs/detect"), help="Output project directory")
-    parser.add_argument("--epochs", type=int, default=40, help="Number of training epochs")
+    parser.add_argument("--epochs", type=int, default=40, help="Number of training epochs (pure CIoU baseline: 40)")
     parser.add_argument("--imgsz", type=int, default=768, help="Input image size (default: 768)")
-    parser.add_argument("--batch", type=int, default=16, help="Batch size (default: 16)")
+    parser.add_argument("--batch", type=int, default=16, help="Batch size (pure CIoU baseline: 16)")
     parser.add_argument("--device", type=str, default=None, help="Device ('mps', '0', 'cpu')")
-    parser.add_argument("--name", type=str, default="yolov8n_drone_v4_nwd_768", help="Experiment run name")
+    parser.add_argument("--name", type=str, default="yolov8n_drone_768_hybrid_nwd_c51", help="Experiment run name")
     parser.add_argument("--workers", type=int, default=4, help="DataLoader workers")
     parser.add_argument("--patience", type=int, default=0, help="Early stopping patience (0 to disable early stopping)")
     parser.add_argument("--close-mosaic", type=int, default=10, help="Epochs before end to disable mosaic augmentation")
     parser.add_argument("--lr0", type=float, default=None, help="Initial learning rate (optional)")
     parser.add_argument("--no-nwd", action="store_true", help="Disable NWD loss and use standard CIoU")
     parser.add_argument("--nwd-alpha", type=float, default=0.5, help="NWD loss weight alpha (default: 0.5)")
-    parser.add_argument("--nwd-c", type=float, default=12.0, help="NWD scale parameter C (default: 12.0)")
+    parser.add_argument("--nwd-c", type=float, default=51.3, help="NWD scale parameter C calibrated from dataset target sizes (default: 51.3 px)")
     parser.add_argument("--no-low-contrast", action="store_true", help="Disable low-contrast Albumentations")
     args = parser.parse_args()
 
