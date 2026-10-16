@@ -36,6 +36,14 @@ from matplotlib.patches import Rectangle, Circle
 from control.rendering.create_chase_movie import get_target_trajectory, simulate_pursuit
 
 
+ARTIFACT_DIRS = [
+    Path("/Users/philipkierkegaard/.gemini/antigravity-ide/brain/1da038ce-1011-475e-b1de-1614f330a01a"),
+    Path("/Users/philipkierkegaard/.gemini/antigravity-ide/brain/53eb0b3e-b75c-4830-a9d4-c69e644ccb6a"),
+    Path("/Users/philipkierkegaard/.gemini/antigravity-ide/brain/42b621c5-bd5c-42b8-ae83-87208090e0a7"),
+    Path("/Users/philipkierkegaard/.gemini/antigravity-ide/brain/c2b8fddd-4624-46f7-9768-e1974371d76e"),
+]
+
+
 def render_3d_movie_frames(
     sim_data: dict,
     output_mp4_path: Path,
@@ -64,6 +72,16 @@ def render_3d_movie_frames(
     total_duration = sim_data["duration"]
     dt_sim = sim_data["dt"]
     total_sim_steps = len(times)
+
+    # Empirical YOLO & Kalman Filter Perception Telemetry
+    gt_bboxes = sim_data.get("gt_bbox", [None] * total_sim_steps)
+    yolo_bboxes = sim_data.get("yolo_bbox", [None] * total_sim_steps)
+    yolo_confs = sim_data.get("yolo_conf", np.zeros(total_sim_steps))
+    yolo_drop_bursts = sim_data.get("yolo_drop_burst", np.zeros(total_sim_steps))
+    kalman_is_coasting_all = sim_data.get("kalman_is_coasting", np.zeros(total_sim_steps, dtype=bool))
+    kalman_coasting_ms_all = sim_data.get("kalman_coasting_ms", np.zeros(total_sim_steps))
+    kalman_vels = sim_data.get("kalman_vel", [(0.0, 0.0)] * total_sim_steps)
+    kalman_histories = sim_data.get("kalman_history", [[] for _ in range(total_sim_steps)])
 
     # Frame sampling stride
     sim_steps_per_frame = max(1, int(round((1.0 / fps) / dt_sim)))
@@ -126,6 +144,15 @@ def render_3d_movie_frames(
         cmd = cmds[step_idx]
         bbox = bboxes[step_idx]
 
+        gt_box = gt_bboxes[step_idx]
+        yolo_box = yolo_bboxes[step_idx]
+        yolo_conf = float(yolo_confs[step_idx])
+        yolo_burst = int(yolo_drop_bursts[step_idx])
+        k_coasting = bool(kalman_is_coasting_all[step_idx])
+        k_coast_ms = int(kalman_coasting_ms_all[step_idx])
+        k_vel = kalman_vels[step_idx]
+        k_hist = kalman_histories[step_idx]
+
         c_alt_curr = -cz
         t_alt_curr = -tz
 
@@ -150,7 +177,7 @@ def render_3d_movie_frames(
 
         # Fading 3D flight paths
         ax_3d.plot(t_t_e, t_t_n, t_t_a, color="#ff4757", lw=2.2, alpha=0.85, label="Target UAV")
-        ax_3d.plot(c_t_e, c_t_n, c_t_a, color="#00d2d3", lw=2.8, alpha=0.90, label="Chaser (4-DOF PID)")
+        ax_3d.plot(c_t_e, c_t_n, c_t_a, color="#00d2d3", lw=2.8, alpha=0.90, label="Chaser")
 
         # Ground Shadows (Z = 0)
         ax_3d.plot(t_t_e, t_t_n, np.zeros_like(t_t_e), color="#ff4757", linestyle="--", lw=1.0, alpha=0.3)
@@ -164,9 +191,13 @@ def render_3d_movie_frames(
         ax_3d.scatter([ty], [tx], [0], color="#57606f", s=30, alpha=0.5)
         ax_3d.scatter([cy], [cx], [0], color="#57606f", s=30, alpha=0.5)
 
-        # 3D Line-of-Sight Laser
-        los_color = "#2ed573" if in_view else "#ff4757"
-        los_style = "-" if in_view else ":"
+        # 3D Line-of-Sight Laser (Green = Active Lock, Amber = Coasting Dead Reckoning)
+        if in_view:
+            los_color = "#2ed573" if not k_coasting else "#ff7f50"
+            los_style = "-" if not k_coasting else "--"
+        else:
+            los_color = "#ff4757"
+            los_style = ":"
         ax_3d.plot([cy, ty], [cx, tx], [c_alt_curr, t_alt_curr], color=los_color, linestyle=los_style, lw=1.5, alpha=0.8)
 
         # Drone Markers
@@ -220,22 +251,81 @@ def render_3d_movie_frames(
         ax_cam.plot([320, 320], [220, 260], color="#00d2d3", lw=1.2, alpha=0.8)
         ax_cam.add_patch(Circle((320, 240), 35.0 / 2.0, fill=False, edgecolor="#00d2d3", linestyle=":", lw=1.0, alpha=0.7))
 
-        if in_view and bbox[2] > bbox[0]:
-            bx1, by1, bx2, by2 = bbox
-            bw, bh = bx2 - bx1, by2 - by1
-            rect = Rectangle((bx1, by1), bw, bh, fill=False, edgecolor="#2ed573", lw=1.8)
-            ax_cam.add_patch(rect)
-            b_arm = min(bw, bh) * 0.25
-            ax_cam.plot([bx1, bx1 + b_arm], [by1, by1], color="#2ed573", lw=2.5)
-            ax_cam.plot([bx1, bx1], [by1, by1 + b_arm], color="#2ed573", lw=2.5)
-            ax_cam.plot([bx2, bx2 - b_arm], [by2, by2], color="#2ed573", lw=2.5)
-            ax_cam.plot([bx2, bx2], [by2, by2 - b_arm], color="#2ed573", lw=2.5)
-            ax_cam.text(bx1, max(14, by1 - 5), f"TRK-01 [LOCK: {dist:.1f}m]", color="#2ed573", fontsize=7.5, fontweight="bold",
-                        bbox=dict(boxstyle="square,pad=0.1", facecolor="#081c10", edgecolor="#2ed573", alpha=0.9))
+        # Ground-Truth 3D Target Projection (Dashed Light Green)
+        if gt_box is not None:
+            gx1, gy1, gx2, gy2 = gt_box
+            gw = max(1.0, gx2 - gx1)
+            gh = max(1.0, gy2 - gy1)
+            rect_gt = Rectangle((gx1, gy1), gw, gh, fill=False, edgecolor="#7bed9f", linestyle="--", linewidth=1.0, alpha=0.6)
+            ax_cam.add_patch(rect_gt)
+            ax_cam.text(gx1, max(12, gy1 - 3), "GT 3D", color="#7bed9f", fontsize=6.5, alpha=0.7)
+
+        # Raw YOLO Measurement (Yellow Box when detected, or Dropout Alert)
+        if yolo_box is not None:
+            yx1, yy1, yx2, yy2 = yolo_box
+            yw = max(1.0, yx2 - yx1)
+            yh = max(1.0, yy2 - yy1)
+            rect_yolo = Rectangle((yx1, yy1), yw, yh, fill=False, edgecolor="#ffa502", linewidth=1.4, alpha=0.85)
+            ax_cam.add_patch(rect_yolo)
+            ax_cam.text(yx1, min(475, yy2 + 10), f"YOLO [{yolo_conf*100:.0f}%]", color="#ffa502", fontsize=6.5, fontweight="bold",
+                        bbox=dict(boxstyle="square,pad=0.1", facecolor="#141005", edgecolor="#ffa502", alpha=0.85))
         else:
+            if yolo_burst > 0 and in_view:
+                ax_cam.text(12, 60, f"● YOLO DROPOUT (Burst: {yolo_burst} frames / {yolo_burst*33.3:.0f}ms)",
+                            color="#ff4757", fontsize=7.5, family="monospace", fontweight="bold")
+
+        # Kalman Filter State Estimate (Neon Green when Locked, Amber when Coasting)
+        if in_view and bbox is not None and bbox[2] > bbox[0]:
+            bx1, by1, bx2, by2 = bbox
+            bw = bx2 - bx1
+            bh = by2 - by1
+
+            if k_coasting:
+                trk_color = "#ff7f50"  # Amber/Coral for Coasting
+                trk_label = f"TRK-01 [COASTING +{k_coast_ms}ms]"
+                status_badge = "DEAD RECKONING"
+                badge_bg = "#2b1408"
+            else:
+                trk_color = "#2ed573"  # Neon Green for Locked
+                trk_label = f"TRK-01 [LOCK: {dist:.1f}m]"
+                status_badge = "LOCKED"
+                badge_bg = "#081c10"
+
+            rect = Rectangle((bx1, by1), bw, bh, fill=False, edgecolor=trk_color, linewidth=1.8)
+            ax_cam.add_patch(rect)
+
+            b_arm = min(bw, bh) * 0.25
+            ax_cam.plot([bx1, bx1 + b_arm], [by1, by1], color=trk_color, lw=2.5)
+            ax_cam.plot([bx1, bx1], [by1, by1 + b_arm], color=trk_color, lw=2.5)
+            ax_cam.plot([bx2, bx2 - b_arm], [by2, by2], color=trk_color, lw=2.5)
+            ax_cam.plot([bx2, bx2], [by2, by2 - b_arm], color=trk_color, lw=2.5)
+
+            ax_cam.text(bx1, max(14, by1 - 5), trk_label, color=trk_color, fontsize=7.5, fontweight="bold",
+                        bbox=dict(boxstyle="square,pad=0.1", facecolor=badge_bg, edgecolor=trk_color, alpha=0.9))
+
+            # Kalman Velocity Arrow
+            kcx = (bx1 + bx2) / 2.0
+            kcy = (by1 + by2) / 2.0
+            kvx, kvy = k_vel
+            if abs(kvx) > 1.0 or abs(kvy) > 1.0:
+                ax_cam.annotate(
+                    "", xy=(kcx + kvx * 0.25, kcy + kvy * 0.25), xytext=(kcx, kcy),
+                    arrowprops=dict(arrowstyle="->", color="#00d2d3", lw=1.5)
+                )
+
+            # Trajectory Breadcrumb trail
+            if k_hist and len(k_hist) > 1:
+                hist_arr = np.array(k_hist[-25:])
+                ax_cam.plot(hist_arr[:, 0], hist_arr[:, 1], color=trk_color, lw=1.0, alpha=0.5, linestyle=":")
+        else:
+            status_badge = "SEARCHING"
+            trk_color = "#ff4757"
             ax_cam.text(320, 240, "TARGET OUT OF FOV\n[ COASTING / SEARCH ]", color="#ff4757", fontsize=10, fontweight="bold",
                         ha="center", va="center", bbox=dict(boxstyle="round,pad=0.4", facecolor="#240a0e", edgecolor="#ff4757", alpha=0.85))
 
+        ax_cam.text(12, 24, "FPV SENSOR: 1080p60 GLOBAL SHUTTER (+15° MOUNT)", color="#00d2d3", fontsize=8, family="monospace")
+        ax_cam.text(628, 24, status_badge, color=trk_color, fontsize=8.5, fontweight="bold", ha="right",
+                    bbox=dict(boxstyle="round,pad=0.2", facecolor="#10141d", edgecolor=trk_color))
         ax_cam.set_title(f"ON-BOARD FPV SENSOR (640x480) | TIME: {t_curr:04.1f}s", color="#dfe4ea", fontsize=9, fontweight="bold")
 
         # ----------------------------------------------------------------------
@@ -248,17 +338,22 @@ def render_3d_movie_frames(
         c_spd_xy = np.linalg.norm(c_vel[step_idx, :2])
         c_rate = (dists[max(0, step_idx - 5)] - dist) / (5 * dt_sim) if step_idx >= 5 else 0.0
 
+        if in_view:
+            status_str = f"COASTING (KALMAN DEAD RECKONING +{k_coast_ms}ms)" if k_coasting else "LOCKED (YOLO ACTIVE)"
+        else:
+            status_str = "SEARCH / RE-ACQUIRE COAST"
+
         hud_text = (
-            f"AUTONOMOUS PURSUIT TELEMETRY — 3D MAVSDK LINK\n"
+            f"AUTONOMOUS PURSUIT TELEMETRY — ARDUCOPTER GUIDED LINK\n"
             f"─────────────────────────────────────────────────────────────\n"
             f"Standoff Dist: {dist:5.1f} m  (Target: 6.0 m)  | Closure Rate: {c_rate:+4.1f} m/s\n"
             f"Chaser Speed:  {c_spd:5.1f} m/s ({c_spd*3.6:4.1f} km/h) | Horiz Speed:  {c_spd_xy:4.1f} m/s\n"
             f"Chaser Alt:    {c_alt_curr:5.1f} m              | Target Alt:   {t_alt_curr:4.1f} m\n"
             f"Attitude:      P={np.rad2deg(pitch):+4.1f}°  R={np.rad2deg(roll):+4.1f}°  Y={np.rad2deg(yaw):+4.1f}°\n"
-            f"Target Status: {'[ OPTICAL LOCK (FOV IN-RANGE) ]' if in_view else '[ SEARCH / RE-ACQUIRE COAST ]'}\n"
-            f"Commanded Accel: {cmd[0]:+4.1f} fwd, {cmd[1]:+4.1f} lat, {cmd[2]:+4.1f} z, {np.rad2deg(cmd[3]):+4.0f}°/s yaw"
+            f"Target Status: [ {status_str} ]\n"
+            f"Pipeline:      60ms Latency | 30Hz YOLOv8n TensorRT | 50Hz Kalman Dead Reckoning"
         )
-        status_col = "#2ed573" if in_view else "#ff4757"
+        status_col = "#2ed573" if (in_view and not k_coasting) else ("#ff7f50" if k_coasting else "#ff4757")
         ax_hud.text(0.02, 0.95, hud_text, transform=ax_hud.transAxes, color="#f1f2f6",
                     fontfamily="monospace", fontsize=8.0, va="top",
                     bbox=dict(boxstyle="round,pad=0.5", facecolor="#0b0e14", edgecolor=status_col, lw=1.2))
@@ -325,6 +420,16 @@ def render_3d_movie_frames(
         ]
         subprocess.run(gif_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         print(f"[SUCCESS] GIF generated: {output_gif_path}")
+
+    for art_dir in ARTIFACT_DIRS:
+        try:
+            if art_dir.exists():
+                shutil.copy2(output_mp4_path, art_dir / output_mp4_path.name)
+                if output_gif_path and output_gif_path.exists():
+                    shutil.copy2(output_gif_path, art_dir / output_gif_path.name)
+                print(f"[ARTIFACT] Copied 3D visualization to {art_dir}")
+        except Exception as e:
+            print(f"[ARTIFACT] Could not copy to {art_dir}: {e}")
 
 
 def generate_3d_chase_movie(

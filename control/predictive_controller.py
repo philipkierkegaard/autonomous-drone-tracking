@@ -389,9 +389,15 @@ class RecurrentVisualServoController:
         return cmd
 
     @staticmethod
-    def to_mavsdk(cmd: np.ndarray) -> Tuple[float, float, float, float]:
+    def to_velocity_body(cmd: np.ndarray) -> Tuple[float, float, float, float]:
         """
-        Unpacks the 4D command vector into MAVSDK VelocityBodyYawspeed arguments:
+        Unpacks the 4D command vector into 4-DOF body velocity arguments:
         (forward_m_s, right_m_s, down_m_s, yawspeed_deg_s).
+        Directly compatible with ArduPilot MAVLink SET_POSITION_TARGET_LOCAL_NED (#84)
+        as well as legacy MAVSDK VelocityBodyYawspeed.
         """
         return float(cmd[0]), float(cmd[1]), float(cmd[2]), float(cmd[3])
+
+    # Dual aliases for compatibility across ArduPilot and legacy MAVSDK scripts
+    to_autopilot = to_velocity_body
+    to_mavsdk = to_velocity_body

@@ -34,6 +34,8 @@ from control.simulation import FastPixhawkQuadSim
 from control.trajectory import StochasticTargetTrajectory, PROFILES, FlightProfile
 from control.dataset_generator import EncounterType, PursuitDatasetGenerator
 from control.spatial import unproject_camera_to_horizon
+from control.synthetic_sensor import SyntheticYOLOSensor
+from perception.pipeline import DroneTracker
 
 
 class DronePursuitEnv(gym.Env):
@@ -60,6 +62,10 @@ class DronePursuitEnv(gym.Env):
         img_h: int = 480,
         hfov_deg: float = 60.0,
         vfov_deg: float = 45.0,
+        use_empirical_perception: bool = True,
+        empirical_profile_path: Optional[Union[str, Path]] = None,
+        camera_fps: float = 30.0,
+        env_perception_mode: str = "nominal",
     ):
         super().__init__()
 
@@ -84,6 +90,30 @@ class DronePursuitEnv(gym.Env):
         self.half_vfov = float(np.tan(np.deg2rad(vfov_deg / 2.0)))
         self.w_nominal = 0.0505 # Target bbox width fraction at 6.0m standoff (~32.3 pixels)
         self.max_decel = 2.8    # Calibrated quadrotor braking deceleration (m/s^2)
+
+        # Empirical YOLO perception & Kalman tracking configuration
+        self.use_empirical_perception = use_empirical_perception
+        self.camera_fps = camera_fps
+        self.camera_dt = 1.0 / camera_fps
+        self.env_perception_mode = env_perception_mode
+        self.empirical_profile_path = empirical_profile_path
+        self.time_since_camera = 0.0
+
+        if self.use_empirical_perception:
+            self.synthetic_sensor = SyntheticYOLOSensor(
+                profile_path=self.empirical_profile_path,
+                img_w=self.img_w,
+                img_h=self.img_h,
+                env_mode=self.env_perception_mode
+            )
+            self.tracker = DroneTracker(
+                dt=self.dt,
+                max_lost_frames=int(round(self.lost_target_timeout / self.dt)),
+                min_hits_to_confirm=2
+            )
+        else:
+            self.synthetic_sensor = None
+            self.tracker = None
 
         # Underlying calibrated physics simulator (50 Hz, 60ms delay, drag, kinodynamics)
         self.sim = FastPixhawkQuadSim(dt=dt)
@@ -464,7 +494,47 @@ class DronePursuitEnv(gym.Env):
         self.filtered_d_w = 0.0
         self.was_in_view_prev = bool(in_view)
 
-        obs = self._get_observation(ex, ey, in_view, bw, bh)
+        # Initialize or reset empirical perception & Kalman tracker
+        if self.use_empirical_perception:
+            self.time_since_camera = 0.0
+            sensor_seed = int(self.np_random.integers(0, 1_000_000))
+            self.synthetic_sensor.reset(seed=sensor_seed)
+            self.tracker = DroneTracker(
+                dt=self.dt,
+                max_lost_frames=int(round(self.lost_target_timeout / self.dt)),
+                min_hits_to_confirm=2
+            )
+            # Initial camera measurement at t=0 (30 Hz camera frame)
+            if in_view:
+                norm_cx = float((ex + 1.0) / 2.0)
+                norm_cy = float((ey + 1.0) / 2.0)
+                norm_w = float(bw / self.img_w)
+                norm_h = float(bh / self.img_h)
+                det_bbox, conf, fps = self.synthetic_sensor.step(norm_cx, norm_cy, norm_w, norm_h, in_fov=True)
+                if det_bbox is not None:
+                    self.tracker.update(np.array([det_bbox], dtype=np.float32), np.array([conf], dtype=np.float32))
+                    if len(self.tracker.trackers) > 0:
+                        self.tracker.trackers[0].hits = 2
+                        self.tracker.primary_track_id = self.tracker.trackers[0].id
+
+            primary = None
+            if self.tracker.primary_track_id is not None:
+                primary = next((t for t in self.tracker.trackers if t.id == self.tracker.primary_track_id), None)
+
+            if primary is not None and primary.hits >= self.tracker.min_hits_to_confirm:
+                bbox = primary.get_state()
+                cx = (bbox[0] + bbox[2]) / 2.0
+                cy = (bbox[1] + bbox[3]) / 2.0
+                bw_est = max(1.0, bbox[2] - bbox[0])
+                bh_est = max(1.0, bbox[3] - bbox[1])
+                ex_est = float((cx - self.img_w / 2.0) / (self.img_w / 2.0))
+                ey_est = float((cy - self.img_h / 2.0) / (self.img_h / 2.0))
+                obs = self._get_observation(ex_est, ey_est, True, bw_est, bh_est, force_flag=1.0)
+            else:
+                obs = self._get_observation(self.last_seen_ex, self.last_seen_ey, False, self.last_seen_w * self.img_w, self.last_seen_h * self.img_h, force_flag=0.0)
+        else:
+            obs = self._get_observation(ex, ey, in_view, bw, bh)
+
         info = {
             "mode": cfg["mode"],
             "profile": cfg["profile"],
@@ -480,7 +550,8 @@ class DronePursuitEnv(gym.Env):
         raw_ey: float,
         raw_in_view: bool,
         raw_bw: float,
-        raw_bh: float
+        raw_bh: float,
+        force_flag: Optional[float] = None
     ) -> np.ndarray:
         """
         Constructs the 13D normalized state vector with SO(3) attitude decoupling,
@@ -489,11 +560,11 @@ class DronePursuitEnv(gym.Env):
         """
         in_fov = raw_in_view
 
-        # Sim-to-Real Domain Randomization (Perception dropout and Gaussian noise)
-        if self.domain_randomization and in_fov:
-            # 1. Random frame drop (dropout)
-            if self.np_random.random() < self.frame_drop_rate:
-                in_fov = False
+        # Legacy domain randomization (only applied if not using empirical YOLO perception)
+        if not self.use_empirical_perception:
+            if self.domain_randomization and in_fov:
+                if self.np_random.random() < self.frame_drop_rate:
+                    in_fov = False
 
         if in_fov:
             # SO(3) Attitude Decoupling: Un-roll & un-pitch camera frame errors to horizon frame
@@ -511,8 +582,7 @@ class DronePursuitEnv(gym.Env):
             w_norm = float(raw_bw / self.img_w)
             h_norm = float(raw_bh / self.img_h)
 
-            if self.domain_randomization:
-                # 2. Centroid jitter noise on horizon angles
+            if not self.use_empirical_perception and self.domain_randomization:
                 ex += float(self.np_random.normal(0.0, 0.02))
                 ey += float(self.np_random.normal(0.0, 0.02))
                 w_norm = max(0.01, w_norm + float(self.np_random.normal(0.0, 0.02 * w_norm)))
@@ -524,7 +594,7 @@ class DronePursuitEnv(gym.Env):
             self.last_seen_ey = ey
             self.last_seen_w = w_norm
             self.last_seen_h = h_norm
-            flag = 1.0
+            flag = force_flag if force_flag is not None else 1.0
 
             # Causal exponential filter for optical rates (alpha = 0.4 suppresses noise while preserving 1-2 Hz turns)
             if self.was_in_view_prev:
@@ -566,7 +636,6 @@ class DronePursuitEnv(gym.Env):
         vz_body = self.sim.vel[2]
 
         # Normalized Standoff Scale Error [-1, 1]
-        # (w_nominal - w_norm) / w_nominal: >0 is too far (advance), 0 is perfect 6m standoff, <0 is too close (brake!)
         scale_err = float(np.clip((self.w_nominal - w_norm) / self.w_nominal, -1.0, 1.0))
 
         # Normalized altitude AGL (NED: z is negative above ground)
@@ -632,8 +701,64 @@ class DronePursuitEnv(gym.Env):
         else:
             self.time_lost = 0.0
 
-        # Construct 13D next observation
-        obs = self._get_observation(raw_ex, raw_ey, raw_in_view, raw_bw, raw_bh)
+        # Construct 13D next observation via Empirical YOLO Sensor + Kalman Filter
+        if self.use_empirical_perception:
+            self.time_since_camera += self.dt
+            is_camera_tick = (self.time_since_camera >= self.camera_dt - 1e-5)
+
+            if is_camera_tick:
+                self.time_since_camera -= self.camera_dt
+                norm_cx = float((raw_ex + 1.0) / 2.0)
+                norm_cy = float((raw_ey + 1.0) / 2.0)
+                norm_w  = float(raw_bw / self.img_w)
+                norm_h  = float(raw_bh / self.img_h)
+
+                det_bbox, conf, fps = self.synthetic_sensor.step(
+                    norm_cx, norm_cy, norm_w, norm_h, in_fov=raw_in_view
+                )
+
+                detections = []
+                confs = []
+                if det_bbox is not None:
+                    detections.append(det_bbox)
+                    confs.append(conf)
+                for fp in fps:
+                    detections.append(fp)
+                    confs.append(0.36)
+
+                det_arr = np.array(detections, dtype=np.float32) if detections else np.empty((0, 4), dtype=np.float32)
+                conf_arr = np.array(confs, dtype=np.float32) if confs else np.empty((0,), dtype=np.float32)
+                self.tracker.update(det_arr, conf_arr)
+            else:
+                # Between camera frames (50 Hz control tick between 30 Hz camera updates):
+                # Kalman filter performs prediction/dead reckoning without receiving new measurements
+                for trk in self.tracker.trackers:
+                    trk.predict()
+
+            # Retrieve state estimate from primary tracker
+            primary = None
+            if self.tracker.primary_track_id is not None:
+                primary = next((t for t in self.tracker.trackers if t.id == self.tracker.primary_track_id), None)
+
+            if primary is not None and primary.hits >= self.tracker.min_hits_to_confirm:
+                bbox = primary.get_state()
+                cx = (bbox[0] + bbox[2]) / 2.0
+                cy = (bbox[1] + bbox[3]) / 2.0
+                bw_est = max(1.0, bbox[2] - bbox[0])
+                bh_est = max(1.0, bbox[3] - bbox[1])
+                ex_est = float((cx - self.img_w / 2.0) / (self.img_w / 2.0))
+                ey_est = float((cy - self.img_h / 2.0) / (self.img_h / 2.0))
+                is_fresh = (primary.time_since_update == 0)
+                force_flag = 1.0 if is_fresh else 0.0
+                obs = self._get_observation(ex_est, ey_est, True, bw_est, bh_est, force_flag=force_flag)
+            else:
+                # Target unconfirmed or lost
+                obs = self._get_observation(
+                    self.last_seen_ex, self.last_seen_ey, False,
+                    self.last_seen_w * self.img_w, self.last_seen_h * self.img_h, force_flag=0.0
+                )
+        else:
+            obs = self._get_observation(raw_ex, raw_ey, raw_in_view, raw_bw, raw_bh)
 
         # Engagement Basket Condition: 5.0m <= dist <= 7.0m AND visible in camera FOV
         # Matches benchmark evaluation standard exactly!

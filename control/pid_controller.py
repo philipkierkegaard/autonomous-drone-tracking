@@ -86,6 +86,7 @@ class KinematicVisualServoController:
         kd_lat: float = 0.35,                # Lateral derivative damping (counteracts roll-induced visual swings)
         max_lat_vel: float = 6.0,            # Maximum lateral velocity in m/s (matched identically to RL envelope)
         max_lat_accel: float = 5.0,          # Maximum lateral acceleration in m/s^2 for agile roll initiation
+        search_mode: str = "brake",          # 'brake' (immediate active station-keeping hover) or 'legacy_coast'
     ):
         self.camera_uptilt = np.deg2rad(camera_uptilt_deg)
         self.half_hfov = np.tan(np.deg2rad(hfov_deg / 2.0))
@@ -94,6 +95,7 @@ class KinematicVisualServoController:
         self.standoff_dist = desired_standoff_dist
         self.use_bbox_size = use_bbox_size
         self.deadband_dist = float(deadband_dist)
+        self.search_mode = str(search_mode).lower().strip()
 
         self.lost_time = 0.0
 
@@ -217,19 +219,29 @@ class KinematicVisualServoController:
             Directly corresponds to MAVSDK VelocityBodyYawspeed.
         """
         status = telemetry.get("status", "SEARCHING")
-        # Graceful coasting and multi-phase search governor
         if status == "SEARCHING":
             self.lost_time += dt
-            if self.lost_time < 1.0:
-                # Phase 1: Coast forward on last known heading with gentle deceleration
-                cmd_vx = max(0.0, self.prev_cmd_vx - 1.5 * dt)
-                return np.array([cmd_vx, 0.0, 0.0, 0.0], dtype=np.float64)
-            elif self.lost_time < 2.0:
-                # Phase 2: Gentle hover hold before spinning
+            if self.search_mode == "brake":
+                # Option A: Immediate Active Brake & Station-Keeping Hover
+                # Arrests all forward, lateral, vertical, and angular momentum immediately.
+                # Outer slew-rate limiter smoothly ramps deceleration at max_accel_xy (4.0 m/s^2).
+                # Clears PID error integrator to eliminate windup overshoot upon re-acquisition.
+                self.integral.fill(0.0)
+                self.prev_error.fill(0.0)
+                self.filtered_deriv.fill(0.0)
+                self.prev_cmd = np.zeros(4, dtype=np.float64)
+                self.prev_cmd_vx = 0.0
+                self.prev_cmd_vy = 0.0
                 return np.array([0.0, 0.0, 0.0, 0.0], dtype=np.float64)
             else:
-                # Phase 3: Controlled 15 deg/s search scan
-                return np.array([0.0, 0.0, 0.0, 15.0], dtype=np.float64)
+                # Legacy multi-phase coast governor (kept for benchmark comparison)
+                if self.lost_time < 1.0:
+                    cmd_vx = max(0.0, self.prev_cmd_vx - 1.5 * dt)
+                    return np.array([cmd_vx, 0.0, 0.0, 0.0], dtype=np.float64)
+                elif self.lost_time < 2.0:
+                    return np.array([0.0, 0.0, 0.0, 0.0], dtype=np.float64)
+                else:
+                    return np.array([0.0, 0.0, 0.0, 15.0], dtype=np.float64)
 
         # Active lock: reset lost timer
         self.lost_time = 0.0
@@ -445,10 +457,12 @@ class KinematicVisualServoController:
         return output_vec
 
     @staticmethod
-    def to_mavsdk(cmd: np.ndarray) -> tuple:
+    def to_velocity_body(cmd: np.ndarray) -> tuple:
         """
-        Converts command vector into the 4 arguments required by
-        MAVSDK VelocityBodyYawspeed(forward_m_s, right_m_s, down_m_s, yawspeed_deg_s).
+        Converts command vector into standard 4-DOF body-frame velocity arguments:
+        (forward_m_s, right_m_s, down_m_s, yawspeed_deg_s).
+        Directly compatible with ArduPilot MAVLink SET_POSITION_TARGET_LOCAL_NED (#84)
+        as well as legacy MAVSDK VelocityBodyYawspeed.
         Accepts both 3D [v_fwd, v_down, yawspeed] and 4D [v_fwd, v_right, v_down, yawspeed].
         """
         if len(cmd) == 4:
@@ -456,6 +470,10 @@ class KinematicVisualServoController:
         elif len(cmd) == 3:
             return float(cmd[0]), 0.0, float(cmd[1]), float(cmd[2])
         raise ValueError(f"Expected 3D or 4D command vector, got length {len(cmd)}")
+
+    # Dual aliases for compatibility across ArduPilot and legacy MAVSDK scripts
+    to_autopilot = to_velocity_body
+    to_mavsdk = to_velocity_body
 
 
 # Aliases for backward compatibility with existing simulation scripts

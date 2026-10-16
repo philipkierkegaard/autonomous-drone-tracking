@@ -2,13 +2,14 @@
 """
 Autonomous Drone Pursuit Flight Bridge Node.
 Interfaces the YOLOv8 + Kalman perception pipeline with the Kinematic IBVS Controller
-and dispatches real-time velocity setpoints to Pixhawk Autopilot via MAVSDK / MAVLink.
+and dispatches real-time velocity setpoints to Pixhawk Autopilot (ArduPilot / ArduCopter)
+via native PyMAVLink in GUIDED mode.
 
 Features:
-- Dual execution: Live flight offboard control or Benchtop Dry-Run (desktop test mode)
+- Dual execution: Live flight GUIDED control or Benchtop Dry-Run (desktop test mode)
 - Dynamic attitude streaming: Ingests real-time EKF2 pitch for camera de-rotation
 - Metric-free visual servoing: Regulates 2D bounding box pixel size directly
-- Flight safety: Graceful failsafe handling, velocity slew-rate limiting, and clean emergency disengage
+- Pilot Safety: Explicit RC takeover detection, mode ownership, and smooth slew-rate limiting
 """
 
 import os
@@ -112,14 +113,14 @@ for p in (ROOT_DIR, CONTROL_DIR, DETECTION_DIR):
 
 from perception.pipeline import DroneTrackingPipeline
 from control.pid_controller import KinematicVisualServoController
+from control.autopilot_bridge import ArduPilotBridge, PYMAVLINK_AVAILABLE
 
-# Conditional MAVSDK Import (enables desktop testing without MAVSDK installed or on linker failure)
+# Conditional legacy MAVSDK Import (kept for fallback / test mocking)
 try:
     from mavsdk import System
     from mavsdk.offboard import VelocityBodyYawspeed, OffboardError
     MAVSDK_AVAILABLE = True
-except Exception as e:
-    print(f"[WARN] Could not initialize MAVSDK ({e}). Falling back to DRY-RUN mode.")
+except Exception:
     MAVSDK_AVAILABLE = False
 
 
@@ -205,13 +206,14 @@ class PerceptionState:
 class AutonomousTrackerNode:
     """
     Coordinates Camera Ingestion, YOLO/Kalman Perception, Kinematic IBVS Control,
-    and MAVSDK Pixhawk Communication.
+    and ArduPilot GUIDED MAVLink Communication.
     """
     def __init__(self, args: argparse.Namespace):
         self.args = args
         self.vehicle_state = VehicleState()
         self.running = False
-        self.drone: Optional[Any] = None
+        self.autopilot: Optional[ArduPilotBridge] = None
+        self.drone: Optional[Any] = None  # Legacy reference alias for backward compatibility
 
         # 1. Initialize Kinematic Visual Servoing Controller
         print("\n[INIT] Initializing Kinematic Visual Servoing Controller...")
@@ -235,6 +237,8 @@ class AutonomousTrackerNode:
             ctrl_kwargs["desired_standoff_dist"] = standoff
         if "deadband_dist" in sig.parameters:
             ctrl_kwargs["deadband_dist"] = deadband
+        if "search_mode" in sig.parameters:
+            ctrl_kwargs["search_mode"] = getattr(args, "search_mode", "brake")
 
         self.controller = KinematicVisualServoController(**ctrl_kwargs)
         if hasattr(self.controller, "deadband_dist"):
@@ -502,7 +506,14 @@ class AutonomousTrackerNode:
 
 
     async def telemetry_listener(self):
-        """Asynchronously streams telemetry from Pixhawk EKF2 over MAVLink."""
+        """Asynchronously monitors telemetry from Pixhawk EKF2 over MAVLink."""
+        if self.autopilot and self.autopilot.is_connected:
+            # ArduPilotBridge handles 50Hz attitude, 30Hz velocity, and 20Hz altitude
+            # in its dedicated background thread, syncing directly into self.vehicle_state.
+            while self.running:
+                await asyncio.sleep(0.5)
+            return
+
         if not self.drone:
             return
 
@@ -719,15 +730,19 @@ class AutonomousTrackerNode:
 
         # MAVLink link badge (top right)
         if self.args.dry_run and self.vehicle_state.is_connected:
-            link_str = "PX4: DRY-RUN (TEL)"
+            link_str = "ARDUPILOT: DRY-RUN (TEL)"
             link_color = (46, 213, 115)  # Green: Live IMU telemetry streaming!
         elif self.args.dry_run or not self.vehicle_state.is_connected:
-            link_str = "PX4: DRY-RUN"
+            link_str = "ARDUPILOT: DRY-RUN"
             link_color = (120, 120, 120)  # Gray: Standalone desktop dry-run
         else:
-            link_str = f"PX4: {self.vehicle_state.flight_mode}"
-            link_color = (46, 213, 115)
-        cv2.putText(hud, link_str, (w - 180, 34), cv2.FONT_HERSHEY_SIMPLEX, 0.48, link_color, 1, cv2.LINE_AA)
+            if self.autopilot and not self.autopilot.is_guided:
+                link_str = f"OVERRIDE: {self.vehicle_state.flight_mode}"
+                link_color = (0, 165, 255)  # Orange warning: Pilot manual RC takeover
+            else:
+                link_str = f"ARDUPILOT: {self.vehicle_state.flight_mode}"
+                link_color = (46, 213, 115)
+        cv2.putText(hud, link_str, (w - 210, 34), cv2.FONT_HERSHEY_SIMPLEX, 0.48, link_color, 1, cv2.LINE_AA)
 
         # Altitude Limit Warning Alert Banner (if floor/ceiling active)
         alert_y = 60
@@ -1163,8 +1178,8 @@ class AutonomousTrackerNode:
             cmd_safe = np.clip(raw_cmd, prev_cmd_3d - max_step, prev_cmd_3d + max_step)
             prev_cmd_3d = cmd_safe.copy()
 
-            # 6. Convert to PX4 MAVSDK Body Frame (forward, right, down, yawspeed)
-            v_fwd, v_right, v_down, yawspeed = self.controller.to_mavsdk(cmd_safe)
+            # 6. Convert to standard 4-DOF Body Frame (forward, right, down, yawspeed)
+            v_fwd, v_right, v_down, yawspeed = self.controller.to_velocity_body(cmd_safe)
 
             # 7. Altitude Floor & Ceiling Safety Envelope Protection
             current_alt = self.get_current_altitude()
@@ -1179,19 +1194,29 @@ class AutonomousTrackerNode:
                 )
 
             # 8. Dispatch steady velocity setpoint to Pixhawk Autopilot
-            if self.drone and not self.args.dry_run and self.vehicle_state.is_connected:
-                try:
-                    await self.drone.offboard.set_velocity_body(
-                        VelocityBodyYawspeed(
-                            forward_m_s=v_fwd,
-                            right_m_s=v_right,
-                            down_m_s=v_down,
-                            yawspeed_deg_s=yawspeed
-                        )
+            if not self.args.dry_run and self.vehicle_state.is_connected:
+                if self.autopilot is not None:
+                    # ArduPilot GUIDED mode velocity setpoint dispatch:
+                    # ArduPilotBridge automatically verifies is_guided. If pilot switched RC mode,
+                    # send_velocity_body drops setpoints and preserves pilot authority.
+                    self.autopilot.send_velocity_body(
+                        v_fwd=v_fwd,
+                        v_right=v_right,
+                        v_down=v_down,
+                        yawspeed_deg_s=yawspeed
                     )
-                except OffboardError:
-                    # Offboard mode dropped (e.g. pilot manual RC takeover)
-                    pass
+                elif self.drone is not None:
+                    try:
+                        await self.drone.offboard.set_velocity_body(
+                            VelocityBodyYawspeed(
+                                forward_m_s=v_fwd,
+                                right_m_s=v_right,
+                                down_m_s=v_down,
+                                yawspeed_deg_s=yawspeed
+                            )
+                        )
+                    except Exception:
+                        pass
 
             # 9. Store latest safe command for HUD rendering & diagnostics
             self.latest_cmd_safe = np.array([v_fwd, v_right, v_down, yawspeed], dtype=np.float64)
@@ -1301,31 +1326,53 @@ class AutonomousTrackerNode:
         """Entry point that coordinates the decoupled threads and asyncio tasks."""
         self.running = True
 
-        # Check MAVSDK availability & connection mode
+        # Check ArduPilot / MAVLink connection mode
         telemetry_task = None
-        if self.args.connection and MAVSDK_AVAILABLE:
-            mode_desc = "LISTEN-ONLY DRY-RUN (Telemetry active, motor commands disabled)" if self.args.dry_run else "LIVE AUTOPILOT CONTROL"
-            print(f"[MAVLINK] Connecting to Pixhawk via {self.args.connection} [{mode_desc}]...")
-            self.drone = System()
-            try:
-                await self.drone.connect(system_address=self.args.connection)
-                print("[MAVLINK] Waiting for autopilot heartbeat...")
-                async for state in self.drone.core.connection_state():
-                    if state.is_connected:
-                        print("[MAVLINK] ✓ Autopilot connected!")
-                        self.vehicle_state.is_connected = True
-                        break
-                telemetry_task = asyncio.create_task(self.telemetry_listener())
-            except Exception as e:
-                print(f"[ERROR] Could not connect to Pixhawk: {e}")
-                print("[FALLBACK] Switching to standalone Dry-Run mode.\n")
+        if self.args.connection:
+            mode_desc = "LISTEN-ONLY DRY-RUN (Telemetry active, motor commands disabled)" if self.args.dry_run else "LIVE AUTOPILOT CONTROL (GUIDED)"
+            baud = getattr(self.args, "baud", 921600)
+            print(f"[MAVLINK] Connecting to ArduPilot via {self.args.connection} (baud={baud}) [{mode_desc}]...")
+            if PYMAVLINK_AVAILABLE:
+                self.autopilot = ArduPilotBridge(
+                    connection_string=self.args.connection,
+                    baud=baud,
+                    vehicle_state=self.vehicle_state
+                )
+                connected = self.autopilot.connect(timeout_s=6.0)
+                if connected:
+                    self.vehicle_state.is_connected = True
+                    print(f"[MAVLINK] ✓ ArduPilot connected in mode: {self.autopilot.flight_mode} (Armed: {self.autopilot.is_armed})")
+                    if not self.args.dry_run and getattr(self.args, "auto_guided", False):
+                        print("[MAVLINK] Requesting transition into GUIDED pursuit mode...")
+                        self.autopilot.set_mode_guided()
+                    telemetry_task = asyncio.create_task(self.telemetry_listener())
+                else:
+                    print(f"[ERROR] Could not connect to ArduPilot on {self.args.connection}")
+                    print("[FALLBACK] Switching to standalone Dry-Run mode.\n")
+                    self.args.dry_run = True
+            elif MAVSDK_AVAILABLE:
+                # Legacy MAVSDK fallback
+                self.drone = System()
+                try:
+                    await self.drone.connect(system_address=self.args.connection)
+                    print("[MAVLINK] Waiting for autopilot heartbeat...")
+                    async for state in self.drone.core.connection_state():
+                        if state.is_connected:
+                            print("[MAVLINK] ✓ Autopilot connected (legacy MAVSDK)!")
+                            self.vehicle_state.is_connected = True
+                            break
+                    telemetry_task = asyncio.create_task(self.telemetry_listener())
+                except Exception as e:
+                    print(f"[ERROR] Could not connect to Pixhawk: {e}")
+                    print("[FALLBACK] Switching to standalone Dry-Run mode.\n")
+                    self.args.dry_run = True
+            else:
+                print("\n[NOTICE] Neither 'pymavlink' nor 'mavsdk' is available in the current environment.")
+                print("[NOTICE] Running in standalone DRY-RUN Mode (Desktop Benchtop Test).\n")
                 self.args.dry_run = True
         else:
             if not self.args.dry_run:
-                if not MAVSDK_AVAILABLE:
-                    print("\n[NOTICE] 'mavsdk' is not installed in the current Python environment.")
-                elif not self.args.connection:
-                    print("\n[NOTICE] No MAVLink connection string provided via --connection.")
+                print("\n[NOTICE] No MAVLink connection string provided via --connection.")
                 print("[NOTICE] Running in standalone DRY-RUN Mode (Desktop Benchtop Test).\n")
                 self.args.dry_run = True
 
@@ -1333,7 +1380,8 @@ class AutonomousTrackerNode:
         print("\n=======================================================")
         print("    AUTONOMOUS DRONE TRACKING & SERVOING RUNNING       ")
         print("=======================================================")
-        print(f"• Flight Mode:        {'DRY-RUN (Desktop Test)' if self.args.dry_run else 'LIVE MAVSDK AUTOPILOT'}")
+        flight_mode_desc = 'DRY-RUN (Desktop Test)' if self.args.dry_run else ('LIVE ARDUPILOT GUIDED' if self.autopilot else 'LIVE AUTOPILOT')
+        print(f"• Flight Mode:        {flight_mode_desc}")
         print(f"• MAVLink Loop Rate:  {self.args.ctrl_rate:.0f} Hz (Decoupled Deterministic Stream)")
         print(f"• Target Standoff:    {getattr(self.args, 'standoff_dist', 3.5):.1f} m ({self.args.target_size:.0f} px, deadband +/-{getattr(self.args, 'deadband', 0.35):.2f}m)")
         print(f"• Altitude Floor:     {self.args.min_alt:.1f} m AGL (Cushion: {self.args.alt_cushion:.1f} m)")
@@ -1341,6 +1389,8 @@ class AutonomousTrackerNode:
         print(f"• Watchdog Timeout:   {self.args.watchdog_timeout * 1000:.0f} ms")
         print(f"• Acceleration Caps:  XY={self.args.max_accel_xy:.1f} m/s^2 | Z={self.args.max_accel_z:.1f} m/s^2 | Yaw={self.args.max_accel_yaw:.0f} deg/s^2")
         print(f"• Forward Speed Cap:  {self.args.max_speed:.1f} m/s (Max Reverse: {getattr(self.args, 'max_reverse', 0.5):.1f} m/s)")
+        search_desc = "IMMEDIATE ACTIVE BRAKE (Station-Keep Hover)" if getattr(self.args, "search_mode", "brake") == "brake" else "LEGACY COAST"
+        print(f"• Search Policy:      {search_desc}")
         print(f"• Press 'q' in video window or Ctrl+C to terminate.")
         print("=======================================================\n")
 
@@ -1417,7 +1467,11 @@ class AutonomousTrackerNode:
                 self.stream_server = None
 
             # Send safe zero-velocity holding command to Pixhawk before exit
-            if self.drone and not self.args.dry_run and self.vehicle_state.is_connected:
+            if self.autopilot is not None:
+                print("[SAFETY] Closing ArduPilot bridge and releasing vehicle to LOITER...")
+                self.autopilot.close()
+                self.autopilot = None
+            elif self.drone and not self.args.dry_run and self.vehicle_state.is_connected:
                 print("[SAFETY] Sending zero velocity holding command to Pixhawk...")
                 try:
                     await self.drone.offboard.set_velocity_body(VelocityBodyYawspeed(0.0, 0.0, 0.0, 0.0))
@@ -1615,6 +1669,10 @@ def parse_args() -> argparse.Namespace:
         "--vfov", type=float, default=45.0,
         help="Vertical field of view in degrees."
     )
+    parser.add_argument(
+        "--search-mode", type=str, default="brake", choices=["brake", "legacy_coast"],
+        help="Target loss search governor policy: 'brake' (immediate active station-keeping hover, default) or 'legacy_coast'."
+    )
 
     # Altitude Floor and Ceiling Safety Limits
     parser.add_argument(
@@ -1659,7 +1717,15 @@ def parse_args() -> argparse.Namespace:
     # MAVLink & Hardware Connection Options
     parser.add_argument(
         "--connection", type=str, default="",
-        help="MAVLink connection URI, e.g. 'serial:///dev/ttyTHS1:921600' (Jetson) or 'udp://:14540' (SITL)."
+        help="MAVLink connection URI, e.g. '/dev/ttyTHS0' (Jetson UART), 'udpin:0.0.0.0:14550' (SITL/QGC), or 'serial:///dev/ttyTHS1:921600'."
+    )
+    parser.add_argument(
+        "--baud", type=int, default=921600,
+        help="Serial baud rate for ArduPilot telemetry connection (default: 921600 for Jetson hardware UART)."
+    )
+    parser.add_argument(
+        "--auto-guided", action="store_true",
+        help="Automatically request transition into ArduCopter GUIDED mode on startup (default: False, waits for pilot RC mode switch)."
     )
     parser.add_argument(
         "--dry-run", action="store_true",

@@ -41,13 +41,19 @@ def check(name, condition, details):
     print(f"REPRODUCED: {name}: {details}")
 
 
-c = C()
+c = C(search_mode="legacy_coast")
 c.prev_cmd_vx = 3.0
 coast = [c.compute_cmd({"status": "SEARCHING"}, dt=0.02)[0] for _ in range(40)]
 check("search coast does not progressively decelerate", np.allclose(coast, 2.97), f"40 outputs = {coast[0]:.2f} m/s")
 for _ in range(70):
     scan = c.compute_cmd({"status": "SEARCHING"}, dt=0.02)
 check("persistent sensor failure triggers yaw scan", scan[3] == 15.0, scan.tolist())
+
+# Verification of remediated Option A immediate brake
+c_remediated = C(search_mode="brake")
+c_remediated.prev_cmd_vx = 3.0
+brake_out = c_remediated.compute_cmd({"status": "SEARCHING"}, dt=0.02)
+check("remediated search mode immediately commands zero-velocity brake", np.allclose(brake_out, 0.0), brake_out.tolist())
 
 c = C(use_bbox_size=True)
 for _ in range(60):
@@ -89,7 +95,7 @@ async def reproduce_runtime_watchdog():
     n.args = SimpleNamespace(ctrl_rate=500, watchdog_timeout=0.4, max_accel_xy=4., max_accel_z=3., max_accel_yaw=180., dry_run=False)
     n.vehicle_state = ns["VehicleState"]()
     n.perception_state = ns["PerceptionState"]()
-    n.controller = C()
+    n.controller = C(search_mode="legacy_coast")
     n.controller.prev_cmd_vx = 3.0
     n.drone = None
     n.running = True

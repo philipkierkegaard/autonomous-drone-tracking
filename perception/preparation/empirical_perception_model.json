@@ -201,6 +201,8 @@
     "lag1_autocorrelation": {
       "rho_cx": 0.6572,
       "rho_cy": 0.6506,
+      "rho_w": 0.8748,
+      "rho_h": 0.8661,
       "consecutive_pairs_evaluated": 5256
     }
   },

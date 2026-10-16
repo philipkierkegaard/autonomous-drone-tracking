@@ -42,6 +42,8 @@ import matplotlib.patheffects as pe
 from control.simulation import FastPixhawkQuadSim
 from control.pid_controller import KinematicVisualServoController
 from control.trajectory import StochasticTargetTrajectory, PROFILES
+from control.synthetic_sensor import SyntheticYOLOSensor
+from perception.pipeline import DroneTracker
 
 try:
     from control.predictive_controller import RecurrentVisualServoController
@@ -49,6 +51,7 @@ except Exception:
     RecurrentVisualServoController = None
 
 ARTIFACT_DIRS = [
+    Path("/Users/philipkierkegaard/.gemini/antigravity-ide/brain/1da038ce-1011-475e-b1de-1614f330a01a"),
     Path("/Users/philipkierkegaard/.gemini/antigravity-ide/brain/53eb0b3e-b75c-4830-a9d4-c69e644ccb6a"),
     Path("/Users/philipkierkegaard/.gemini/antigravity-ide/brain/42b621c5-bd5c-42b8-ae83-87208090e0a7"),
     Path("/Users/philipkierkegaard/.gemini/antigravity-ide/brain/c2b8fddd-4624-46f7-9768-e1974371d76e"),
@@ -186,11 +189,14 @@ def simulate_pursuit(
     model_path: Optional[Union[str, Path]] = None,
     initial_chaser_pos: Optional[np.ndarray] = None,
     initial_chaser_yaw: float = 0.0,
+    use_empirical_perception: bool = True,
+    env_perception_mode: str = "nominal",
+    seed: int = 42,
 ) -> dict:
     """
-    Executes the full closed-loop 50 Hz simulation with FastPixhawkQuadSim and
-    either KinematicVisualServoController or RecurrentVisualServoController,
-    logging state histories for movie rendering and performance inspection.
+    Executes the full closed-loop 50 Hz simulation with FastPixhawkQuadSim,
+    integrated with the empirical 30 Hz YOLOv8 noise & dropout model and
+    the 50 Hz DroneTracker Kalman filter dead-reckoning layer.
     """
     num_steps = int(duration / dt)
 
@@ -203,6 +209,13 @@ def simulate_pursuit(
     )
     p0 = [0.0, 0.0, -2.5] if initial_chaser_pos is None else initial_chaser_pos
     sim.reset(initial_pos=p0, initial_yaw=initial_chaser_yaw)
+
+    if use_empirical_perception:
+        sensor = SyntheticYOLOSensor(img_w=640, img_h=480, env_mode=env_perception_mode, seed=seed)
+        tracker = DroneTracker(dt=dt, max_lost_frames=int(round(3.5 / dt)), min_hits_to_confirm=2)
+    else:
+        sensor = None
+        tracker = None
 
     if controller is None:
         if controller_type.lower() in ("recurrent_ppo", "rl", "recurrent"):
@@ -233,6 +246,16 @@ def simulate_pursuit(
                 max_decel=2.8,
             )
 
+    camera_dt = 1.0 / 30.0
+    time_since_camera = 0.0
+    latest_yolo_bbox = None
+    latest_yolo_conf = 0.0
+    latest_yolo_status = "INITIALIZING"
+    yolo_drop_burst = 0
+    coasting_steps = 0
+    last_seen_ex = 0.0
+    last_seen_ey = 0.0
+
     times = []
     chaser_pos = []
     chaser_vel = []
@@ -247,22 +270,158 @@ def simulate_pursuit(
     in_view_history = []
     cmd_history = []
     bbox_history = []
+    gt_bbox_history = []
+    yolo_bbox_history = []
+    yolo_conf_history = []
+    yolo_status_history = []
+    yolo_drop_burst_history = []
+    kalman_is_coasting_history = []
+    kalman_coasting_ms_history = []
+    kalman_vel_history = []
+    kalman_hits_history = []
+    kalman_hist_history = []
 
     for step in range(num_steps):
         t = step * dt
         p_target = trajectory_fn(t)
 
-        # 1. Perspective projection & vision telemetry
-        telem = sim.get_camera_telemetry(
-            p_target,
-            hfov_deg=60.0,
-            vfov_deg=45.0,
-            target_w_m=0.35,
-            target_h_m=0.20,
-            img_w=640,
-            img_h=480,
-            desired_target_size=desired_bbox_px
+        # 1. Perspective projection of 3D target
+        raw_ex, raw_ey, raw_in_view, dist, raw_bw, raw_bh = sim.project_to_camera(
+            p_target, return_bbox=True, img_w=640, img_h=480
         )
+
+        gt_cx = (raw_ex + 1.0) * 320.0
+        gt_cy = (raw_ey + 1.0) * 240.0
+        gt_box = np.array([
+            gt_cx - raw_bw / 2.0,
+            gt_cy - raw_bh / 2.0,
+            gt_cx + raw_bw / 2.0,
+            gt_cy + raw_bh / 2.0
+        ], dtype=np.float32) if (raw_in_view and raw_bw > 1.0) else None
+
+        if use_empirical_perception:
+            time_since_camera += dt
+            is_camera_tick = (time_since_camera >= camera_dt - 1e-5)
+
+            if is_camera_tick:
+                time_since_camera -= camera_dt
+                norm_cx = (raw_ex + 1.0) / 2.0
+                norm_cy = (raw_ey + 1.0) / 2.0
+                norm_w = raw_bw / 640.0
+                norm_h = raw_bh / 480.0
+
+                det_bbox, conf, fps_boxes = sensor.step(
+                    norm_cx, norm_cy, norm_w, norm_h, in_fov=raw_in_view
+                )
+
+                detections = []
+                confs = []
+                if det_bbox is not None:
+                    detections.append(det_bbox)
+                    confs.append(conf)
+                    latest_yolo_bbox = det_bbox.copy()
+                    latest_yolo_conf = conf
+                    latest_yolo_status = "DETECTED"
+                    yolo_drop_burst = 0
+                else:
+                    latest_yolo_bbox = None
+                    latest_yolo_conf = 0.0
+                    latest_yolo_status = "DROPOUT"
+                    yolo_drop_burst += 1
+
+                for fp in fps_boxes:
+                    detections.append(fp)
+                    confs.append(0.36)
+
+                det_arr = np.array(detections, dtype=np.float32) if detections else np.empty((0, 4), dtype=np.float32)
+                conf_arr = np.array(confs, dtype=np.float32) if confs else np.empty((0,), dtype=np.float32)
+                tracker.update(det_arr, conf_arr)
+            else:
+                # 50 Hz Kalman dead reckoning prediction
+                for trk in tracker.trackers:
+                    trk.predict()
+
+            primary = None
+            if tracker.primary_track_id is not None:
+                primary = next((t for t in tracker.trackers if t.id == tracker.primary_track_id), None)
+
+            if primary is not None and primary.hits >= tracker.min_hits_to_confirm:
+                k_box = primary.get_state()
+                k_cx = (k_box[0] + k_box[2]) / 2.0
+                k_cy = (k_box[1] + k_box[3]) / 2.0
+                bw_est = max(1.0, k_box[2] - k_box[0])
+                bh_est = max(1.0, k_box[3] - k_box[1])
+                ex_est = float((k_cx - 320.0) / 320.0)
+                ey_est = float((k_cy - 240.0) / 240.0)
+                last_seen_ex = ex_est
+                last_seen_ey = ey_est
+                is_coasting = (primary.time_since_update > 0)
+                if is_coasting:
+                    coasting_steps += 1
+                else:
+                    coasting_steps = 0
+
+                telem = {
+                    "error_x": ex_est,
+                    "error_y": ey_est,
+                    "target_size": bw_est,
+                    "distance": dist,
+                    "in_view": True,
+                    "status": "TRACKING" if not is_coasting else "COASTING",
+                    "is_coasting": is_coasting,
+                    "coasting_ms": coasting_steps * 20,
+                    "bbox": k_box,
+                    "gt_bbox": gt_box,
+                    "yolo_bbox": latest_yolo_bbox,
+                    "yolo_conf": latest_yolo_conf,
+                    "yolo_status": latest_yolo_status,
+                    "yolo_drop_burst": yolo_drop_burst,
+                    "kalman_vel": primary.get_velocity(),
+                    "kalman_hits": primary.hits,
+                    "history": list(primary.history)
+                }
+            else:
+                telem = {
+                    "error_x": last_seen_ex,
+                    "error_y": last_seen_ey,
+                    "target_size": 32.33,
+                    "distance": dist,
+                    "in_view": False,
+                    "status": "SEARCHING",
+                    "is_coasting": True,
+                    "coasting_ms": 0,
+                    "bbox": None,
+                    "gt_bbox": gt_box,
+                    "yolo_bbox": None,
+                    "yolo_conf": 0.0,
+                    "yolo_status": "SEARCHING",
+                    "yolo_drop_burst": 0,
+                    "kalman_vel": (0.0, 0.0),
+                    "kalman_hits": 0,
+                    "history": []
+                }
+        else:
+            # Legacy direct telemetry
+            telem = sim.get_camera_telemetry(
+                p_target,
+                hfov_deg=60.0,
+                vfov_deg=45.0,
+                target_w_m=0.35,
+                target_h_m=0.20,
+                img_w=640,
+                img_h=480,
+                desired_target_size=desired_bbox_px
+            )
+            telem["gt_bbox"] = gt_box
+            telem["yolo_bbox"] = telem.get("bbox")
+            telem["yolo_conf"] = 1.0
+            telem["yolo_status"] = "DETECTED" if telem["in_view"] else "SEARCHING"
+            telem["yolo_drop_burst"] = 0
+            telem["kalman_vel"] = (0.0, 0.0)
+            telem["kalman_hits"] = 100
+            telem["is_coasting"] = False
+            telem["coasting_ms"] = 0
+            telem["history"] = []
 
         # 2. Compute 4-DOF velocity setpoint
         if RecurrentVisualServoController is not None and isinstance(controller, RecurrentVisualServoController):
@@ -304,6 +463,17 @@ def simulate_pursuit(
         cmd_history.append(cmd.copy())
         bbox_history.append(telem.get("bbox", [0, 0, 0, 0]))
 
+        gt_bbox_history.append(telem.get("gt_bbox"))
+        yolo_bbox_history.append(telem.get("yolo_bbox"))
+        yolo_conf_history.append(telem.get("yolo_conf", 0.0))
+        yolo_status_history.append(telem.get("yolo_status", ""))
+        yolo_drop_burst_history.append(telem.get("yolo_drop_burst", 0))
+        kalman_is_coasting_history.append(telem.get("is_coasting", False))
+        kalman_coasting_ms_history.append(telem.get("coasting_ms", 0))
+        kalman_vel_history.append(telem.get("kalman_vel", (0.0, 0.0)))
+        kalman_hits_history.append(telem.get("kalman_hits", 0))
+        kalman_hist_history.append(telem.get("history", []))
+
     return {
         "times": np.array(times),
         "chaser_pos": np.array(chaser_pos),
@@ -318,7 +488,17 @@ def simulate_pursuit(
         "err_y": np.array(err_y_history),
         "in_view": np.array(in_view_history),
         "cmd": np.array(cmd_history),
-        "bbox": np.array(bbox_history),
+        "bbox": bbox_history,
+        "gt_bbox": gt_bbox_history,
+        "yolo_bbox": yolo_bbox_history,
+        "yolo_conf": np.array(yolo_conf_history),
+        "yolo_status": yolo_status_history,
+        "yolo_drop_burst": np.array(yolo_drop_burst_history),
+        "kalman_is_coasting": np.array(kalman_is_coasting_history),
+        "kalman_coasting_ms": np.array(kalman_coasting_ms_history),
+        "kalman_vel": kalman_vel_history,
+        "kalman_hits": np.array(kalman_hits_history),
+        "kalman_history": kalman_hist_history,
         "duration": duration,
         "dt": dt,
     }
@@ -357,6 +537,17 @@ def render_movie_frames(
     total_duration = sim_data["duration"]
     dt_sim = sim_data["dt"]
     total_sim_steps = len(times)
+
+    gt_bboxes = sim_data.get("gt_bbox", [None] * total_sim_steps)
+    yolo_bboxes = sim_data.get("yolo_bbox", [None] * total_sim_steps)
+    yolo_confs = sim_data.get("yolo_conf", np.zeros(total_sim_steps))
+    yolo_statuses = sim_data.get("yolo_status", [""] * total_sim_steps)
+    yolo_drop_bursts = sim_data.get("yolo_drop_burst", np.zeros(total_sim_steps))
+    kalman_is_coasting_all = sim_data.get("kalman_is_coasting", np.zeros(total_sim_steps, dtype=bool))
+    kalman_coasting_ms_all = sim_data.get("kalman_coasting_ms", np.zeros(total_sim_steps, dtype=int))
+    kalman_vels = sim_data.get("kalman_vel", [(0.0, 0.0)] * total_sim_steps)
+    kalman_hits_all = sim_data.get("kalman_hits", np.zeros(total_sim_steps, dtype=int))
+    kalman_histories = sim_data.get("kalman_history", [[]] * total_sim_steps)
 
     # Frame sampling stride
     sim_steps_per_frame = max(1, int(round((1.0 / fps) / dt_sim)))
@@ -439,6 +630,15 @@ def render_movie_frames(
         ey = err_ys[step_idx]
         bbox = bboxes[step_idx]
 
+        gt_box = gt_bboxes[step_idx]
+        yolo_box = yolo_bboxes[step_idx]
+        yolo_conf = float(yolo_confs[step_idx])
+        yolo_burst = int(yolo_drop_bursts[step_idx])
+        k_coasting = bool(kalman_is_coasting_all[step_idx])
+        k_coast_ms = int(kalman_coasting_ms_all[step_idx])
+        k_vel = kalman_vels[step_idx]
+        k_hist = kalman_histories[step_idx]
+
         # ----------------------------------------------------------------------
         # A. 2D Top-Down Flight Arena (East = X-axis, North = Y-axis)
         # ----------------------------------------------------------------------
@@ -457,8 +657,9 @@ def render_movie_frames(
         ax_arena.plot(t_pos[:, 1], t_pos[:, 0], color="#ff4757", linestyle=":", linewidth=1.2, alpha=0.25, zorder=1)
 
         # Fading trails
+        chaser_legend_label = "Chaser (Recurrent PPO)" if "recurrent" in trajectory_title.lower() else "Chaser (4-DOF PID)"
         ax_arena.plot(t_trail_east, t_trail_north, color="#ff4757", linewidth=2.2, alpha=0.85, label="Target UAV", zorder=3)
-        ax_arena.plot(c_trail_east, c_trail_north, color="#00d2d3", linewidth=2.8, alpha=0.90, label="Chaser (4-DOF PID)", zorder=4)
+        ax_arena.plot(c_trail_east, c_trail_north, color="#00d2d3", linewidth=2.8, alpha=0.90, label=chaser_legend_label, zorder=4)
 
         # Camera FOV Wedge (Sensor Projection)
         left_yaw = yaw - half_hfov
@@ -474,9 +675,13 @@ def render_movie_frames(
         ax_arena.plot([cy, p_left[0]], [cx, p_left[1]], color=fov_color, linewidth=0.8, alpha=0.5, zorder=2)
         ax_arena.plot([cy, p_right[0]], [cx, p_right[1]], color=fov_color, linewidth=0.8, alpha=0.5, zorder=2)
 
-        # Visual Line of Sight (LOS) Laser Link
-        los_color = "#2ed573" if in_view else "#ff4757"
-        los_style = "-" if in_view else ":"
+        # Visual Line of Sight (LOS) Laser Link: Solid Green when locked, Dashed Amber when coasting
+        if in_view:
+            los_color = "#2ed573" if not k_coasting else "#ff7f50"
+            los_style = "-" if not k_coasting else "--"
+        else:
+            los_color = "#ff4757"
+            los_style = ":"
         ax_arena.plot([cy, ty], [cx, tx], color=los_color, linestyle=los_style, linewidth=1.4, alpha=0.75, zorder=3)
 
         # Target Drone Marker (Pulsing Beacon)
@@ -539,7 +744,6 @@ def render_movie_frames(
         ax_cam.set_yticks([])
 
         # Artificial Horizon Line (Tilted by roll, shifted by camera pitch)
-        # Horizon y on sensor: pitch = 0 means y = 240 + 240 * (tan(-15 deg)/tan(22.5 deg))
         horiz_y_center = 240.0 + (np.tan(cam_pitch) / np.tan(np.deg2rad(22.5))) * 240.0
         tan_roll = np.tan(-roll)
         x_left, x_right = 0.0, 640.0
@@ -553,31 +757,86 @@ def render_movie_frames(
         # 35px desired standoff circle
         ax_cam.add_patch(Circle((320, 240), 35.0 / 2.0, fill=False, edgecolor="#00d2d3", linestyle=":", lw=1.0, alpha=0.7))
 
-        # Target Bounding Box
-        if in_view and bbox[2] > bbox[0]:
+        # Target Bounding Box Rendering (GT 3D + Raw YOLO + Kalman Track)
+        # 1. Ground-Truth 3D Target Projection (Dashed Light Green)
+        if gt_box is not None:
+            gx1, gy1, gx2, gy2 = gt_box
+            gw = max(1.0, gx2 - gx1)
+            gh = max(1.0, gy2 - gy1)
+            rect_gt = Rectangle((gx1, gy1), gw, gh, fill=False, edgecolor="#7bed9f", linestyle="--", linewidth=1.0, alpha=0.6)
+            ax_cam.add_patch(rect_gt)
+            ax_cam.text(gx1, max(12, gy1 - 3), "GT 3D", color="#7bed9f", fontsize=6.5, alpha=0.7)
+
+        # 2. Raw YOLO Measurement (Yellow Box when detected, or Dropout Alert)
+        if yolo_box is not None:
+            yx1, yy1, yx2, yy2 = yolo_box
+            yw = max(1.0, yx2 - yx1)
+            yh = max(1.0, yy2 - yy1)
+            rect_yolo = Rectangle((yx1, yy1), yw, yh, fill=False, edgecolor="#ffa502", linewidth=1.4, alpha=0.85)
+            ax_cam.add_patch(rect_yolo)
+            ax_cam.text(yx1, min(475, yy2 + 10), f"YOLO [{yolo_conf*100:.0f}%]", color="#ffa502", fontsize=6.5, fontweight="bold",
+                        bbox=dict(boxstyle="square,pad=0.1", facecolor="#141005", edgecolor="#ffa502", alpha=0.85))
+        else:
+            if yolo_burst > 0 and in_view:
+                ax_cam.text(12, 60, f"● YOLO DROPOUT (Burst: {yolo_burst} frames / {yolo_burst*33.3:.0f}ms)",
+                            color="#ff4757", fontsize=7.5, family="monospace", fontweight="bold")
+
+        # 3. Kalman Filter State Estimate (Neon Green when Locked, Amber when Coasting)
+        if in_view and bbox is not None and bbox[2] > bbox[0]:
             bx1, by1, bx2, by2 = bbox
             bw = bx2 - bx1
             bh = by2 - by1
-            rect = Rectangle((bx1, by1), bw, bh, fill=False, edgecolor="#2ed573", linewidth=1.8)
+
+            if k_coasting:
+                trk_color = "#ff7f50"  # Amber/Coral for Coasting
+                trk_label = f"TRK-01 [COASTING +{k_coast_ms}ms]"
+                status_badge = "DEAD RECKONING"
+                badge_bg = "#2b1408"
+            else:
+                trk_color = "#2ed573"  # Neon Green for Locked
+                trk_label = f"TRK-01 [LOCK: {dist:.1f}m]"
+                status_badge = "LOCKED"
+                badge_bg = "#081c10"
+
+            rect = Rectangle((bx1, by1), bw, bh, fill=False, edgecolor=trk_color, linewidth=1.8)
             ax_cam.add_patch(rect)
+
             # Corner brackets
             b_arm = min(bw, bh) * 0.25
-            ax_cam.plot([bx1, bx1 + b_arm], [by1, by1], color="#2ed573", lw=2.5)
-            ax_cam.plot([bx1, bx1], [by1, by1 + b_arm], color="#2ed573", lw=2.5)
-            ax_cam.plot([bx2, bx2 - b_arm], [by2, by2], color="#2ed573", lw=2.5)
-            ax_cam.plot([bx2, bx2], [by2, by2 - b_arm], color="#2ed573", lw=2.5)
+            ax_cam.plot([bx1, bx1 + b_arm], [by1, by1], color=trk_color, lw=2.5)
+            ax_cam.plot([bx1, bx1], [by1, by1 + b_arm], color=trk_color, lw=2.5)
+            ax_cam.plot([bx2, bx2 - b_arm], [by2, by2], color=trk_color, lw=2.5)
+            ax_cam.plot([bx2, bx2], [by2, by2 - b_arm], color=trk_color, lw=2.5)
 
-            ax_cam.text(bx1, max(14, by1 - 5), f"TRK-01 [LOCK: {dist:.1f}m]", color="#2ed573", fontsize=7.5, fontweight="bold",
-                        bbox=dict(boxstyle="square,pad=0.1", facecolor="#081c10", edgecolor="#2ed573", alpha=0.9))
+            ax_cam.text(bx1, max(14, by1 - 5), trk_label, color=trk_color, fontsize=7.5, fontweight="bold",
+                        bbox=dict(boxstyle="square,pad=0.1", facecolor=badge_bg, edgecolor=trk_color, alpha=0.9))
+
+            # Kalman Velocity Arrow
+            kcx = (bx1 + bx2) / 2.0
+            kcy = (by1 + by2) / 2.0
+            kvx, kvy = k_vel
+            if abs(kvx) > 1.0 or abs(kvy) > 1.0:
+                ax_cam.annotate(
+                    "", xy=(kcx + kvx * 0.25, kcy + kvy * 0.25), xytext=(kcx, kcy),
+                    arrowprops=dict(arrowstyle="->", color="#00d2d3", lw=1.5)
+                )
+
+            # Trajectory Breadcrumb trail
+            if k_hist and len(k_hist) > 1:
+                hist_arr = np.array(k_hist[-25:])
+                ax_cam.plot(hist_arr[:, 0], hist_arr[:, 1], color=trk_color, lw=1.0, alpha=0.5, linestyle=":")
+
         else:
+            status_badge = "SEARCHING"
+            trk_color = "#ff4757"
             ax_cam.text(320, 240, "TARGET OUT OF FOV\n[ COASTING / SEARCH ]", color="#ff4757", fontsize=10, fontweight="bold",
                         ha="center", va="center", bbox=dict(boxstyle="round,pad=0.4", facecolor="#240a0e", edgecolor="#ff4757", alpha=0.85))
 
         # Sensor HUD Labels
         ax_cam.text(12, 24, "FPV SENSOR: 1080p60 GLOBAL SHUTTER (+15° MOUNT)", color="#00d2d3", fontsize=8, family="monospace")
         ax_cam.text(12, 42, f"ERR X: {ex:+.3f} | ERR Y: {ey:+.3f} | RANGE ERR: {(dist - 6.0)/6.0:+.2f}", color="#dfe4ea", fontsize=7.5, family="monospace")
-        ax_cam.text(628, 24, "LOCKED" if in_view else "SEARCHING", color="#2ed573" if in_view else "#ff4757", fontsize=8.5, fontweight="bold", ha="right",
-                    bbox=dict(boxstyle="round,pad=0.2", facecolor="#10141d", edgecolor="#2ed573" if in_view else "#ff4757"))
+        ax_cam.text(628, 24, status_badge, color=trk_color, fontsize=8.5, fontweight="bold", ha="right",
+                    bbox=dict(boxstyle="round,pad=0.2", facecolor="#10141d", edgecolor=trk_color))
         ax_cam.set_title("ON-BOARD CAMERA SENSOR VIEW (HORIZON STABILIZED)", color="#f1f2f6", fontsize=10, fontweight="bold", pad=6)
 
         # ----------------------------------------------------------------------
@@ -593,14 +852,23 @@ def render_movie_frames(
 
         p_deg = np.rad2deg(pitch)
         p_label = "nose-down" if p_deg >= 0 else "nose-up"
+
+        if in_view:
+            if k_coasting:
+                status_str = f"COASTING (KALMAN DEAD RECKONING +{k_coast_ms}ms)"
+            else:
+                status_str = "LOCKED (YOLO MEASUREMENT ACTIVE)"
+        else:
+            status_str = "COASTING / RE-ACQUIRING"
+
         hud_text = (
-            f"AUTOPILOT FLIGHT TELEMETRY (PX4 MAVSDK)               TIME: {t_curr:04.1f}s / {total_duration:04.1f}s\n"
+            f"AUTOPILOT FLIGHT TELEMETRY (ARDUCOPTER GUIDED)         TIME: {t_curr:04.1f}s / {total_duration:04.1f}s\n"
             f"───────────────────────────────────────────────────────────────────────────────────\n"
-            f"• PURSUIT STATUS:      {'LOCKED (100% IN FOV)' if in_view else 'COASTING / RE-ACQUIRING'}        TARGET DIST: {dist:5.2f} m  (GOAL: 6.00m)\n"
+            f"• PURSUIT STATUS:      {status_str:<32s}        TARGET DIST: {dist:5.2f} m  (GOAL: 6.00m)\n"
             f"• 4-DOF VELOCITIES:    FWD: {v_fwd:4.1f} m/s | LAT: {v_lat:+4.2f} m/s | VERT: {-v_down:+4.2f} m/s | YAW: {yawspeed:+5.1f} °/s\n"
             f"• KINEMATIC ATTITUDE:  PITCH: {p_deg:+4.1f}° ({p_label}) | ROLL: {np.rad2deg(roll):+4.1f}° (strafe) | CAM: {np.rad2deg(cam_pitch):+4.1f}°\n"
             f"• ALTITUDE ENVELOPE:   CHASER: {-cz:4.1f} m | TARGET: {-tz:4.1f} m | DELTA Z: {-(tz - cz):+4.2f} m ({'CLIMB' if v_down < 0 else 'DESCEND'})\n"
-            f"• HARDWARE PIPELINE:   60ms Total Latency | 13.0ms YOLOv8n TensorRT FP16 | Global Shutter Active"
+            f"• HARDWARE PIPELINE:   60ms Latency | 30 Hz YOLOv8 Measurement | 50 Hz Kalman Dead Reckoning"
         )
         ax_hud.text(0.02, 0.90, hud_text, color="#f1f2f6", fontsize=8.5, family="monospace", va="top",
                     bbox=dict(boxstyle="round,pad=0.5", facecolor="#10141d", edgecolor="#00d2d3", linewidth=1.1))
@@ -701,7 +969,12 @@ def generate_chase_movie(
     Simulates the pursuit and renders the 2D top-down movie.
     """
     traj_fn, title = get_target_trajectory(trajectory_name, duration=total_time_s, seed=seed)
-    ctrl_label = "Learned Recurrent PPO" if controller_type.lower() in ("recurrent_ppo", "rl", "recurrent") else "Classical Visual Servoing (PID)"
+    if controller_type.lower() in ("recurrent_ppo", "rl", "recurrent"):
+        ctrl_label = "Learned Recurrent PPO"
+    elif controller_type.lower() in ("kinematic", "kinematic_pid", "pid"):
+        ctrl_label = "4-DOF Kinematic PID"
+    else:
+        ctrl_label = controller_type.upper()
     title = f"{title} [{ctrl_label}]"
 
     sim_data = simulate_pursuit(
@@ -711,6 +984,7 @@ def generate_chase_movie(
         enable_lateral_strafe=enable_lateral_strafe,
         controller_type=controller_type,
         model_path=model_path,
+        seed=seed,
     )
     render_movie_frames(
         sim_data=sim_data,
@@ -729,8 +1003,8 @@ if __name__ == "__main__":
     parser.add_argument("--duration", type=float, default=25.0, help="Duration in seconds (default: 25.0)")
     parser.add_argument("--fps", type=int, default=25, help="Video framerate (default: 25)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for stochastic trajectory")
-    parser.add_argument("--controller", type=str, default="pid", choices=["pid", "recurrent_ppo", "rl"],
-                        help="Controller policy: 'pid' or 'recurrent_ppo' / 'rl'")
+    parser.add_argument("--controller", type=str, default="pid", choices=["pid", "kinematic", "recurrent_ppo", "rl"],
+                        help="Controller policy: 'pid', 'kinematic', or 'recurrent_ppo' / 'rl'")
     parser.add_argument("--model", type=str, default=None, help="Path to trained policy .zip")
     parser.add_argument("--out", type=str, default=None, help="Output MP4 file path")
     parser.add_argument("--gif", action="store_true", help="Also generate an animated GIF")
