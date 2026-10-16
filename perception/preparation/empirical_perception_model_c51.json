@@ -1,0 +1,290 @@
+{
+  "metadata": {
+    "model_weights": "perception/weights/yolov8n_drone_768_hybrid_nwd_c51_best.pt",
+    "validation_images_count": 6821,
+    "confidence_threshold": 0.25,
+    "match_iou_threshold": 0.25,
+    "global_fp_rate_per_frame": 0.3057
+  },
+  "scale_bins": {
+    "tiny": {
+      "scale_range": "[0.00, 0.035)",
+      "total_gt": 2987,
+      "detected": 2345,
+      "p_detect": 0.7851,
+      "mean_residual": [
+        -0.000574,
+        -0.000116,
+        -0.002884,
+        -0.006992
+      ],
+      "cov_matrix_4x4": [
+        [
+          1.98e-06,
+          6e-08,
+          9e-08,
+          -6e-08
+        ],
+        [
+          6e-08,
+          3.25e-06,
+          5.5e-07,
+          4.1e-07
+        ],
+        [
+          9e-08,
+          5.5e-07,
+          1.06e-05,
+          5.6e-06
+        ],
+        [
+          -6e-08,
+          4.1e-07,
+          5.6e-06,
+          1.202e-05
+        ]
+      ],
+      "std_devs": {
+        "sigma_cx": 0.00141,
+        "sigma_cy": 0.0018,
+        "sigma_w": 0.00326,
+        "sigma_h": 0.00347
+      }
+    },
+    "small": {
+      "scale_range": "[0.035, 0.070)",
+      "total_gt": 2928,
+      "detected": 2657,
+      "p_detect": 0.9074,
+      "mean_residual": [
+        -0.000242,
+        0.001165,
+        -0.000458,
+        -0.005317
+      ],
+      "cov_matrix_4x4": [
+        [
+          2.78e-06,
+          -1.6e-07,
+          1.73e-06,
+          1.05e-06
+        ],
+        [
+          -1.6e-07,
+          5.82e-06,
+          -1.1e-07,
+          -2.36e-06
+        ],
+        [
+          1.73e-06,
+          -1.1e-07,
+          2.69e-05,
+          3.293e-05
+        ],
+        [
+          1.05e-06,
+          -2.36e-06,
+          3.293e-05,
+          7.58e-05
+        ]
+      ],
+      "std_devs": {
+        "sigma_cx": 0.00167,
+        "sigma_cy": 0.00241,
+        "sigma_w": 0.00519,
+        "sigma_h": 0.00871
+      }
+    },
+    "medium": {
+      "scale_range": "[0.070, 0.120)",
+      "total_gt": 491,
+      "detected": 385,
+      "p_detect": 0.7841,
+      "mean_residual": [
+        -0.000168,
+        -0.000422,
+        0.007288,
+        0.00796
+      ],
+      "cov_matrix_4x4": [
+        [
+          9.73e-06,
+          -3.99e-06,
+          -2.56e-06,
+          3.57e-06
+        ],
+        [
+          -3.99e-06,
+          3.217e-05,
+          1.395e-05,
+          -9.82e-06
+        ],
+        [
+          -2.56e-06,
+          1.395e-05,
+          6.316e-05,
+          1.646e-05
+        ],
+        [
+          3.57e-06,
+          -9.82e-06,
+          1.646e-05,
+          9.378e-05
+        ]
+      ],
+      "std_devs": {
+        "sigma_cx": 0.00312,
+        "sigma_cy": 0.00567,
+        "sigma_w": 0.00795,
+        "sigma_h": 0.00968
+      }
+    },
+    "large": {
+      "scale_range": "[0.120, 1.000]",
+      "total_gt": 69,
+      "detected": 69,
+      "p_detect": 1.0,
+      "mean_residual": [
+        -0.001652,
+        0.000427,
+        0.018364,
+        0.007029
+      ],
+      "cov_matrix_4x4": [
+        [
+          6.04e-06,
+          -5.6e-07,
+          -7.45e-06,
+          -1.31e-06
+        ],
+        [
+          -5.6e-07,
+          5.71e-06,
+          1.178e-05,
+          1.3e-07
+        ],
+        [
+          -7.45e-06,
+          1.178e-05,
+          6.936e-05,
+          1.01e-05
+        ],
+        [
+          -1.31e-06,
+          1.3e-07,
+          1.01e-05,
+          1.713e-05
+        ]
+      ],
+      "std_devs": {
+        "sigma_cx": 0.00246,
+        "sigma_cy": 0.00239,
+        "sigma_w": 0.00833,
+        "sigma_h": 0.00414
+      }
+    }
+  },
+  "temporal_markov_model": {
+    "p_drop": 0.0337,
+    "p_recover": 0.2979,
+    "mean_burst_length_frames": 6.73,
+    "expected_burst_duration_sec_at_30fps": 0.224,
+    "lag1_autocorrelation": {
+      "rho_cx": 0.5969,
+      "rho_cy": 0.6273
+    }
+  },
+  "sequence_breakdown": {
+    "hardneg": {
+      "frames": 100,
+      "ground_truth_targets": 0,
+      "detected_targets": 0,
+      "recall_pct": 0.0,
+      "false_positives": 7,
+      "fp_rate_per_frame": 0.07,
+      "p_drop": 0.0,
+      "p_recover": 0.0,
+      "mean_dropout_burst_len": 0.0,
+      "max_dropout_burst_len": 0,
+      "burst_count": 0
+    },
+    "video01": {
+      "frames": 1050,
+      "ground_truth_targets": 1050,
+      "detected_targets": 906,
+      "recall_pct": 86.29,
+      "false_positives": 12,
+      "fp_rate_per_frame": 0.0114,
+      "p_drop": 0.0077,
+      "p_recover": 0.0486,
+      "mean_dropout_burst_len": 20.57,
+      "max_dropout_burst_len": 81,
+      "burst_count": 7
+    },
+    "video04": {
+      "frames": 341,
+      "ground_truth_targets": 341,
+      "detected_targets": 338,
+      "recall_pct": 99.12,
+      "false_positives": 16,
+      "fp_rate_per_frame": 0.0469,
+      "p_drop": 0.0059,
+      "p_recover": 0.6667,
+      "mean_dropout_burst_len": 1.5,
+      "max_dropout_burst_len": 2,
+      "burst_count": 2
+    },
+    "video13": {
+      "frames": 1915,
+      "ground_truth_targets": 1914,
+      "detected_targets": 1702,
+      "recall_pct": 88.92,
+      "false_positives": 2,
+      "fp_rate_per_frame": 0.001,
+      "p_drop": 0.0323,
+      "p_recover": 0.2594,
+      "mean_dropout_burst_len": 3.85,
+      "max_dropout_burst_len": 29,
+      "burst_count": 55
+    },
+    "video15": {
+      "frames": 1350,
+      "ground_truth_targets": 1105,
+      "detected_targets": 1062,
+      "recall_pct": 96.11,
+      "false_positives": 19,
+      "fp_rate_per_frame": 0.0141,
+      "p_drop": 0.0198,
+      "p_recover": 0.4884,
+      "mean_dropout_burst_len": 2.05,
+      "max_dropout_burst_len": 7,
+      "burst_count": 21
+    },
+    "video16": {
+      "frames": 1285,
+      "ground_truth_targets": 1285,
+      "detected_targets": 787,
+      "recall_pct": 61.25,
+      "false_positives": 1943,
+      "fp_rate_per_frame": 1.5121,
+      "p_drop": 0.1094,
+      "p_recover": 0.1727,
+      "mean_dropout_burst_len": 5.79,
+      "max_dropout_burst_len": 35,
+      "burst_count": 86
+    },
+    "video17": {
+      "frames": 780,
+      "ground_truth_targets": 780,
+      "detected_targets": 661,
+      "recall_pct": 84.74,
+      "false_positives": 86,
+      "fp_rate_per_frame": 0.1103,
+      "p_drop": 0.0273,
+      "p_recover": 0.1513,
+      "mean_dropout_burst_len": 6.61,
+      "max_dropout_burst_len": 38,
+      "burst_count": 18
+    }
+  }
+}
