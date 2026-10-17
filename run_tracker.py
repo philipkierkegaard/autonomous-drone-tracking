@@ -1153,6 +1153,15 @@ class AutonomousTrackerNode:
             current_pitch = self.vehicle_state.pitch_rad
             current_roll = self.vehicle_state.roll_rad
 
+            # Reset controller state upon fresh autonomy transition
+            ap = getattr(self, "autopilot", None)
+            is_auth = ap.is_guided_and_authorized if ap else False
+            was_auth = getattr(self, "_prev_autonomy_authorized", False)
+            if is_auth and not was_auth:
+                self.controller.reset()
+                prev_cmd_3d = np.zeros_like(prev_cmd_3d)
+            self._prev_autonomy_authorized = is_auth
+
             # 4. Compute Velocity Command via Kinematic Visual Servoing (3D or 4D)
             raw_cmd = self.controller.compute_cmd(
                 telemetry=telemetry,
@@ -1295,8 +1304,10 @@ class AutonomousTrackerNode:
                             break
                         elif key == ord('r'):
                             if self.autopilot is not None:
-                                print("\n[OPERATOR] 'r' key pressed: Re-authorizing autonomous GUIDED control...")
-                                self.autopilot.authorize_autonomy()
+                                print("\n[OPERATOR] 'r' key pressed: Requesting autonomous GUIDED re-authorization...")
+                                ok = self.autopilot.authorize_autonomy(controller=self.controller)
+                                if not ok:
+                                    print(f"[OPERATOR] Re-authorization rejected: vehicle is in '{self.vehicle_state.flight_mode}', not GUIDED mode.")
                     except (cv2.error, Exception) as e:
                         print(f"\n[DISPLAY] GUI window initialization failed ({e}). Automatically switching to --headless mode.")
                         self.args.headless = True

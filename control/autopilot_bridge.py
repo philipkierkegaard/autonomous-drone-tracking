@@ -271,9 +271,21 @@ class ArduPilotBridge:
             time.sleep(0.5)
 
     def _update_heartbeat(self, msg):
-        """Parses flight mode and armed state from HEARTBEAT message and detects pilot override."""
+        """Parses flight mode and armed state from HEARTBEAT message and detects pilot override or link interruption."""
+        now = time.time()
         with self.lock:
             prev_mode = self.flight_mode
+            time_since_last_hb = (now - self.last_heartbeat_time) if self.last_heartbeat_time > 0 else 0.0
+            had_link_loss = (self.last_heartbeat_time > 0 and time_since_last_hb > self.heartbeat_timeout_s)
+
+            # Priority 4: If connection is recovering from a heartbeat blackout, revoke autonomy
+            if had_link_loss:
+                if self.autonomous_authorized:
+                    self.autonomous_authorized = False
+                    self.pilot_override_active = True
+                    print(f"\n[ARDUPILOT] ⚠ Connection recovered after {time_since_last_hb:.1f}s interruption! Autonomy revoked. Explicit reauthorization required.")
+
+            self.last_heartbeat_time = now
             self.is_armed = bool(msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
             # ArduCopter mode string resolution via pymavlink
             mode_str = self.master.flightmode if hasattr(self.master, "flightmode") else None
@@ -290,14 +302,18 @@ class ArduPilotBridge:
                 self.autonomous_authorized = False
                 print(f"\n[ARDUPILOT] Pilot RC manual takeover detected -> {new_mode}! Autonomy disengaged.")
             elif prev_mode != "GUIDED" and new_mode == "GUIDED":
-                self.last_guided_time = time.time()
-                if self.auto_reengage or not self.pilot_override_active:
+                self.last_guided_time = now
+                if self.auto_reengage and not had_link_loss:
                     self.autonomous_authorized = True
                     self.pilot_override_active = False
+                    print("[ARDUPILOT] Vehicle entered GUIDED mode. Autonomy automatically re-engaged.")
+                elif not self.pilot_override_active and not had_link_loss:
+                    self.autonomous_authorized = True
                     print("[ARDUPILOT] Vehicle entered GUIDED mode. Autonomy authorized.")
                 else:
-                    # Latched override: vehicle returned to GUIDED, but requires explicit reauthorization
-                    print(f"[ARDUPILOT] Vehicle returned to GUIDED mode, but pilot override is latched. Explicit reauthorization required.")
+                    # Latched override or link loss: vehicle entered GUIDED, but requires explicit reauthorization
+                    self.autonomous_authorized = False
+                    print("[ARDUPILOT] Vehicle in GUIDED mode, but override/failsafe is latched. Explicit reauthorization required.")
 
         if self.vehicle_state is not None:
             self.vehicle_state.is_connected = True
@@ -316,7 +332,6 @@ class ArduPilotBridge:
                 msg_type = msg.get_type()
 
                 if msg_type == "HEARTBEAT":
-                    self.last_heartbeat_time = time.time()
                     self._update_heartbeat(msg)
 
                 elif msg_type == "ATTITUDE":
@@ -398,21 +413,49 @@ class ArduPilotBridge:
     def is_guided_and_authorized(self) -> bool:
         """
         Returns True if vehicle is actively in GUIDED mode AND autonomy is authorized.
-        If pilot manual takeover occurred, remains False until explicitly authorized.
+        If pilot manual takeover or link loss occurred, remains False until explicitly authorized.
         """
         with self.lock:
+            # Check link liveness (Priority 4: actively revoke authorization on link interruption)
             if time.time() - self.last_heartbeat_time > self.heartbeat_timeout_s:
+                if self.autonomous_authorized:
+                    self.autonomous_authorized = False
+                    self.pilot_override_active = True
+                    print(f"\n[ARDUPILOT] ⚠ Heartbeat timeout (> {self.heartbeat_timeout_s:.1f}s). Autonomy revoked due to link interruption.")
                 return False
+
             if self.flight_mode != "GUIDED":
                 return False
+
             return self.autonomous_authorized
 
-    def authorize_autonomy(self):
-        """Explicitly re-authorizes autonomous velocity commands following pilot manual takeover."""
+    def authorize_autonomy(self, controller: Optional[Any] = None) -> bool:
+        """
+        Explicitly re-authorizes autonomous velocity commands following pilot manual takeover or link recovery.
+        Enforces strict safety preconditions (Priority 3):
+        1. Vehicle must be actively connected and link healthy.
+        2. Vehicle must be reported in GUIDED mode.
+        3. Flushes controller history to prevent derivative kicks or velocity discontinuities.
+        """
         with self.lock:
+            # Check link liveness
+            if time.time() - self.last_heartbeat_time > self.heartbeat_timeout_s:
+                print(f"[ARDUPILOT] ⚠ Cannot authorize autonomy: MAVLink heartbeat timed out (> {self.heartbeat_timeout_s:.1f}s).")
+                return False
+
+            if self.flight_mode != "GUIDED":
+                print(f"[ARDUPILOT] ⚠ Cannot authorize autonomy: vehicle is in '{self.flight_mode}', not GUIDED mode.")
+                return False
+
             self.pilot_override_active = False
             self.autonomous_authorized = True
             print("[ARDUPILOT] ✓ Autonomous velocity commands explicitly re-authorized by operator.")
+
+        if controller is not None and hasattr(controller, "reset"):
+            controller.reset()
+            print("[ARDUPILOT] ✓ Controller history flushed clean (integrators, derivatives, and commands reset).")
+
+        return True
 
     def set_mode(self, mode_name: str, timeout_s: float = 3.0) -> bool:
         """
@@ -563,29 +606,40 @@ class ArduPilotBridge:
     def close(self):
         """
         Gracefully shuts down bridge, strictly preserving pilot manual flight mode and enforcing dry-run isolation.
+        Keeps telemetry active during the handover handshake until verified or timed out (Priority 1 & 2).
         """
         print("[ARDUPILOT] Closing autopilot bridge...")
-        self._running = False
+        # Priority 1: Keep self._running = True during handover so telemetry worker processes confirmation heartbeats!
         if self.master and self.is_connected:
             if not self.dry_run:
                 with self.lock:
                     current_mode = self.flight_mode
+                    owns_autonomy = (current_mode == "GUIDED" and self.autonomous_authorized)
 
-                if current_mode == "GUIDED":
-                    # Autonomous pursuit was active; safely arrest motion and hand over to LOITER
-                    print("[ARDUPILOT] Vehicle was in GUIDED mode. Arresting velocity and transitioning to LOITER...")
+                # Priority 2: Only initiate autonomous handover if application actively owned control
+                if owns_autonomy:
+                    print("[ARDUPILOT] Application holds active GUIDED autonomy. Arresting velocity and transitioning to LOITER...")
                     try:
                         self.send_hold_hover()
                         self.set_mode_loiter(timeout_s=2.0)
                     except Exception as e:
                         print(f"[ARDUPILOT] Shutdown command error: {e}")
                 else:
-                    # Pilot was already flying in manual/assisted mode (LOITER, ALT_HOLD, STABILIZE, RTL, etc.)
-                    # Strictly preserve pilot authority! Do not send commands or switch mode.
-                    print(f"[ARDUPILOT] Pilot manual mode '{current_mode}' active at shutdown. Preserving pilot authority (no LOITER switch commanded).")
+                    if current_mode == "GUIDED":
+                        print("[ARDUPILOT] Vehicle is in GUIDED mode, but application autonomy is not authorized (standby/pilot control). Preserving vehicle state without forcing LOITER.")
+                    else:
+                        print(f"[ARDUPILOT] Pilot manual mode '{current_mode}' active at shutdown. Preserving pilot authority (no LOITER switch commanded).")
             else:
                 print("[ARDUPILOT] [DRY-RUN] Shutdown: No flight commands transmitted.")
 
+        # Priority 1: Stop background threads AFTER handover sequence completes
+        self._running = False
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=0.3)
+        if self._heartbeat_thread and self._heartbeat_thread.is_alive():
+            self._heartbeat_thread.join(timeout=0.3)
+
+        if self.master:
             try:
                 self.master.close()
             except Exception:

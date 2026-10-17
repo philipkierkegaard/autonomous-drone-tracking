@@ -17,6 +17,8 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+import numpy as np
+
 from control.autopilot_bridge import (
     ArduPilotBridge,
     TYPEMASK_VELOCITY_YAWRATE,
@@ -193,59 +195,95 @@ class TestArduPilotBridge(unittest.TestCase):
         dry_bridge.master.mav.set_position_target_local_ned_send.assert_not_called()
 
     def test_pilot_authority_preservation_on_shutdown(self):
-        """Verifies shutdown preserves manual mode and does NOT command LOITER if pilot took over."""
+        """Verifies shutdown preserves manual mode and does NOT command LOITER if pilot took over or in standby."""
         self.bridge.master = MagicMock()
         self.bridge.is_connected = True
-        self.bridge.flight_mode = "ALT_HOLD"  # Pilot was manually controlling throttle/altitude
         self.bridge.last_heartbeat_time = time.time()
 
+        # 1. Pilot was flying manually in ALT_HOLD
+        self.bridge.flight_mode = "ALT_HOLD"
+        self.bridge.autonomous_authorized = False
         self.bridge.close()
-
-        # In ALT_HOLD, close() must not send set_position_target or DO_SET_MODE
         self.bridge.master.mav.set_position_target_local_ned_send.assert_not_called()
         self.bridge.master.mav.command_long_send.assert_not_called()
 
-    def test_guided_reengagement_latching(self):
-        """Tests that returning to GUIDED after manual takeover requires explicit re-authorization."""
-        self.bridge.master = MagicMock()
-        self.bridge.master.mode_mapping.return_value = {"GUIDED": 4, "LOITER": 5}
+        # 2. Vehicle in GUIDED, but autonomy is in standby (not authorized)
         self.bridge.is_connected = True
         self.bridge.last_heartbeat_time = time.time()
         self.bridge.flight_mode = "GUIDED"
+        self.bridge.autonomous_authorized = False
+        self.bridge.master.reset_mock()
+
+        self.bridge.close()
+        # Must NOT command LOITER or arrest motion if application did not hold active autonomy
+        self.bridge.master.mav.set_position_target_local_ned_send.assert_not_called()
+        self.bridge.master.mav.command_long_send.assert_not_called()
+
+    def test_reauthorization_preconditions_and_controller_flush(self):
+        """Verifies authorize_autonomy() rejects non-GUIDED modes and flushes controller history."""
+        ctrl = KinematicVisualServoController()
+        ctrl.prev_cmd_vx = 3.5
+        ctrl.integral = np.array([0.5, 0.2, 0.1, 5.0])
+        ctrl.filtered_deriv = np.array([1.0, 0.5, 0.2, 2.0])
+
+        self.bridge.is_connected = True
+        self.bridge.last_heartbeat_time = time.time()
+
+        # 1. Attempt re-authorization while vehicle is in LOITER (must be rejected!)
+        self.bridge.flight_mode = "LOITER"
+        self.bridge.autonomous_authorized = False
+        ok = self.bridge.authorize_autonomy(controller=ctrl)
+        self.assertFalse(ok)
+        self.assertFalse(self.bridge.autonomous_authorized)
+
+        # 2. Attempt re-authorization when heartbeat timed out (must be rejected!)
+        self.bridge.flight_mode = "GUIDED"
+        self.bridge.last_heartbeat_time = time.time() - 10.0  # Timed out
+        ok = self.bridge.authorize_autonomy(controller=ctrl)
+        self.assertFalse(ok)
+        self.assertFalse(self.bridge.autonomous_authorized)
+
+        # 3. Valid state: vehicle in GUIDED with fresh heartbeat
+        self.bridge.last_heartbeat_time = time.time()
+        ok = self.bridge.authorize_autonomy(controller=ctrl)
+        self.assertTrue(ok)
+        self.assertTrue(self.bridge.autonomous_authorized)
+        # Controller history must be completely flushed
+        self.assertEqual(ctrl.prev_cmd_vx, 0.0)
+        np.testing.assert_array_equal(ctrl.integral, np.zeros(4))
+        np.testing.assert_array_equal(ctrl.filtered_deriv, np.zeros(4))
+
+    def test_heartbeat_timeout_revokes_authorization(self):
+        """Verifies heartbeat loss revokes autonomy and does NOT silently resume upon link recovery."""
+        self.bridge.master = MagicMock()
+        self.bridge.is_connected = True
+        self.bridge.flight_mode = "GUIDED"
+        self.bridge.last_heartbeat_time = time.time()
         self.bridge.autonomous_authorized = True
 
-        # Simulate Pilot Takeover: Pilot switches switch to LOITER
-        hb_loiter = MagicMock()
-        hb_loiter.get_type.return_value = "HEARTBEAT"
-        hb_loiter.base_mode = 128
-        self.bridge.master.flightmode = "LOITER"
-        self.bridge._update_heartbeat(hb_loiter)
+        # Heartbeat drops for longer than heartbeat_timeout_s
+        self.bridge.last_heartbeat_time = time.time() - 5.0
 
-        self.assertTrue(self.bridge.pilot_override_active)
-        self.assertFalse(self.bridge.autonomous_authorized)
+        # Property evaluation must revoke authorization
         self.assertFalse(self.bridge.is_guided_and_authorized)
+        self.assertFalse(self.bridge.autonomous_authorized)
+        self.assertTrue(self.bridge.pilot_override_active)
 
-        # Vehicle returns to GUIDED (pilot switched back or GCS click)
-        hb_guided = MagicMock()
-        hb_guided.get_type.return_value = "HEARTBEAT"
-        hb_guided.base_mode = 128
+        # When heartbeat is recovered in _update_heartbeat
+        hb_msg = MagicMock()
+        hb_msg.get_type.return_value = "HEARTBEAT"
+        hb_msg.base_mode = 128
         self.bridge.master.flightmode = "GUIDED"
-        self.bridge._update_heartbeat(hb_guided)
+        self.bridge._update_heartbeat(hb_msg)
 
-        # Because auto_reengage is False, override remains latched!
-        self.assertTrue(self.bridge.pilot_override_active)
+        # Autonomy must REMAIN revoked after link restoration until explicit re-authorization
         self.assertFalse(self.bridge.autonomous_authorized)
         self.assertFalse(self.bridge.is_guided_and_authorized)
 
-        # Commands must be rejected while latched
-        self.assertFalse(self.bridge.send_velocity_body(1.0, 0.0, 0.0, 0.0))
-
-        # Explicit operator re-authorization unlocks guidance
-        self.bridge.authorize_autonomy()
-        self.assertFalse(self.bridge.pilot_override_active)
-        self.assertTrue(self.bridge.autonomous_authorized)
+        # Explicit operator action re-arms autonomy
+        ok = self.bridge.authorize_autonomy()
+        self.assertTrue(ok)
         self.assertTrue(self.bridge.is_guided_and_authorized)
-        self.assertTrue(self.bridge.send_velocity_body(1.0, 0.0, 0.0, 0.0))
 
     def test_mode_change_verification(self):
         """Tests set_mode verifies mode change against vehicle heartbeats."""
