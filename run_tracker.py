@@ -1440,12 +1440,29 @@ class AutonomousTrackerNode:
         finally:
             self.running = False
 
-            # Cancel remaining asyncio tasks
+            # 1. IMMEDIATE AUTONOMOUS HANDOVER (Highest Priority!)
+            # Releasing flight control to pilot/LOITER must occur immediately before any non-essential
+            # storage, display, or IO teardown, ensuring zero latency between stopping guidance and safe holding.
+            if self.autopilot is not None:
+                print("\n[SAFETY] Immediate autopilot handover sequence initiated...")
+                handover_ok = self.autopilot.close()
+                if not handover_ok:
+                    print("[SAFETY] ⚠ Autopilot handover to LOITER unconfirmed!")
+                self.autopilot = None
+            elif self.drone and not self.args.dry_run and self.vehicle_state.is_connected:
+                print("\n[SAFETY] Sending zero velocity holding command to Pixhawk...")
+                try:
+                    await self.drone.offboard.set_velocity_body(VelocityBodyYawspeed(0.0, 0.0, 0.0, 0.0))
+                except Exception:
+                    pass
+
+            # 2. Cancel remaining asyncio tasks
             control_task.cancel()
             display_task.cancel()
             if telemetry_task:
                 telemetry_task.cancel()
 
+            # 3. Non-essential storage, vision, and network finalization
             # Wait for vision thread to cleanly close camera
             if self.vision_thread and self.vision_thread.is_alive():
                 self.vision_thread.join(timeout=1.5)
@@ -1487,18 +1504,6 @@ class AutonomousTrackerNode:
                 except Exception:
                     pass
                 self.stream_server = None
-
-            # Send safe zero-velocity holding command to Pixhawk before exit
-            if self.autopilot is not None:
-                print("[SAFETY] Closing ArduPilot bridge and releasing vehicle to LOITER...")
-                self.autopilot.close()
-                self.autopilot = None
-            elif self.drone and not self.args.dry_run and self.vehicle_state.is_connected:
-                print("[SAFETY] Sending zero velocity holding command to Pixhawk...")
-                try:
-                    await self.drone.offboard.set_velocity_body(VelocityBodyYawspeed(0.0, 0.0, 0.0, 0.0))
-                except Exception:
-                    pass
 
             print("[SHUTDOWN] Autonomous Tracker Node stopped cleanly.")
 

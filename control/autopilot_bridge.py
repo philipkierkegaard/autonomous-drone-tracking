@@ -603,27 +603,33 @@ class ArduPilotBridge:
         interp_roll = r0 + alpha * (r1 - r0)
         return float(interp_pitch), float(interp_roll), float(interp_yaw)
 
-    def close(self):
+    def close(self) -> bool:
         """
         Gracefully shuts down bridge, strictly preserving pilot manual flight mode and enforcing dry-run isolation.
-        Keeps telemetry active during the handover handshake until verified or timed out (Priority 1 & 2).
+        Keeps telemetry active during the handover handshake until verified or timed out.
+        Returns True if shutdown and any required handover completed cleanly, False if handover failed or timed out.
         """
         print("[ARDUPILOT] Closing autopilot bridge...")
-        # Priority 1: Keep self._running = True during handover so telemetry worker processes confirmation heartbeats!
+        handover_success = True
+
+        # Keep self._running = True during handover so telemetry worker processes confirmation heartbeats!
         if self.master and self.is_connected:
             if not self.dry_run:
                 with self.lock:
                     current_mode = self.flight_mode
                     owns_autonomy = (current_mode == "GUIDED" and self.autonomous_authorized)
 
-                # Priority 2: Only initiate autonomous handover if application actively owned control
+                # Only initiate autonomous handover if application actively owned control
                 if owns_autonomy:
                     print("[ARDUPILOT] Application holds active GUIDED autonomy. Arresting velocity and transitioning to LOITER...")
                     try:
                         self.send_hold_hover()
-                        self.set_mode_loiter(timeout_s=2.0)
+                        handover_success = self.set_mode_loiter(timeout_s=2.0)
+                        if not handover_success:
+                            print(f"[ARDUPILOT] ⚠ CRITICAL HANDOVER FAILURE: Transition to LOITER failed or timed out! Vehicle remains in '{self.flight_mode}'.")
                     except Exception as e:
-                        print(f"[ARDUPILOT] Shutdown command error: {e}")
+                        print(f"[ARDUPILOT] ⚠ Shutdown command error: {e}")
+                        handover_success = False
                 else:
                     if current_mode == "GUIDED":
                         print("[ARDUPILOT] Vehicle is in GUIDED mode, but application autonomy is not authorized (standby/pilot control). Preserving vehicle state without forcing LOITER.")
@@ -632,7 +638,7 @@ class ArduPilotBridge:
             else:
                 print("[ARDUPILOT] [DRY-RUN] Shutdown: No flight commands transmitted.")
 
-        # Priority 1: Stop background threads AFTER handover sequence completes
+        # Stop background threads AFTER handover sequence completes
         self._running = False
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=0.3)
@@ -648,4 +654,10 @@ class ArduPilotBridge:
         self.is_connected = False
         if self.vehicle_state is not None:
             self.vehicle_state.is_connected = False
-        print("[ARDUPILOT] Bridge closed safely.")
+
+        if handover_success:
+            print("[ARDUPILOT] Bridge closed safely.")
+        else:
+            print("[ARDUPILOT] ⚠ Bridge closed with handover WARNING: vehicle was not confirmed in LOITER.")
+
+        return handover_success

@@ -446,11 +446,30 @@ class TestArduPilotBridge(unittest.TestCase):
         self.bridge.last_heartbeat_time = time.time()
         self.vehicle_state.is_connected = True
 
-        self.bridge.close()
-
+        ok = self.bridge.close()
+        self.assertTrue(ok)
         self.assertFalse(self.bridge.is_connected)
         self.assertFalse(self.vehicle_state.is_connected)
         self.bridge.master.close.assert_called_once()
+
+    def test_shutdown_handover_failure_reporting(self):
+        """Verifies bridge.close() returns False and logs warning when LOITER handover times out or fails."""
+        self.bridge.master = MagicMock()
+        self.bridge.master.mode_mapping.return_value = {"LOITER": 5}
+        # Mode switch does not change vehicle mode (simulating firmware rejection or timeout)
+        self.bridge.master.mav.command_long_send.side_effect = None
+        self.bridge.is_connected = True
+        self.bridge.flight_mode = "GUIDED"
+        self.bridge.autonomous_authorized = True
+        self.bridge.last_heartbeat_time = time.time()
+
+        # Temporarily mock set_mode_loiter timeout to be rapid for unit test
+        original_set_mode_loiter = self.bridge.set_mode_loiter
+        self.bridge.set_mode_loiter = lambda timeout_s=0.05: original_set_mode_loiter(timeout_s=0.05)
+
+        ok = self.bridge.close()
+        self.assertFalse(ok, "close() must return False when handover fails")
+        self.assertFalse(self.bridge.is_connected)
 
 
 if __name__ == "__main__":
