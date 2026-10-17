@@ -87,6 +87,7 @@ class KinematicVisualServoController:
         max_lat_vel: float = 6.0,            # Maximum lateral velocity in m/s (matched identically to RL envelope)
         max_lat_accel: float = 5.0,          # Maximum lateral acceleration in m/s^2 for agile roll initiation
         search_mode: str = "brake",          # 'brake' (immediate active station-keeping hover) or 'legacy_coast'
+        coast_mode: str = "decay",           # 'decay' (inhibit forward acceleration & smooth decay), 'brake' (immediate hover), or 'follow'
     ):
         self.camera_uptilt = np.deg2rad(camera_uptilt_deg)
         self.half_hfov = np.tan(np.deg2rad(hfov_deg / 2.0))
@@ -96,6 +97,7 @@ class KinematicVisualServoController:
         self.use_bbox_size = use_bbox_size
         self.deadband_dist = float(deadband_dist)
         self.search_mode = str(search_mode).lower().strip()
+        self.coast_mode = str(coast_mode).lower().strip()
 
         self.lost_time = 0.0
 
@@ -221,6 +223,7 @@ class KinematicVisualServoController:
         status = telemetry.get("status", "SEARCHING")
         if status == "SEARCHING":
             self.lost_time += dt
+            self.initialized = False  # Reset initialized state to eliminate derivative spike upon re-acquisition
             if self.search_mode == "brake":
                 # Option A: Immediate Active Brake & Station-Keeping Hover
                 # Arrests all forward, lateral, vertical, and angular momentum immediately.
@@ -242,6 +245,19 @@ class KinematicVisualServoController:
                     return np.array([0.0, 0.0, 0.0, 0.0], dtype=np.float64)
                 else:
                     return np.array([0.0, 0.0, 0.0, 15.0], dtype=np.float64)
+
+        is_coasting = (status == "COASTING")
+        if is_coasting and self.coast_mode == "brake":
+            # Immediate active brake on coasting: do not pursue unmeasured Kalman predictions
+            self.lost_time += dt
+            self.initialized = False
+            self.integral.fill(0.0)
+            self.prev_error.fill(0.0)
+            self.filtered_deriv.fill(0.0)
+            self.prev_cmd = np.zeros(4, dtype=np.float64)
+            self.prev_cmd_vx = 0.0
+            self.prev_cmd_vy = 0.0
+            return np.array([0.0, 0.0, 0.0, 0.0], dtype=np.float64)
 
         # Active lock: reset lost timer
         self.lost_time = 0.0
@@ -300,7 +316,8 @@ class KinematicVisualServoController:
             dt=dt,
             horiz_err_norm=abs(err_x),
             decoupled=True,
-            target_vx_ff=target_vx_ff
+            target_vx_ff=target_vx_ff if not is_coasting else 0.0,
+            is_coasting=is_coasting
         )
 
     def update(
@@ -310,7 +327,8 @@ class KinematicVisualServoController:
         dt: float = 0.02,
         horiz_err_norm: float = 0.0,
         decoupled: bool = True,
-        target_vx_ff: float = 0.0
+        target_vx_ff: float = 0.0,
+        is_coasting: bool = False
     ) -> np.ndarray:
         """
         Vectorized 4-DOF Kinematic Control Update.
@@ -323,6 +341,7 @@ class KinematicVisualServoController:
             horiz_err_norm: Optional normalized horizontal error for centering damping
             decoupled: If True, assumes error_vec[2] is already fully decoupled in 3D
             target_vx_ff: Optional target forward velocity feedforward in m/s
+            is_coasting: True if visual target is lost and dead-reckoned by Kalman filter
             
         Returns:
             np.ndarray of shape (4,): [v_forward (m/s), v_right (m/s), v_down (m/s), yaw_rate (deg/s)]
@@ -363,15 +382,17 @@ class KinematicVisualServoController:
         # 4. Vectorized Integrator Update with Anti-Windup Clamping
         # ----------------------------------------------------------------------
         # Exclude Axis 0 (kinematic surge) and Axis 1 (PD sway) from integrator windup
-        tentative_out = p_term + self.ki * self.integral + d_term
-        saturated_high = (tentative_out >= self.max_limits) & (e > 0)
-        saturated_low  = (tentative_out <= self.min_limits) & (e < 0)
-        unclamped_mask = ~(saturated_high | saturated_low)
+        # Skip integrating errors during COASTING to prevent windup on dead-reckoned predictions
+        if not is_coasting:
+            tentative_out = p_term + self.ki * self.integral + d_term
+            saturated_high = (tentative_out >= self.max_limits) & (e > 0)
+            saturated_low  = (tentative_out <= self.min_limits) & (e < 0)
+            unclamped_mask = ~(saturated_high | saturated_low)
 
-        self.integral[unclamped_mask] += e[unclamped_mask] * dt
-        self.integral[0] = 0.0  # Zero phantom windup on Axis 0
-        self.integral[1] = 0.0  # Zero phantom windup on Axis 1
-        self.integral = np.clip(self.integral, -self.int_limits, self.int_limits)
+            self.integral[unclamped_mask] += e[unclamped_mask] * dt
+            self.integral[0] = 0.0  # Zero phantom windup on Axis 0
+            self.integral[1] = 0.0  # Zero phantom windup on Axis 1
+            self.integral = np.clip(self.integral, -self.int_limits, self.int_limits)
         i_term = self.ki * self.integral
 
         # ----------------------------------------------------------------------
@@ -416,6 +437,13 @@ class KinematicVisualServoController:
         if raw_output[0] > 0.0:
             centering_factor = max(0.65, 1.0 - horiz_err_norm * 0.35)
             raw_output[0] *= centering_factor
+
+        # COASTING behavior governance:
+        # Inhibit forward acceleration beyond decaying speed, and dampen lateral strafe
+        if is_coasting and self.coast_mode == "decay":
+            decayed_vx = max(0.0, self.prev_cmd_vx - 1.5 * dt)
+            raw_output[0] = min(raw_output[0], decayed_vx)
+            raw_output[1] *= 0.5
 
         # ----------------------------------------------------------------------
         # 6. Slew-Rate Limiting Across All 4 Flight Axes

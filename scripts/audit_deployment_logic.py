@@ -55,10 +55,15 @@ c_remediated.prev_cmd_vx = 3.0
 brake_out = c_remediated.compute_cmd({"status": "SEARCHING"}, dt=0.02)
 check("remediated search mode immediately commands zero-velocity brake", np.allclose(brake_out, 0.0), brake_out.tolist())
 
-c = C(use_bbox_size=True)
+c = C(use_bbox_size=True, coast_mode="follow")
 for _ in range(60):
     cmd = c.compute_cmd({"status": "COASTING", "error_x": 0.4, "error_y": 0, "error_range": 0.5}, dt=0.02)
 check("coasting can accelerate toward unseen target", cmd[0] > 0 and cmd[1] > 0, cmd.tolist())
+
+# Verification of remediated coasting governor
+c_coast_rem = C(use_bbox_size=True, coast_mode="decay")
+cmd_rem = c_coast_rem.compute_cmd({"status": "COASTING", "error_x": 0.4, "error_y": 0, "error_range": 0.5}, dt=0.02)
+check("remediated coast mode inhibits forward acceleration", cmd_rem[0] == 0.0, cmd_rem.tolist())
 
 c = C()
 bad = c.compute_cmd({"status": "LOCKED", "error_x": float("nan"), "error_y": 0, "distance": 3.5})

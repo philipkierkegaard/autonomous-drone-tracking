@@ -119,25 +119,35 @@ class TestArduPilotBridge(unittest.TestCase):
         self.assertGreater(legacy_cmd[0], 0.0, "Legacy coast mode coasts forward")
 
     def test_guided_mode_gating_and_pilot_override(self):
-        """Verifies velocity setpoints are strictly inhibited when not in GUIDED mode."""
+        """Verifies velocity setpoints are strictly inhibited when not in GUIDED mode or not authorized."""
         self.bridge.is_connected = True
         self.bridge.last_heartbeat_time = time.time()
         self.bridge.master = MagicMock()
 
         # 1. Vehicle in LOITER (Pilot manual hover)
         self.bridge.flight_mode = "LOITER"
+        self.bridge.autonomous_authorized = False
         self.assertFalse(self.bridge.is_guided)
+        self.assertFalse(self.bridge.is_guided_and_authorized)
 
         sent = self.bridge.send_velocity_body(2.0, 0.0, 0.0, 0.0)
         self.assertFalse(sent, "Velocity command must be rejected when flight mode is LOITER")
         self.bridge.master.mav.set_position_target_local_ned_send.assert_not_called()
 
-        # 2. Vehicle switches to GUIDED (Autonomy engaged)
+        # 2. Vehicle in GUIDED but not authorized (e.g. latched after takeover)
         self.bridge.flight_mode = "GUIDED"
+        self.bridge.autonomous_authorized = False
         self.assertTrue(self.bridge.is_guided)
+        self.assertFalse(self.bridge.is_guided_and_authorized)
+        sent = self.bridge.send_velocity_body(2.0, 0.5, -0.3, 15.0)
+        self.assertFalse(sent, "Velocity command must be rejected when autonomy is not authorized")
+
+        # 3. Vehicle switches to GUIDED and is authorized
+        self.bridge.authorize_autonomy()
+        self.assertTrue(self.bridge.is_guided_and_authorized)
 
         sent = self.bridge.send_velocity_body(2.0, 0.5, -0.3, 15.0)
-        self.assertTrue(sent, "Velocity command must be accepted when flight mode is GUIDED")
+        self.assertTrue(sent, "Velocity command must be accepted when flight mode is GUIDED and authorized")
         self.bridge.master.mav.set_position_target_local_ned_send.assert_called_once()
 
         # Verify MAVLink call arguments
@@ -152,6 +162,163 @@ class TestArduPilotBridge(unittest.TestCase):
         self.assertAlmostEqual(call_args[10], -0.3)
         # Check yaw rate converted to radians at index 15: 15 deg/s -> math.radians(15.0)
         self.assertAlmostEqual(call_args[15], math.radians(15.0), places=5)
+
+    def test_dry_run_isolation(self):
+        """Verifies dry-run mode strictly prevents sending any flight-altering packets."""
+        dry_bridge = ArduPilotBridge(
+            connection_string="udpin:0.0.0.0:14550",
+            dry_run=True,
+            vehicle_state=self.vehicle_state
+        )
+        dry_bridge.is_connected = True
+        dry_bridge.last_heartbeat_time = time.time()
+        dry_bridge.flight_mode = "GUIDED"
+        dry_bridge.autonomous_authorized = True
+        dry_bridge.master = MagicMock()
+
+        # Velocity setpoint must return False and not send MAVLink packet
+        sent = dry_bridge.send_velocity_body(2.0, 0.0, 0.0, 0.0)
+        self.assertFalse(sent)
+        dry_bridge.master.mav.set_position_target_local_ned_send.assert_not_called()
+
+        # Mode switch must simulate locally without sending packet
+        success = dry_bridge.set_mode("LOITER")
+        self.assertTrue(success)
+        self.assertEqual(dry_bridge.flight_mode, "LOITER")
+        dry_bridge.master.mav.command_long_send.assert_not_called()
+
+        # Shutdown in dry-run mode must NOT send zero-velocity or LOITER switch
+        dry_bridge.close()
+        dry_bridge.master.mav.command_long_send.assert_not_called()
+        dry_bridge.master.mav.set_position_target_local_ned_send.assert_not_called()
+
+    def test_pilot_authority_preservation_on_shutdown(self):
+        """Verifies shutdown preserves manual mode and does NOT command LOITER if pilot took over."""
+        self.bridge.master = MagicMock()
+        self.bridge.is_connected = True
+        self.bridge.flight_mode = "ALT_HOLD"  # Pilot was manually controlling throttle/altitude
+        self.bridge.last_heartbeat_time = time.time()
+
+        self.bridge.close()
+
+        # In ALT_HOLD, close() must not send set_position_target or DO_SET_MODE
+        self.bridge.master.mav.set_position_target_local_ned_send.assert_not_called()
+        self.bridge.master.mav.command_long_send.assert_not_called()
+
+    def test_guided_reengagement_latching(self):
+        """Tests that returning to GUIDED after manual takeover requires explicit re-authorization."""
+        self.bridge.master = MagicMock()
+        self.bridge.master.mode_mapping.return_value = {"GUIDED": 4, "LOITER": 5}
+        self.bridge.is_connected = True
+        self.bridge.last_heartbeat_time = time.time()
+        self.bridge.flight_mode = "GUIDED"
+        self.bridge.autonomous_authorized = True
+
+        # Simulate Pilot Takeover: Pilot switches switch to LOITER
+        hb_loiter = MagicMock()
+        hb_loiter.get_type.return_value = "HEARTBEAT"
+        hb_loiter.base_mode = 128
+        self.bridge.master.flightmode = "LOITER"
+        self.bridge._update_heartbeat(hb_loiter)
+
+        self.assertTrue(self.bridge.pilot_override_active)
+        self.assertFalse(self.bridge.autonomous_authorized)
+        self.assertFalse(self.bridge.is_guided_and_authorized)
+
+        # Vehicle returns to GUIDED (pilot switched back or GCS click)
+        hb_guided = MagicMock()
+        hb_guided.get_type.return_value = "HEARTBEAT"
+        hb_guided.base_mode = 128
+        self.bridge.master.flightmode = "GUIDED"
+        self.bridge._update_heartbeat(hb_guided)
+
+        # Because auto_reengage is False, override remains latched!
+        self.assertTrue(self.bridge.pilot_override_active)
+        self.assertFalse(self.bridge.autonomous_authorized)
+        self.assertFalse(self.bridge.is_guided_and_authorized)
+
+        # Commands must be rejected while latched
+        self.assertFalse(self.bridge.send_velocity_body(1.0, 0.0, 0.0, 0.0))
+
+        # Explicit operator re-authorization unlocks guidance
+        self.bridge.authorize_autonomy()
+        self.assertFalse(self.bridge.pilot_override_active)
+        self.assertTrue(self.bridge.autonomous_authorized)
+        self.assertTrue(self.bridge.is_guided_and_authorized)
+        self.assertTrue(self.bridge.send_velocity_body(1.0, 0.0, 0.0, 0.0))
+
+    def test_mode_change_verification(self):
+        """Tests set_mode verifies mode change against vehicle heartbeats."""
+        self.bridge.master = MagicMock()
+        self.bridge.master.mode_mapping.return_value = {"GUIDED": 4, "LOITER": 5}
+        self.bridge.is_connected = True
+        self.bridge.flight_mode = "LOITER"
+
+        # Simulate vehicle that transitions immediately
+        def simulate_hb_transition(*args, **kwargs):
+            self.bridge.flight_mode = "GUIDED"
+
+        self.bridge.master.mav.command_long_send.side_effect = simulate_hb_transition
+        ok = self.bridge.set_mode("GUIDED", timeout_s=0.2)
+        self.assertTrue(ok)
+        self.assertEqual(self.bridge.flight_mode, "GUIDED")
+
+        # Simulate vehicle that refuses mode change (e.g. no GPS lock or pre-arm failure)
+        self.bridge.master.mav.command_long_send.side_effect = None
+        self.bridge.flight_mode = "LOITER"
+        failed = self.bridge.set_mode("GUIDED", timeout_s=0.1)
+        self.assertFalse(failed, "set_mode must return False when vehicle fails to enter requested mode")
+
+    def test_derivative_reset_eliminates_kick(self):
+        """Verifies resetting initialized in SEARCHING eliminates massive derivative spike upon reacquisition."""
+        import numpy as np
+        ctrl = KinematicVisualServoController(search_mode="brake")
+
+        # 1. Active lock on target: track for a few frames
+        ctrl.compute_cmd({"status": "LOCKED", "error_x": 0.2, "error_y": 0.1, "error_range": 0.5}, dt=0.02)
+        ctrl.compute_cmd({"status": "LOCKED", "error_x": 0.2, "error_y": 0.1, "error_range": 0.5}, dt=0.02)
+        self.assertTrue(ctrl.initialized)
+
+        # 2. Target lost: enters SEARCHING (Option A brake)
+        ctrl.compute_cmd({"status": "SEARCHING"}, dt=0.02)
+        self.assertFalse(ctrl.initialized, "initialized flag must be reset to False during SEARCHING")
+        np.testing.assert_array_equal(ctrl.filtered_deriv, np.zeros(4))
+
+        # 3. Target reacquired with large error
+        reacquired_telem = {"status": "LOCKED", "error_x": 0.6, "error_y": -0.4, "error_range": 0.8}
+        ctrl.compute_cmd(reacquired_telem, dt=0.02)
+
+        # Filtered derivative must remain 0.0 on reacquisition frame (no (e - 0)/dt spike!)
+        np.testing.assert_array_equal(ctrl.filtered_deriv, np.zeros(4))
+        self.assertTrue(ctrl.initialized)
+
+    def test_coasting_behavior_governance(self):
+        """Verifies COASTING behavior prevents forward acceleration toward unmeasured Kalman predictions."""
+        import numpy as np
+        ctrl = KinematicVisualServoController(coast_mode="decay")
+        ctrl.prev_cmd_vx = 3.0
+        ctrl.prev_cmd = np.array([3.0, 1.0, 0.0, 0.0], dtype=np.float64)
+
+        # Target enters COASTING with large distant error (would normally accelerate forward)
+        coasting_telem = {
+            "status": "COASTING",
+            "error_x": 0.4,
+            "error_y": 0.0,
+            "error_range": 0.9,  # Very far: kinematic curve would command max speed (15 m/s)
+            "target_vx": 4.0      # Unmeasured feedforward
+        }
+        cmd = ctrl.compute_cmd(coasting_telem, dt=0.02)
+
+        # Forward command must be inhibited: <= max(0.0, prev_cmd_vx - 1.5 * dt)
+        expected_decayed_vx = 3.0 - 1.5 * 0.02  # 2.97 m/s
+        self.assertLessEqual(cmd[0], expected_decayed_vx + 1e-5)
+        self.assertLess(cmd[0], 3.0, "Drone must decay velocity rather than accelerating toward coasting prediction")
+
+        # Test coast_mode == "brake"
+        brake_ctrl = KinematicVisualServoController(coast_mode="brake")
+        brake_ctrl.prev_cmd_vx = 4.0
+        brake_cmd = brake_ctrl.compute_cmd(coasting_telem, dt=0.02)
+        np.testing.assert_array_equal(brake_cmd, np.zeros(4))
 
     def test_telemetry_ingestion_and_vehicle_state_sync(self):
         """Tests ingestion of ATTITUDE, LOCAL_POSITION_NED, GLOBAL_POSITION_INT, and DISTANCE_SENSOR."""
@@ -231,10 +398,13 @@ class TestArduPilotBridge(unittest.TestCase):
         self.assertAlmostEqual(y, 15.0, places=4)
 
     def test_safe_shutdown(self):
-        """Verifies bridge.close() halts vehicle, commands LOITER, and disconnects."""
+        """Verifies bridge.close() halts vehicle, commands LOITER, and disconnects when in GUIDED."""
         self.bridge.master = MagicMock()
+        self.bridge.master.mode_mapping.return_value = {"LOITER": 5}
+        self.bridge.master.mav.command_long_send.side_effect = lambda *args, **kwargs: setattr(self.bridge, "flight_mode", "LOITER")
         self.bridge.is_connected = True
         self.bridge.flight_mode = "GUIDED"
+        self.bridge.autonomous_authorized = True
         self.bridge.last_heartbeat_time = time.time()
         self.vehicle_state.is_connected = True
 

@@ -239,6 +239,8 @@ class AutonomousTrackerNode:
             ctrl_kwargs["deadband_dist"] = deadband
         if "search_mode" in sig.parameters:
             ctrl_kwargs["search_mode"] = getattr(args, "search_mode", "brake")
+        if "coast_mode" in sig.parameters:
+            ctrl_kwargs["coast_mode"] = getattr(args, "coast_mode", "decay")
 
         self.controller = KinematicVisualServoController(**ctrl_kwargs)
         if hasattr(self.controller, "deadband_dist"):
@@ -739,10 +741,13 @@ class AutonomousTrackerNode:
             if self.autopilot and not self.autopilot.is_guided:
                 link_str = f"OVERRIDE: {self.vehicle_state.flight_mode}"
                 link_color = (0, 165, 255)  # Orange warning: Pilot manual RC takeover
+            elif self.autopilot and self.autopilot.is_guided and not self.autopilot.autonomous_authorized:
+                link_str = "GUIDED: STANDBY (REQ 'r')"
+                link_color = (0, 215, 255)  # Gold: In GUIDED, but latched waiting for reauthorization!
             else:
                 link_str = f"ARDUPILOT: {self.vehicle_state.flight_mode}"
                 link_color = (46, 213, 115)
-        cv2.putText(hud, link_str, (w - 210, 34), cv2.FONT_HERSHEY_SIMPLEX, 0.48, link_color, 1, cv2.LINE_AA)
+        cv2.putText(hud, link_str, (w - 220, 34), cv2.FONT_HERSHEY_SIMPLEX, 0.44, link_color, 1, cv2.LINE_AA)
 
         # Altitude Limit Warning Alert Banner (if floor/ceiling active)
         alert_y = 60
@@ -1288,6 +1293,10 @@ class AutonomousTrackerNode:
                             print("\n[USER] Quit key pressed.")
                             self.running = False
                             break
+                        elif key == ord('r'):
+                            if self.autopilot is not None:
+                                print("\n[OPERATOR] 'r' key pressed: Re-authorizing autonomous GUIDED control...")
+                                self.autopilot.authorize_autonomy()
                     except (cv2.error, Exception) as e:
                         print(f"\n[DISPLAY] GUI window initialization failed ({e}). Automatically switching to --headless mode.")
                         self.args.headless = True
@@ -1336,7 +1345,9 @@ class AutonomousTrackerNode:
                 self.autopilot = ArduPilotBridge(
                     connection_string=self.args.connection,
                     baud=baud,
-                    vehicle_state=self.vehicle_state
+                    vehicle_state=self.vehicle_state,
+                    dry_run=self.args.dry_run,
+                    auto_reengage=getattr(self.args, "auto_reengage", False)
                 )
                 connected = self.autopilot.connect(timeout_s=6.0)
                 if connected:
@@ -1726,6 +1737,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--auto-guided", action="store_true",
         help="Automatically request transition into ArduCopter GUIDED mode on startup (default: False, waits for pilot RC mode switch)."
+    )
+    parser.add_argument(
+        "--auto-reengage", action="store_true",
+        help="Automatically resume autonomous velocity setpoints when returning to GUIDED mode without manual re-authorization (default: False, latches override for safety)."
+    )
+    parser.add_argument(
+        "--coast-mode", type=str, default="decay", choices=["decay", "brake", "follow"],
+        help="Target tracking policy during Kalman COASTING: 'decay' (inhibit forward acceleration & smooth decay, default), 'brake' (immediate hover), or 'follow' (legacy unconstrained pursuit)."
     )
     parser.add_argument(
         "--dry-run", action="store_true",
