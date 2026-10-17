@@ -540,8 +540,8 @@ class TestArduPilotBridge(unittest.TestCase):
         self.bridge.set_mode_loiter = lambda timeout_s=0.05, **kwargs: original_set_mode_loiter(timeout_s=0.05, **kwargs)
 
         ok = self.bridge.close()
-        # LOITER failed, so close() correctly reports False
-        self.assertFalse(ok)
+        # Handover verification confirms vehicle safely entered BRAKE mode without confirming LOITER
+        self.assertTrue(ok, "Handover verification must report success when safe fallback mode (BRAKE) is confirmed without LOITER")
         # Vehicle must have transitioned to emergency BRAKE fallback!
         self.assertEqual(self.bridge.flight_mode, "BRAKE")
 

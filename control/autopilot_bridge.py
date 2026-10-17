@@ -843,7 +843,9 @@ class ArduPilotBridge:
                                 is_safe, failsafe_desc = self.verify_failsafe_outcome()
                                 print(f"[ARDUPILOT] Failsafe verification: {failsafe_desc}")
 
-                                if not is_safe:
+                                if is_safe:
+                                    handover_success = True
+                                else:
                                     print(f"[ARDUPILOT] ⚠ WARNING: Severing MAVLink connection while vehicle mode is '{self.flight_mode}'.")
                     except Exception as e:
                         print(f"[ARDUPILOT] ⚠ Shutdown command error: {e}")
@@ -873,9 +875,12 @@ class ArduPilotBridge:
         if self.vehicle_state is not None:
             self.vehicle_state.is_connected = False
 
+        with self.lock:
+            final_mode = self.flight_mode
+
         if handover_success:
-            print("[ARDUPILOT] Bridge closed safely.")
+            print(f"[ARDUPILOT] Bridge closed safely (final mode: '{final_mode}').")
         else:
-            print(f"[ARDUPILOT] ⚠ Bridge closed with handover WARNING: vehicle was not confirmed in LOITER (current mode: '{self.flight_mode}').")
+            print(f"[ARDUPILOT] ⚠ Bridge closed with handover WARNING: vehicle was not confirmed in a safe fallback mode (current mode: '{final_mode}').")
 
         return handover_success

@@ -1448,7 +1448,7 @@ class AutonomousTrackerNode:
                 final_mode = getattr(self.autopilot, "flight_mode", "UNKNOWN")
                 handover_ok = self.autopilot.close()
                 if not handover_ok:
-                    print(f"[SAFETY] ⚠ Autopilot handover to LOITER unconfirmed (vehicle mode: {final_mode}). Check ArduPilot failsafe status.")
+                    print(f"[SAFETY] ⚠ Autopilot handover unconfirmed (vehicle mode: '{final_mode}'). Check ArduPilot failsafe status.")
                 self.autopilot = None
             elif self.drone and not self.args.dry_run and self.vehicle_state.is_connected:
                 print("\n[SAFETY] Sending zero velocity holding command to Pixhawk...")
