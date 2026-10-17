@@ -40,6 +40,23 @@ except ImportError:
 # Bits: 0b0000010111000111 = 0x5C7 = 1479
 TYPEMASK_VELOCITY_YAWRATE = 0b0000010111000111
 
+# ArduPilot Recognized Safe Fallback Modes
+# Any pilot manual flight mode or autonomous failsafe recovery mode:
+SAFE_FALLBACK_MODES = frozenset({
+    "LOITER",
+    "BRAKE",
+    "ALT_HOLD",
+    "POSHOLD",
+    "RTL",
+    "LAND",
+    "SMART_RTL",
+    "STABILIZE",
+    "AUTO",
+    "QLOITER",
+    "QLAND",
+    "QRTL",
+})
+
 
 class ArduPilotBridge:
     """
@@ -79,6 +96,13 @@ class ArduPilotBridge:
         self.pilot_override_active: bool = False
         self.autonomous_authorized: bool = False
         self.last_guided_time: float = 0.0
+
+        # ArduPilot failsafe parameters & diagnostic state
+        self.fs_gcs_enable: Optional[int] = None
+        self.guid_timeout: Optional[float] = None
+        self.fs_options: Optional[int] = None
+        self.parameters: Dict[str, float] = {}
+        self.last_status_text: str = ""
 
         # High-Rate Telemetry States
         self.pitch_rad: float = 0.0        # Controller convention: Pitch > 0 nose down
@@ -221,6 +245,9 @@ class ArduPilotBridge:
         # Configure vehicle message intervals for high-rate visual servoing
         self._request_high_rate_streams()
 
+        # Query key failsafe parameters to verify failsafe readiness
+        self._request_failsafe_parameters()
+
         # Start background receive and heartbeat dispatch threads
         self._running = True
         self._thread = threading.Thread(target=self._telemetry_worker, daemon=True, name="ArduPilotTelem")
@@ -254,6 +281,26 @@ class ArduPilotBridge:
                 interval_us,
                 0, 0, 0, 0, 0
             )
+
+    def _request_failsafe_parameters(self):
+        """Requests key failsafe parameters from ArduCopter to verify onboard failsafe configuration."""
+        if not self.master:
+            return
+
+        params_to_query = ["FS_GCS_ENABLE", "GUID_TIMEOUT", "FS_OPTIONS"]
+        for p in params_to_query:
+            try:
+                if hasattr(self.master, "param_fetch_one"):
+                    self.master.param_fetch_one(p)
+                elif hasattr(self.master, "mav") and hasattr(self.master.mav, "param_request_read_send"):
+                    self.master.mav.param_request_read_send(
+                        self.target_system,
+                        self.target_component,
+                        p.encode("ascii"),
+                        -1
+                    )
+            except Exception:
+                pass
 
     def _heartbeat_sender(self):
         """Dispatches companion computer heartbeat at 2 Hz to maintain MAVLink link health."""
@@ -394,6 +441,30 @@ class ArduPilotBridge:
                     if self.vehicle_state is not None:
                         self.vehicle_state.distance_sensor_m = dist_m
 
+                elif msg_type == "PARAM_VALUE":
+                    param_id = msg.param_id
+                    if isinstance(param_id, bytes):
+                        param_id = param_id.decode("ascii", errors="ignore").rstrip("\x00")
+                    val = float(msg.param_value)
+                    with self.lock:
+                        self.parameters[param_id] = val
+                        if param_id == "FS_GCS_ENABLE":
+                            self.fs_gcs_enable = int(val)
+                        elif param_id == "GUID_TIMEOUT":
+                            self.guid_timeout = val
+                        elif param_id == "FS_OPTIONS":
+                            self.fs_options = int(val)
+
+                elif msg_type == "STATUSTEXT":
+                    text = msg.text
+                    if isinstance(text, bytes):
+                        text = text.decode("ascii", errors="ignore").rstrip("\x00")
+                    with self.lock:
+                        self.last_status_text = text
+                    lower_text = text.lower()
+                    if any(kw in lower_text for kw in ("failsafe", "flight mode", "error", "warning", "panic", "crash")):
+                        print(f"[ARDUPILOT] Autopilot notice: {text}")
+
             except Exception as e:
                 time.sleep(0.01)
 
@@ -457,11 +528,22 @@ class ArduPilotBridge:
 
         return True
 
-    def set_mode(self, mode_name: str, timeout_s: float = 3.0) -> bool:
+    def set_mode(
+        self,
+        mode_name: str,
+        timeout_s: float = 3.0,
+        abort_on_override: bool = False,
+    ) -> bool:
         """
         Commands ArduCopter into the specified flight mode (e.g. GUIDED, LOITER, BRAKE)
         and verifies execution against incoming telemetry.
         Respects dry_run isolation (does not transmit flight-altering packets).
+
+        Args:
+            mode_name: Desired flight mode string.
+            timeout_s: Maximum seconds to wait for heartbeat confirmation.
+            abort_on_override: If True, aborts the mode change if pilot takeover is detected,
+                              preserving pilot manual authority without transmitting conflicting commands.
         """
         clean_name = mode_name.upper().strip()
 
@@ -478,6 +560,15 @@ class ArduPilotBridge:
 
         if not self.master:
             return False
+
+        # Pre-dispatch pilot override check (eliminates race where pilot switches modes right before dispatch)
+        with self.lock:
+            if abort_on_override and self.pilot_override_active:
+                print(f"[ARDUPILOT] Mode switch to {clean_name} aborted before dispatch: Pilot override active ({self.flight_mode}). Handover to pilot preserved.")
+                return True
+            if self.flight_mode == clean_name:
+                print(f"[ARDUPILOT] Vehicle is already in mode '{clean_name}'. No command needed.")
+                return True
 
         mode_map = self.master.mode_mapping()
         if not mode_map or clean_name not in mode_map:
@@ -500,6 +591,10 @@ class ArduPilotBridge:
         t0 = time.time()
         while time.time() - t0 < timeout_s:
             with self.lock:
+                # Concurrency guard: If pilot overrides during pending transition, immediately abort
+                if abort_on_override and self.pilot_override_active:
+                    print(f"[ARDUPILOT] Mode switch to {clean_name} aborted: Pilot manual override detected ({self.flight_mode}). Handover to pilot preserved.")
+                    return True
                 if self.flight_mode == clean_name:
                     print(f"[ARDUPILOT] ✓ Mode switch to {clean_name} confirmed by vehicle heartbeat ({time.time() - t0:.2f}s).")
                     return True
@@ -510,15 +605,100 @@ class ArduPilotBridge:
 
     def set_mode_guided(self, timeout_s: float = 3.0) -> bool:
         """Transitions into autonomous GUIDED pursuit mode with execution verification."""
-        return self.set_mode("GUIDED", timeout_s=timeout_s)
+        return self.set_mode("GUIDED", timeout_s=timeout_s, abort_on_override=False)
 
-    def set_mode_loiter(self, timeout_s: float = 3.0) -> bool:
+    def set_mode_loiter(self, timeout_s: float = 3.0, abort_on_override: bool = False) -> bool:
         """Transitions into pilot manual LOITER hover holding mode with execution verification."""
-        return self.set_mode("LOITER", timeout_s=timeout_s)
+        return self.set_mode("LOITER", timeout_s=timeout_s, abort_on_override=abort_on_override)
 
-    def set_mode_brake(self, timeout_s: float = 3.0) -> bool:
+    def set_mode_brake(self, timeout_s: float = 3.0, abort_on_override: bool = False) -> bool:
         """Transitions into immediate BRAKE mode with execution verification."""
-        return self.set_mode("BRAKE", timeout_s=timeout_s)
+        return self.set_mode("BRAKE", timeout_s=timeout_s, abort_on_override=abort_on_override)
+
+    def fetch_parameter(self, param_id: str, timeout_s: float = 1.0) -> Optional[float]:
+        """Queries and waits for a specific ArduPilot parameter over MAVLink."""
+        clean_id = param_id.strip().upper()
+        with self.lock:
+            if clean_id in self.parameters:
+                return self.parameters[clean_id]
+
+        if not self.master or self.dry_run:
+            return None
+
+        try:
+            if hasattr(self.master, "param_fetch_one"):
+                self.master.param_fetch_one(clean_id)
+            elif hasattr(self.master, "mav") and hasattr(self.master.mav, "param_request_read_send"):
+                self.master.mav.param_request_read_send(
+                    self.target_system,
+                    self.target_component,
+                    clean_id.encode("ascii"),
+                    -1
+                )
+        except Exception:
+            return None
+
+        t0 = time.time()
+        while time.time() - t0 < timeout_s:
+            with self.lock:
+                if clean_id in self.parameters:
+                    return self.parameters[clean_id]
+            time.sleep(0.05)
+        return None
+
+    def verify_failsafe_outcome(self) -> Tuple[bool, str]:
+        """
+        Verifies the actual vehicle flight mode outcome against recognized safe fallback
+        modes and ArduPilot's configured failsafe behavior (FS_GCS_ENABLE, GUID_TIMEOUT).
+
+        Returns:
+            (is_safe, details_str):
+                is_safe: True if vehicle is confirmed in a safe fallback mode (LOITER, BRAKE, ALT_HOLD, etc.)
+                details_str: Human-readable diagnostic description of failsafe readiness.
+        """
+        with self.lock:
+            current_mode = self.flight_mode
+            gcs_fs = self.fs_gcs_enable
+            guid_to = self.guid_timeout
+
+        if current_mode in SAFE_FALLBACK_MODES:
+            return True, f"Vehicle verified in safe fallback mode '{current_mode}'."
+
+        if current_mode == "GUIDED":
+            fs_details = []
+            has_configured_failsafe = False
+
+            if guid_to is not None and guid_to > 0:
+                fs_details.append(f"GUID_TIMEOUT={guid_to:.1f}s (guided timeout will brake vehicle)")
+                has_configured_failsafe = True
+            elif guid_to is None:
+                fs_details.append("GUID_TIMEOUT unqueried (ArduCopter default is 3.0s -> BRAKE)")
+                has_configured_failsafe = True
+            else:
+                fs_details.append("GUID_TIMEOUT disabled (0.0s)")
+
+            gcs_actions = {
+                1: "RTL",
+                2: "Continue in Auto",
+                3: "SmartRTL/RTL",
+                4: "SmartRTL/Land",
+                5: "Land"
+            }
+            if gcs_fs is not None and gcs_fs in gcs_actions:
+                fs_details.append(f"FS_GCS_ENABLE={gcs_fs} ({gcs_actions[gcs_fs]} on heartbeat loss)")
+                has_configured_failsafe = True
+            elif gcs_fs == 0:
+                fs_details.append("FS_GCS_ENABLE=0 (GCS link-loss failsafe disabled)")
+            else:
+                fs_details.append("FS_GCS_ENABLE unqueried")
+
+            details_msg = "; ".join(fs_details)
+            if has_configured_failsafe:
+                return False, f"Vehicle remains in GUIDED mode. Primary handover failed, but ArduPilot configured failsafe is armed: {details_msg}."
+            else:
+                return False, f"CRITICAL: Vehicle remains in GUIDED mode and NO active failsafe was verified ({details_msg})! Immediate manual pilot takeover required!"
+
+        return False, f"Vehicle in non-standard mode '{current_mode}'."
 
     # ==========================================================================
     # High-Rate Velocity Guidance Dispatch
@@ -607,6 +787,8 @@ class ArduPilotBridge:
         """
         Gracefully shuts down bridge, strictly preserving pilot manual flight mode and enforcing dry-run isolation.
         Keeps telemetry active during the handover handshake until verified or timed out.
+        If primary handover (LOITER) times out or fails, attempts emergency fallback (BRAKE) and verifies
+        the actual aircraft outcome against ArduPilot's configured failsafe behavior.
         Returns True if shutdown and any required handover completed cleanly, False if handover failed or timed out.
         """
         print("[ARDUPILOT] Closing autopilot bridge...")
@@ -617,16 +799,52 @@ class ArduPilotBridge:
             if not self.dry_run:
                 with self.lock:
                     current_mode = self.flight_mode
-                    owns_autonomy = (current_mode == "GUIDED" and self.autonomous_authorized)
+                    pilot_override = self.pilot_override_active
+                    owns_autonomy = (current_mode == "GUIDED" and self.autonomous_authorized and not pilot_override)
 
                 # Only initiate autonomous handover if application actively owned control
                 if owns_autonomy:
                     print("[ARDUPILOT] Application holds active GUIDED autonomy. Arresting velocity and transitioning to LOITER...")
                     try:
-                        self.send_hold_hover()
-                        handover_success = self.set_mode_loiter(timeout_s=2.0)
-                        if not handover_success:
-                            print(f"[ARDUPILOT] ⚠ CRITICAL HANDOVER FAILURE: Transition to LOITER failed or timed out! Vehicle remains in '{self.flight_mode}'.")
+                        # Re-check pilot override before sending hold hover to eliminate race condition
+                        with self.lock:
+                            pilot_now = self.pilot_override_active or self.flight_mode != "GUIDED"
+
+                        if pilot_now:
+                            print(f"[ARDUPILOT] Pilot manual override detected ({self.flight_mode}). Handover to pilot preserved.")
+                            handover_success = True
+                        else:
+                            self.send_hold_hover()
+                            handover_success = self.set_mode_loiter(timeout_s=2.0, abort_on_override=True)
+
+                            # If pilot took over during set_mode_loiter wait
+                            with self.lock:
+                                if self.pilot_override_active:
+                                    print(f"[ARDUPILOT] Pilot manual takeover detected during handover ({self.flight_mode}). Pilot in command.")
+                                    handover_success = True
+
+                            # If primary LOITER handover failed or timed out:
+                            if not handover_success:
+                                print(f"[ARDUPILOT] ⚠ Primary handover to LOITER failed or timed out! Current mode: '{self.flight_mode}'.")
+
+                                # Attempt emergency fallback mode (BRAKE) if still in GUIDED
+                                with self.lock:
+                                    still_guided = (self.flight_mode == "GUIDED" and not self.pilot_override_active)
+
+                                if still_guided:
+                                    print("[ARDUPILOT] Attempting emergency fallback transition to BRAKE mode...")
+                                    brake_ok = self.set_mode_brake(timeout_s=1.0, abort_on_override=True)
+                                    if brake_ok:
+                                        print(f"[ARDUPILOT] ✓ Emergency fallback successful: Vehicle entered BRAKE mode.")
+                                    else:
+                                        print(f"[ARDUPILOT] ⚠ Emergency fallback to BRAKE also failed or timed out! Current mode: '{self.flight_mode}'.")
+
+                                # Verify actual outcome against ArduPilot's configured failsafe behavior
+                                is_safe, failsafe_desc = self.verify_failsafe_outcome()
+                                print(f"[ARDUPILOT] Failsafe verification: {failsafe_desc}")
+
+                                if not is_safe:
+                                    print(f"[ARDUPILOT] ⚠ WARNING: Severing MAVLink connection while vehicle mode is '{self.flight_mode}'.")
                     except Exception as e:
                         print(f"[ARDUPILOT] ⚠ Shutdown command error: {e}")
                         handover_success = False
@@ -658,6 +876,6 @@ class ArduPilotBridge:
         if handover_success:
             print("[ARDUPILOT] Bridge closed safely.")
         else:
-            print("[ARDUPILOT] ⚠ Bridge closed with handover WARNING: vehicle was not confirmed in LOITER.")
+            print(f"[ARDUPILOT] ⚠ Bridge closed with handover WARNING: vehicle was not confirmed in LOITER (current mode: '{self.flight_mode}').")
 
         return handover_success

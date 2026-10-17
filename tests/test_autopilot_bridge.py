@@ -463,13 +463,92 @@ class TestArduPilotBridge(unittest.TestCase):
         self.bridge.autonomous_authorized = True
         self.bridge.last_heartbeat_time = time.time()
 
-        # Temporarily mock set_mode_loiter timeout to be rapid for unit test
+        # Temporarily mock set_mode_loiter and set_mode_brake timeout to be rapid for unit test
         original_set_mode_loiter = self.bridge.set_mode_loiter
-        self.bridge.set_mode_loiter = lambda timeout_s=0.05: original_set_mode_loiter(timeout_s=0.05)
+        self.bridge.set_mode_loiter = lambda timeout_s=0.05, **kwargs: original_set_mode_loiter(timeout_s=0.05, **kwargs)
+        original_set_mode_brake = self.bridge.set_mode_brake
+        self.bridge.set_mode_brake = lambda timeout_s=0.05, **kwargs: original_set_mode_brake(timeout_s=0.05, **kwargs)
 
         ok = self.bridge.close()
         self.assertFalse(ok, "close() must return False when handover fails")
         self.assertFalse(self.bridge.is_connected)
+
+    def test_handover_aborts_on_pilot_takeover_race(self):
+        """Verifies pending handover immediately aborts if pilot takes over, preserving pilot manual flight mode."""
+        self.bridge.master = MagicMock()
+        self.bridge.master.mode_mapping.return_value = {"LOITER": 5, "STABILIZE": 0}
+        self.bridge.is_connected = True
+        self.bridge.flight_mode = "GUIDED"
+        self.bridge.autonomous_authorized = True
+        self.bridge.last_heartbeat_time = time.time()
+
+        # Pilot flips RC switch to STABILIZE right as shutdown commences
+        self.bridge.pilot_override_active = True
+        self.bridge.flight_mode = "STABILIZE"
+
+        ok = self.bridge.close()
+        self.assertTrue(ok)
+        # Must NOT send MAV_CMD_DO_SET_MODE for LOITER to overwrite pilot's manual STABILIZE mode!
+        self.bridge.master.mav.command_long_send.assert_not_called()
+        self.bridge.master.mav.set_position_target_local_ned_send.assert_not_called()
+
+    def test_pilot_takeover_during_handover_polling(self):
+        """Verifies set_mode with abort_on_override aborts immediately if pilot takes over during confirmation wait."""
+        self.bridge.master = MagicMock()
+        self.bridge.master.mode_mapping.return_value = {"LOITER": 5, "ALT_HOLD": 2}
+        self.bridge.is_connected = True
+        self.bridge.flight_mode = "GUIDED"
+        self.bridge.autonomous_authorized = True
+
+        # When command_long_send is called, simulate pilot toggling switch to ALT_HOLD immediately
+        def simulate_pilot_takeover(*args, **kwargs):
+            self.bridge.flight_mode = "ALT_HOLD"
+            self.bridge.pilot_override_active = True
+
+        self.bridge.master.mav.command_long_send.side_effect = simulate_pilot_takeover
+
+        t0 = time.time()
+        ok = self.bridge.set_mode_loiter(timeout_s=3.0, abort_on_override=True)
+        elapsed = time.time() - t0
+
+        # Must abort almost instantly (<< 0.5s), NOT wait out the full 3.0s timeout!
+        self.assertTrue(ok, "Aborting on pilot override must succeed cleanly")
+        self.assertLess(elapsed, 0.3, "Handover must abort immediately upon pilot override")
+        self.assertEqual(self.bridge.flight_mode, "ALT_HOLD")
+
+    def test_handover_timeout_emergency_brake_and_failsafe_verification(self):
+        """Verifies that if LOITER times out, emergency BRAKE is attempted and failsafe status is verified."""
+        self.bridge.master = MagicMock()
+        self.bridge.master.mode_mapping.return_value = {"LOITER": 5, "BRAKE": 17}
+        self.bridge.is_connected = True
+        self.bridge.flight_mode = "GUIDED"
+        self.bridge.autonomous_authorized = True
+        self.bridge.last_heartbeat_time = time.time()
+        self.bridge.fs_gcs_enable = 1  # RTL configured on GCS loss
+        self.bridge.guid_timeout = 3.0
+
+        # Simulate LOITER failing (e.g. GPS loss), but BRAKE succeeding
+        def simulate_mode_calls(*args, **kwargs):
+            mode_id = args[5] if len(args) > 5 else kwargs.get("param2")
+            if mode_id == 17:  # BRAKE mode ID
+                self.bridge.flight_mode = "BRAKE"
+
+        self.bridge.master.mav.command_long_send.side_effect = simulate_mode_calls
+
+        # Mock rapid timeouts for test
+        original_set_mode_loiter = self.bridge.set_mode_loiter
+        self.bridge.set_mode_loiter = lambda timeout_s=0.05, **kwargs: original_set_mode_loiter(timeout_s=0.05, **kwargs)
+
+        ok = self.bridge.close()
+        # LOITER failed, so close() correctly reports False
+        self.assertFalse(ok)
+        # Vehicle must have transitioned to emergency BRAKE fallback!
+        self.assertEqual(self.bridge.flight_mode, "BRAKE")
+
+        # Failsafe verification confirms vehicle is in a recognized safe fallback mode
+        is_safe, desc = self.bridge.verify_failsafe_outcome()
+        self.assertTrue(is_safe)
+        self.assertIn("BRAKE", desc)
 
 
 if __name__ == "__main__":

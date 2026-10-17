@@ -1445,9 +1445,10 @@ class AutonomousTrackerNode:
             # storage, display, or IO teardown, ensuring zero latency between stopping guidance and safe holding.
             if self.autopilot is not None:
                 print("\n[SAFETY] Immediate autopilot handover sequence initiated...")
+                final_mode = getattr(self.autopilot, "flight_mode", "UNKNOWN")
                 handover_ok = self.autopilot.close()
                 if not handover_ok:
-                    print("[SAFETY] ⚠ Autopilot handover to LOITER unconfirmed!")
+                    print(f"[SAFETY] ⚠ Autopilot handover to LOITER unconfirmed (vehicle mode: {final_mode}). Check ArduPilot failsafe status.")
                 self.autopilot = None
             elif self.drone and not self.args.dry_run and self.vehicle_state.is_connected:
                 print("\n[SAFETY] Sending zero velocity holding command to Pixhawk...")
