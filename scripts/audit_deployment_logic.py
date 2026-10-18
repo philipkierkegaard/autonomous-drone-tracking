@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import math
 import threading
 import time
 from collections import deque
@@ -67,18 +68,19 @@ check("remediated coast mode inhibits forward acceleration", cmd_rem[0] == 0.0, 
 
 c = C()
 bad = c.compute_cmd({"status": "LOCKED", "error_x": float("nan"), "error_y": 0, "distance": 3.5})
-check("nonfinite telemetry reaches command", not np.all(np.isfinite(bad)), bad.tolist())
+check("remediated controller safely clamps nonfinite telemetry to zero", np.all(np.isfinite(bad)) and np.allclose(bad, 0.0), bad.tolist())
 
 n = Node.__new__(Node)
 n.args = SimpleNamespace(min_alt=2.0, max_alt=30.0, alt_cushion=1.0, max_climb=2.5, max_desc=1.5)
 n.vehicle_state = ns["VehicleState"]()
 v, state = n.enforce_altitude_limits(0.0, n.get_current_altitude())
-check("missing altitude forces climb", v == -0.8, (v, state))
+check("remediated altitude logic prevents uncommanded climb on ground", v == 0.0 and state == "ON_GROUND", (v, state))
 n.vehicle_state.altitude_rel_m = 10.0
 n.vehicle_state.distance_sensor_m = 0.5
 check("range sensor accepted without health or age", n.get_current_altitude() == 0.5, n.get_current_altitude())
+n.vehicle_state.in_air = True
 v, state = n.enforce_altitude_limits(1.0, float("nan"))
-check("NaN altitude bypasses floor and ceiling", v == 1.0 and state == "OK", (v, state))
+check("remediated altitude logic clamps descent to zero on invalid altitude", v == 0.0 and state == "INVALID_ALT", (v, state))
 
 k = ns["KalmanBoxTracker"](np.array([0., 0., 20., 20.]))
 k.x[4, 0] = 60.0

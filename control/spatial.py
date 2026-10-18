@@ -47,6 +47,10 @@ def unproject_camera_to_horizon(
         azimuth_rad: Sightline azimuth relative to drone heading in horizon plane (rad)
         elevation_rad: Sightline elevation relative to horizon plane (rad, + down)
     """
+    # Non-finite (NaN / Inf) sanity barrier: return boresight zeros if corrupted
+    if not (np.isfinite(err_x) and np.isfinite(err_y) and np.isfinite(drone_pitch) and np.isfinite(drone_roll)):
+        return 0.0, 0.0, 0.0, 0.0
+
     # 1. Reconstruct unit sightline ray in Camera optical frame [Right, Down, Forward]
     rx_cam = err_x * half_hfov
     ry_cam = err_y * half_vfov

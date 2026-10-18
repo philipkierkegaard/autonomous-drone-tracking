@@ -89,6 +89,7 @@ class ArduPilotBridge:
 
         self.is_connected: bool = False
         self.is_armed: bool = False
+        self.in_air: bool = False
         self.flight_mode: str = "DISCONNECTED"
         self.last_heartbeat_time: float = 0.0
 
@@ -120,8 +121,8 @@ class ArduPilotBridge:
         self.has_local_pos: bool = False
 
         # Altitude
-        self.altitude_rel_m: float = 0.0   # Relative altitude above home/takeoff
-        self.altitude_amsl_m: float = 0.0  # Above Mean Sea Level
+        self.altitude_rel_m: Optional[float] = None   # Relative altitude above home/takeoff
+        self.altitude_amsl_m: Optional[float] = None  # Above Mean Sea Level
         self.distance_sensor_m: Optional[float] = None
 
         # Thread-safe ring buffer for camera exposure & hardware latency matching
@@ -269,6 +270,7 @@ class ArduPilotBridge:
             (mavutil.mavlink.MAVLINK_MSG_ID_LOCAL_POSITION_NED, 30.0),   # 30 Hz local velocity
             (mavutil.mavlink.MAVLINK_MSG_ID_GLOBAL_POSITION_INT, 20.0),  # 20 Hz altitude
             (mavutil.mavlink.MAVLINK_MSG_ID_DISTANCE_SENSOR, 20.0),      # 20 Hz rangefinder
+            (mavutil.mavlink.MAVLINK_MSG_ID_EXTENDED_SYS_STATE, 5.0),    # 5 Hz landed/in-air state
         ]
         for msg_id, rate_hz in streams:
             interval_us = int(1e6 / rate_hz)
@@ -366,6 +368,9 @@ class ArduPilotBridge:
             self.vehicle_state.is_connected = True
             self.vehicle_state.is_armed = self.is_armed
             self.vehicle_state.flight_mode = self.flight_mode
+            if not self.is_armed:
+                self.in_air = False
+                self.vehicle_state.in_air = False
 
     def _telemetry_worker(self):
         """High-frequency non-blocking background thread reading MAVLink telemetry."""
@@ -428,10 +433,26 @@ class ArduPilotBridge:
                     with self.lock:
                         self.altitude_rel_m = rel_alt
                         self.altitude_amsl_m = amsl_alt
+                        if self.is_armed and rel_alt > 0.5:
+                            self.in_air = True
 
                     if self.vehicle_state is not None:
                         self.vehicle_state.altitude_rel_m = rel_alt
                         self.vehicle_state.altitude_amsl_m = amsl_alt
+                        if self.is_armed and rel_alt > 0.5:
+                            self.vehicle_state.in_air = True
+
+                elif msg_type == "EXTENDED_SYS_STATE":
+                    landed_state = getattr(msg, "landed_state", None)
+                    is_airborne = landed_state in (
+                        getattr(mavutil.mavlink, "MAV_LANDED_STATE_IN_AIR", 2),
+                        getattr(mavutil.mavlink, "MAV_LANDED_STATE_TAKEOFF", 3),
+                        getattr(mavutil.mavlink, "MAV_LANDED_STATE_LANDING", 4),
+                    )
+                    with self.lock:
+                        self.in_air = is_airborne
+                    if self.vehicle_state is not None:
+                        self.vehicle_state.in_air = is_airborne
 
                 elif msg_type == "DISTANCE_SENSOR":
                     dist_m = float(msg.current_distance) / 100.0
@@ -731,7 +752,30 @@ class ArduPilotBridge:
         if not self.is_guided_and_authorized:
             return False
 
-        yaw_rate_rad_s = math.radians(yawspeed_deg_s)
+        # Non-finite (NaN / Inf) sanity barrier: reject corrupted setpoint and command emergency zero-velocity hover
+        try:
+            vf = float(v_fwd)
+            vr = float(v_right)
+            vd = float(v_down)
+            ys = float(yawspeed_deg_s)
+            if not (math.isfinite(vf) and math.isfinite(vr) and math.isfinite(vd) and math.isfinite(ys)):
+                print(f"[ARDUPILOT] ⚠ Corrupted setpoint rejected (non-finite values): fwd={v_fwd}, right={v_right}, down={v_down}, yaw={yawspeed_deg_s}")
+                self.master.mav.set_position_target_local_ned_send(
+                    0,
+                    self.target_system,
+                    self.target_component,
+                    mavutil.mavlink.MAV_FRAME_BODY_NED,
+                    TYPEMASK_VELOCITY_YAWRATE,
+                    0.0, 0.0, 0.0,
+                    0.0, 0.0, 0.0,
+                    0.0, 0.0, 0.0,
+                    0.0, 0.0
+                )
+                return False
+        except (ValueError, TypeError):
+            return False
+
+        yaw_rate_rad_s = math.radians(ys)
 
         self.master.mav.set_position_target_local_ned_send(
             0,                                      # time_boot_ms (0 = auto)
@@ -740,9 +784,9 @@ class ArduPilotBridge:
             mavutil.mavlink.MAV_FRAME_BODY_NED,     # Coordinate frame: Aircraft Body-NED
             TYPEMASK_VELOCITY_YAWRATE,              # Ignore positions & accels, control vx,vy,vz,yaw_rate
             0.0, 0.0, 0.0,                          # Positions (ignored)
-            float(v_fwd),                           # vx (forward) in m/s
-            float(v_right),                         # vy (right) in m/s
-            float(v_down),                          # vz (down) in m/s
+            vf,                                     # vx (forward) in m/s
+            vr,                                     # vy (right) in m/s
+            vd,                                     # vz (down) in m/s
             0.0, 0.0, 0.0,                          # Accelerations (ignored)
             0.0,                                    # Yaw angle (ignored)
             float(yaw_rate_rad_s)                   # Yaw rate in rad/s

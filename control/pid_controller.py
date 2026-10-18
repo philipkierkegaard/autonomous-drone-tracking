@@ -12,6 +12,7 @@ Outputs:
 """
 
 import sys
+import math
 from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
@@ -262,8 +263,12 @@ class KinematicVisualServoController:
         # Active lock: reset lost timer
         self.lost_time = 0.0
 
-        err_x = telemetry.get("error_x", 0.0)
-        err_y = telemetry.get("error_y", 0.0)
+        err_x = float(telemetry.get("error_x", 0.0))
+        err_y = float(telemetry.get("error_y", 0.0))
+
+        # Non-finite (NaN / Inf) sanity barrier: abort and return safe zero-velocity holding command
+        if not (np.isfinite(err_x) and np.isfinite(err_y) and np.isfinite(drone_pitch) and np.isfinite(drone_roll) and np.isfinite(dt)):
+            return np.zeros(4, dtype=np.float64)
 
         # ----------------------------------------------------------------------
         # 1. 3D RAY BACK-PROJECTION (FULL SO(3) DECOUPLING)
@@ -305,6 +310,10 @@ class KinematicVisualServoController:
 
         # Optional target forward velocity feedforward (e.g. from Kalman filter)
         target_vx_ff = float(telemetry.get("target_vx", telemetry.get("target_vel_x", 0.0)))
+
+        # Verify all derived error terms are finite before proceeding
+        if not (np.isfinite(range_term) and np.isfinite(target_vx_ff) and np.isfinite(err_x_horizon) and np.isfinite(elevation_horizon) and np.isfinite(azimuth_horizon)):
+            return np.zeros(4, dtype=np.float64)
 
         # 3. 4D Error Vector: [Range Error, Lateral Error (norm), Elevation Horizon (rad), Azimuth Horizon (rad)]
         error_vec = np.array([range_term, err_x_horizon, elevation_horizon, azimuth_horizon], dtype=np.float64)
@@ -479,6 +488,8 @@ class KinematicVisualServoController:
 
         # Final clip against physical envelope limits
         output_vec = np.clip(raw_output, self.min_limits, self.max_limits)
+        if not np.all(np.isfinite(output_vec)):
+            output_vec = np.zeros(4, dtype=np.float64)
         self.prev_cmd = output_vec.copy()
         self.prev_cmd_vx = output_vec[0]
         self.prev_cmd_vy = output_vec[1]
@@ -494,10 +505,14 @@ class KinematicVisualServoController:
         Accepts both 3D [v_fwd, v_down, yawspeed] and 4D [v_fwd, v_right, v_down, yawspeed].
         """
         if len(cmd) == 4:
-            return float(cmd[0]), float(cmd[1]), float(cmd[2]), float(cmd[3])
+            vals = (float(cmd[0]), float(cmd[1]), float(cmd[2]), float(cmd[3]))
         elif len(cmd) == 3:
-            return float(cmd[0]), 0.0, float(cmd[1]), float(cmd[2])
-        raise ValueError(f"Expected 3D or 4D command vector, got length {len(cmd)}")
+            vals = (float(cmd[0]), 0.0, float(cmd[1]), float(cmd[2]))
+        else:
+            raise ValueError(f"Expected 3D or 4D command vector, got length {len(cmd)}")
+        if not all(np.isfinite(v) for v in vals):
+            return 0.0, 0.0, 0.0, 0.0
+        return vals
 
     # Dual aliases for compatibility across ArduPilot and legacy MAVSDK scripts
     to_autopilot = to_velocity_body

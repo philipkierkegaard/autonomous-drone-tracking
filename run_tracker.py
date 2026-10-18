@@ -15,6 +15,7 @@ Features:
 import os
 import sys
 import time
+import math
 import bisect
 import argparse
 import asyncio
@@ -137,8 +138,8 @@ class VehicleState:
         self.vy_m_s: float = 0.0               # East (NED) velocity from EKF2
         self.vz_m_s: float = 0.0               # Down (NED) vertical velocity (baro+accel)
         self.has_gps_vel: bool = False         # True when horizontal EKF velocity is actively aiding
-        self.altitude_rel_m: float = 0.0       # Relative to takeoff/home (EKF2)
-        self.altitude_amsl_m: float = 0.0      # Absolute altitude above MSL
+        self.altitude_rel_m: Optional[float] = None  # Relative to takeoff/home (EKF2)
+        self.altitude_amsl_m: Optional[float] = None # Absolute altitude above MSL
         self.distance_sensor_m: Optional[float] = None  # Downward lidar/sonar rangefinder
         self.is_connected: bool = False
         self.is_armed: bool = False
@@ -616,31 +617,54 @@ class AutonomousTrackerNode:
             watch_in_air()
         )
 
-    def get_current_altitude(self) -> float:
+    def get_current_altitude(self) -> Optional[float]:
         """
         Returns the most reliable current vehicle altitude Above Ground Level (AGL) in meters.
         Prefers downward distance sensor (LIDAR/sonar) if healthy, falls back to EKF2 relative altitude.
+        Returns None if no valid, finite altitude reading is available.
         """
-        if (self.vehicle_state.distance_sensor_m is not None and 
-            0.05 < self.vehicle_state.distance_sensor_m < 50.0):
-            return self.vehicle_state.distance_sensor_m
-        return self.vehicle_state.altitude_rel_m
+        dist_sensor = self.vehicle_state.distance_sensor_m
+        if (dist_sensor is not None and 
+            math.isfinite(dist_sensor) and 
+            0.05 < dist_sensor < 50.0):
+            return float(dist_sensor)
+        
+        alt_rel = self.vehicle_state.altitude_rel_m
+        if alt_rel is not None and math.isfinite(alt_rel):
+            return float(alt_rel)
+            
+        return None
 
-    def enforce_altitude_limits(self, v_down: float, current_alt: float) -> Tuple[float, str]:
+    def enforce_altitude_limits(self, v_down: float, current_alt: Optional[float]) -> Tuple[float, str]:
         """
         Enforces altitude floor (ground collision protection) and ceiling (airspace limit).
 
-        Coordinate convention (PX4 NED Body Frame):
+        Coordinate convention (PX4 / ArduPilot NED Body Frame):
           v_down > 0 is DESCENT (moving downward towards the earth)
           v_down < 0 is CLIMB (moving upward into the sky)
 
         Args:
             v_down: Commanded vertical velocity in m/s (+ down, - up)
-            current_alt: Current altitude AGL in meters
+            current_alt: Current altitude AGL in meters (or None if unavailable/lost)
 
         Returns:
             Tuple of (safe_v_down: float, safety_status: str)
         """
+        # -------------------------------------------------------------
+        # 0. GROUND / DISARMED & UNKNOWN ALTITUDE PROTECTIONS
+        # -------------------------------------------------------------
+        if not getattr(self.vehicle_state, "in_air", False):
+            # Vehicle is sitting on the ground (disarmed or pre-takeoff pad)
+            # Never command descent into the ground, and do not trigger autonomous climb
+            return 0.0, "ON_GROUND"
+
+        if current_alt is None or not math.isfinite(current_alt):
+            # Vehicle is airborne, but altitude reading is missing or invalid (NaN / Inf).
+            # Forbid uncommanded descent into the ground: clamp descent to zero (min(0.0, v_down)).
+            # Upward climb (v_down < 0) commanded by visual tracking is preserved.
+            safe_v_down = min(0.0, v_down)
+            return safe_v_down, "INVALID_ALT"
+
         min_alt = self.args.min_alt
         max_alt = self.args.max_alt
         cushion = max(0.1, self.args.alt_cushion)
@@ -727,7 +751,8 @@ class AutonomousTrackerNode:
         roll_deg = np.rad2deg(self.vehicle_state.roll_rad)
         cam_fps = 1.0 / max(1e-4, dt)
         dehaze_tag = " | DEHAZE: ON" if getattr(self, "enable_dehaze", False) else ""
-        info_str = f"SZ: {curr_sz:3.0f}/{goal_sz:.0f}px | ATT: R{roll_deg:+3.0f}* P{pitch_deg:+3.0f}* | ALT: {current_alt:4.1f}m | CAM: {cam_fps:4.1f}fps | MAV: {self.args.ctrl_rate:.0f}Hz{dehaze_tag}"
+        alt_str = f"{current_alt:4.1f}m" if (current_alt is not None and math.isfinite(current_alt)) else "N/A"
+        info_str = f"SZ: {curr_sz:3.0f}/{goal_sz:.0f}px | ATT: R{roll_deg:+3.0f}* P{pitch_deg:+3.0f}* | ALT: {alt_str} | CAM: {cam_fps:4.1f}fps | MAV: {self.args.ctrl_rate:.0f}Hz{dehaze_tag}"
         cv2.putText(hud, info_str, (128, 34), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (220, 220, 220), 1, cv2.LINE_AA)
 
         # MAVLink link badge (top right)
@@ -1040,7 +1065,7 @@ class AutonomousTrackerNode:
                 "vy_body": vy_body,
                 "vz_body": vz_body,
                 "target_dist": target_dist,
-                "altitude_m": float(self.get_current_altitude()),
+                "altitude_m": float(self.get_current_altitude()) if self.get_current_altitude() is not None else 0.0,
                 "dt": float(raw_dt)
             }
 
@@ -1090,7 +1115,7 @@ class AutonomousTrackerNode:
                     f"{np.rad2deg(interp_roll):.2f}",
                     f"{np.rad2deg(interp_pitch):.2f}",
                     f"{interp_yaw:.2f}",
-                    f"{self.get_current_altitude():.2f}",
+                    f"{self.get_current_altitude():.2f}" if self.get_current_altitude() is not None else "N/A",
                     f"{vx_body:.3f}", f"{vy_body:.3f}", f"{vz_body:.3f}",
                     yolo_det, ycx, ycy,
                     telemetry.get("status", "SEARCHING"),
@@ -1169,6 +1194,8 @@ class AutonomousTrackerNode:
                 drone_roll=current_roll,
                 dt=dt
             )
+            if not np.all(np.isfinite(raw_cmd)):
+                raw_cmd = np.zeros_like(raw_cmd)
 
             # 5. Slew-Rate Limiting (Acceleration Limiting for smooth control signals)
             if len(raw_cmd) == 4:
@@ -1190,10 +1217,14 @@ class AutonomousTrackerNode:
 
             max_step = max_accel * dt
             cmd_safe = np.clip(raw_cmd, prev_cmd_3d - max_step, prev_cmd_3d + max_step)
+            if not np.all(np.isfinite(cmd_safe)):
+                cmd_safe = np.zeros_like(cmd_safe)
             prev_cmd_3d = cmd_safe.copy()
 
             # 6. Convert to standard 4-DOF Body Frame (forward, right, down, yawspeed)
             v_fwd, v_right, v_down, yawspeed = self.controller.to_velocity_body(cmd_safe)
+            if not all(np.isfinite(v) for v in (v_fwd, v_right, v_down, yawspeed)):
+                v_fwd, v_right, v_down, yawspeed = 0.0, 0.0, 0.0, 0.0
 
             # 7. Altitude Floor & Ceiling Safety Envelope Protection
             current_alt = self.get_current_altitude()
@@ -1203,8 +1234,11 @@ class AutonomousTrackerNode:
 
             # In dry-run mode, simulate altitude dynamics
             if self.args.dry_run:
+                curr_sim_alt = self.vehicle_state.altitude_rel_m
+                if curr_sim_alt is None or not math.isfinite(curr_sim_alt):
+                    curr_sim_alt = float(self.args.sim_alt)
                 self.vehicle_state.altitude_rel_m = max(
-                    0.0, self.vehicle_state.altitude_rel_m - (v_down * dt)
+                    0.0, curr_sim_alt - (v_down * dt)
                 )
 
             # 8. Dispatch steady velocity setpoint to Pixhawk Autopilot
@@ -1334,9 +1368,10 @@ class AutonomousTrackerNode:
                     else:
                         cmd_str = f"Cmd: [vx={cmd[0]:4.1f}, vz={cmd[1]:+4.2f}, yaw={cmd[2]:+5.1f}]"
 
+                    alt_disp = f"{current_alt:4.1f}m" if (current_alt is not None and math.isfinite(current_alt)) else "N/A"
                     print(f"Frame {f_idx:5d} ({v_fps:4.1f}fps) | "
                           f"Status: {status:8s} | "
-                          f"Alt: {current_alt:4.1f}m ({alt_status:13s}) | "
+                          f"Alt: {alt_disp:7s} ({alt_status:13s}) | "
                           f"Size: {sz:4.0f}px | "
                           f"{cmd_str}")
 

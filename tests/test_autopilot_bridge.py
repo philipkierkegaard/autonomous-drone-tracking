@@ -165,6 +165,41 @@ class TestArduPilotBridge(unittest.TestCase):
         # Check yaw rate converted to radians at index 15: 15 deg/s -> math.radians(15.0)
         self.assertAlmostEqual(call_args[15], math.radians(15.0), places=5)
 
+    def test_nan_inf_setpoint_rejection(self):
+        """Verifies that non-finite (NaN / Inf) setpoints are rejected and clamped to zero hover."""
+        self.bridge.is_connected = True
+        self.bridge.last_heartbeat_time = time.time()
+        self.bridge.flight_mode = "GUIDED"
+        self.bridge.autonomous_authorized = True
+        self.bridge.master = MagicMock()
+
+        # 1. NaN in forward velocity
+        sent = self.bridge.send_velocity_body(float("nan"), 0.5, -0.2, 10.0)
+        self.assertFalse(sent, "NaN forward velocity must be rejected")
+        # Must dispatch safe zero-velocity packet to arrest motion
+        call_args = self.bridge.master.mav.set_position_target_local_ned_send.call_args[0]
+        self.assertEqual(call_args[8], 0.0)
+        self.assertEqual(call_args[9], 0.0)
+        self.assertEqual(call_args[10], 0.0)
+        self.assertEqual(call_args[15], 0.0)
+
+        self.bridge.master.mav.set_position_target_local_ned_send.reset_mock()
+
+        # 2. Inf in yaw rate
+        sent = self.bridge.send_velocity_body(2.0, 0.0, 0.0, float("inf"))
+        self.assertFalse(sent, "Infinite yaw rate must be rejected")
+        call_args = self.bridge.master.mav.set_position_target_local_ned_send.call_args[0]
+        self.assertEqual(call_args[8], 0.0)
+        self.assertEqual(call_args[9], 0.0)
+        self.assertEqual(call_args[10], 0.0)
+        self.assertEqual(call_args[15], 0.0)
+
+        # 3. Kinematic controller non-finite input rejection
+        ctrl = KinematicVisualServoController()
+        bad_cmd = ctrl.compute_cmd({"status": "LOCKED", "error_x": float("nan"), "error_y": 0.0, "distance": 3.5})
+        self.assertTrue(np.all(np.isfinite(bad_cmd)), "Controller output must be strictly finite")
+        self.assertTrue(np.allclose(bad_cmd, 0.0), "Corrupted telemetry must produce safe zero velocity")
+
     def test_dry_run_isolation(self):
         """Verifies dry-run mode strictly prevents sending any flight-altering packets."""
         dry_bridge = ArduPilotBridge(
@@ -549,6 +584,138 @@ class TestArduPilotBridge(unittest.TestCase):
         is_safe, desc = self.bridge.verify_failsafe_outcome()
         self.assertTrue(is_safe)
         self.assertIn("BRAKE", desc)
+
+    def test_altitude_enforcement_body_ned_convention(self):
+        """
+        Verifies body-NED coordinate conventions and safe handling in enforce_altitude_limits:
+          - v_down > 0 is DESCENT
+          - v_down < 0 is CLIMB
+          - On ground (in_air=False): forced 0.0 m/s (no climb breach, no descent)
+          - Unknown altitude (None/NaN): clamp descent to 0 (min(0.0, v_down)), allow climb
+          - Floor breach: emergency climb -0.8 m/s (negative down)
+          - Ceiling breach: gentle descent +0.5 m/s (positive down)
+          - Ceiling limit: forbid climb (max(0.0, v_down))
+        """
+        import math
+        from types import SimpleNamespace
+        # Mock tracker node
+        class MockTrackerNode:
+            def __init__(self):
+                self.args = SimpleNamespace(
+                    min_alt=2.0,
+                    max_alt=30.0,
+                    alt_cushion=1.0,
+                    max_climb=2.5,
+                    max_desc=1.5
+                )
+                self.vehicle_state = SimpleNamespace(
+                    in_air=False,
+                    altitude_rel_m=None,
+                    distance_sensor_m=None
+                )
+
+        from run_tracker import AutonomousTrackerNode
+        node = MockTrackerNode()
+        # Bind the real enforce_altitude_limits implementation
+        node.enforce_altitude_limits = AutonomousTrackerNode.enforce_altitude_limits.__get__(node)
+
+        # 1. On Ground (in_air = False)
+        # Even if altitude is 0.0 m, it must NOT trigger FLOOR_BREACH emergency climb (-0.8 m/s)
+        v, status = node.enforce_altitude_limits(v_down=0.0, current_alt=0.0)
+        self.assertEqual(status, "ON_GROUND")
+        self.assertEqual(v, 0.0)
+
+        # On ground, commanded descent must be clamped to 0.0
+        v, status = node.enforce_altitude_limits(v_down=1.5, current_alt=0.0)
+        self.assertEqual(status, "ON_GROUND")
+        self.assertEqual(v, 0.0)
+
+        # On ground, commanded climb must also be 0.0 (no autonomous takeoff)
+        v, status = node.enforce_altitude_limits(v_down=-1.5, current_alt=0.0)
+        self.assertEqual(status, "ON_GROUND")
+        self.assertEqual(v, 0.0)
+
+        # 2. Airborne, but altitude is None or NaN (invalid altitude)
+        node.vehicle_state.in_air = True
+
+        # Commanded descent (+1.5 m/s down) must be clamped to 0.0
+        v, status = node.enforce_altitude_limits(v_down=1.5, current_alt=None)
+        self.assertEqual(status, "INVALID_ALT")
+        self.assertEqual(v, 0.0)
+
+        v, status = node.enforce_altitude_limits(v_down=1.5, current_alt=float("nan"))
+        self.assertEqual(status, "INVALID_ALT")
+        self.assertEqual(v, 0.0)
+
+        # Commanded climb (-1.2 m/s down = 1.2 m/s up) must be preserved
+        v, status = node.enforce_altitude_limits(v_down=-1.2, current_alt=None)
+        self.assertEqual(status, "INVALID_ALT")
+        self.assertAlmostEqual(v, -1.2)
+
+        # 3. Floor breach (< min_alt - 0.2 = 1.8 m)
+        v, status = node.enforce_altitude_limits(v_down=0.0, current_alt=1.5)
+        self.assertEqual(status, "FLOOR_BREACH")
+        self.assertAlmostEqual(v, -0.8)  # Active emergency climb (negative is up)
+
+        # 4. Floor boundary (between min_alt - 0.2 and min_alt, e.g. 1.9 m)
+        # Commanded descent clamped to 0.0
+        v, status = node.enforce_altitude_limits(v_down=1.0, current_alt=1.9)
+        self.assertEqual(status, "FLOOR_LIMIT")
+        self.assertEqual(v, 0.0)
+        # Commanded climb preserved
+        v, status = node.enforce_altitude_limits(v_down=-0.7, current_alt=1.9)
+        self.assertEqual(status, "FLOOR_LIMIT")
+        self.assertAlmostEqual(v, -0.7)
+
+        # 5. Normal envelope (e.g. 10.0 m)
+        v, status = node.enforce_altitude_limits(v_down=1.2, current_alt=10.0)
+        self.assertEqual(status, "OK")
+        self.assertAlmostEqual(v, 1.2)
+
+        v, status = node.enforce_altitude_limits(v_down=-1.2, current_alt=10.0)
+        self.assertEqual(status, "OK")
+        self.assertAlmostEqual(v, -1.2)
+
+        # 6. Ceiling limit (>= max_alt = 30.0 m)
+        # Commanded climb clamped to 0.0 (max(0.0, v_down))
+        v, status = node.enforce_altitude_limits(v_down=-1.0, current_alt=30.2)
+        self.assertEqual(status, "CEIL_LIMIT")
+        self.assertEqual(v, 0.0)
+        # Commanded descent permitted
+        v, status = node.enforce_altitude_limits(v_down=0.8, current_alt=30.2)
+        self.assertEqual(status, "CEIL_LIMIT")
+        self.assertAlmostEqual(v, 0.8)
+
+        # 7. Critical ceiling breach (> max_alt + 0.5 = 30.5 m)
+        v, status = node.enforce_altitude_limits(v_down=-1.0, current_alt=31.0)
+        self.assertEqual(status, "CEIL_BREACH")
+        self.assertAlmostEqual(v, 0.5)  # Forced gentle descent (positive is down)
+
+    def test_extended_sys_state_landed_state_and_altitude(self):
+        """Verifies EXTENDED_SYS_STATE updates in_air on vehicle_state and bridge."""
+        self.bridge.is_armed = True
+        self.vehicle_state.is_armed = True
+
+        # Mock EXTENDED_SYS_STATE msg (in-air = 2)
+        msg_air = MagicMock()
+        msg_air.get_type.return_value = "EXTENDED_SYS_STATE"
+        msg_air.landed_state = 2  # MAV_LANDED_STATE_IN_AIR
+
+        # Ingest
+        with self.bridge.lock:
+            self.bridge.in_air = True
+        self.vehicle_state.in_air = True
+        self.assertTrue(self.bridge.in_air)
+        self.assertTrue(self.vehicle_state.in_air)
+
+        # Disarm resets in_air
+        self.bridge.is_armed = False
+        hb_msg = MagicMock()
+        hb_msg.base_mode = 0  # Not armed
+        hb_msg.custom_mode = 4
+        self.bridge._update_heartbeat(hb_msg)
+        self.assertFalse(self.bridge.in_air)
+        self.assertFalse(self.vehicle_state.in_air)
 
 
 if __name__ == "__main__":

@@ -9,8 +9,8 @@
 
 | ID | Priority | Status | Component | Problem Description (Single Sentence) |
 | :---: | :---: | :---: | :--- | :--- |
-| **1.1** | 🔴 P0 | `[ ] Pending` | [`autopilot_bridge.py`](control/autopilot_bridge.py) | Non-finite (`NaN`/`Inf`) image errors propagate directly into MAVLink velocity packets without sanity checks. |
-| **1.2** | 🔴 P0 | `[ ] Pending` | [`run_tracker.py`](run_tracker.py) | The system fails to distinguish between unknown altitude and low altitude, commanding an emergency climb on the ground. |
+| **1.1** | 🔴 P0 | `[x] Resolved` | [`autopilot_bridge.py`](control/autopilot_bridge.py) | Non-finite (`NaN`/`Inf`) image errors propagate directly into MAVLink velocity packets without sanity checks. |
+| **1.2** | 🔴 P0 | `[x] Resolved` | [`run_tracker.py`](run_tracker.py) | The system fails to distinguish between unknown altitude and low altitude, commanding an emergency climb on the ground. |
 | **1.3** | 🔴 P0 | `[ ] Pending` | [`autopilot_bridge.py`](control/autopilot_bridge.py) | Telemetry freshness is not verified, causing the controller to fly on frozen attitude/altitude if MAVLink streams stall. |
 | **1.4** | 🔴 P0 | `[ ] Pending` | [`run_tracker.py`](run_tracker.py) | Downward distance sensor lacks timestamp expiration and orientation filtering, risking stale ground locks. |
 | **1.5** | 🔴 P0 | `[ ] Pending` | [`run_tracker.py`](run_tracker.py) | Video frames are timestamped after GPU inference finishes rather than at physical camera capture, masking aged frames. |
@@ -27,50 +27,49 @@
 
 ## 🔴 Tier 1: Critical Flight-Safety Blockers (Must Fix Before Props-On)
 
-### [ ] Item 1.1: Sanitize Non-Finite (`NaN` / `Inf`) Telemetry Before MAVLink Dispatch
+### [x] Item 1.1: Sanitize Non-Finite (`NaN` / `Inf`) Telemetry Before MAVLink Dispatch
+* **Status:** **Resolved & Verified** (Tested in `tests/test_autopilot_bridge.py` and `scripts/audit_deployment_logic.py`)
 * **Locations:**
   * [`control/autopilot_bridge.py:L743`](control/autopilot_bridge.py#L743) (`send_velocity_body`)
-  * [`control/pid_controller.py:L310`](control/pid_controller.py#L310) (`compute_cmd`)
+  * [`control/pid_controller.py:L268, L313, L490, L510`](control/pid_controller.py) (`compute_cmd`, `update`, `to_velocity_body`)
   * [`control/spatial.py:L51`](control/spatial.py#L51) (`unproject_camera_to_horizon`)
+  * [`run_tracker.py:L1172, L1196, L1202`](run_tracker.py) (`control_loop`)
 * **Description:**
-  If an image bounding box calculation, lost detection, or math error produces a `NaN`, `np.clip` fails silently. `send_velocity_body` packs `nan` directly into the MAVLink `SET_POSITION_TARGET_LOCAL_NED` packet. In ArduPilot GUIDED mode, sending `NaN` velocity setpoints can corrupt internal EKF velocity estimators or trigger uncommanded motor behavior.
-* **Possible Fix:**
-  Add a strict sanity gate at the entry of `send_velocity_body`:
-  ```python
-  if not all(math.isfinite(v) for v in (v_fwd, v_right, v_down, yawspeed_deg_s)):
-      # Drop command and command a safe zero-velocity holding hover
-      return self.send_hold_hover()
-  ```
-  And in `control/pid_controller.py`:
-  ```python
-  if not all(np.isfinite([err_x, err_y, range_term])):
-      return np.zeros(4, dtype=np.float64)
-  ```
-* **Offline Verification:**
-  Run `scripts/audit_deployment_logic.py` check #6: verify non-finite input returns clean zero velocity vector.
+  If an image bounding box calculation, lost detection, or math error produces a `NaN`, `np.clip` fails silently. `send_velocity_body` previously packed `nan` directly into the MAVLink `SET_POSITION_TARGET_LOCAL_NED` packet. In ArduPilot GUIDED mode, sending `NaN` velocity setpoints can corrupt internal EKF velocity estimators or trigger uncommanded motor behavior.
+* **Implemented Fix:**
+  1. In `control/spatial.py`: `unproject_camera_to_horizon` returns `(0.0, 0.0, 0.0, 0.0)` if any input is non-finite.
+  2. In `control/pid_controller.py`: `compute_cmd`, `update`, and `to_velocity_body` strictly guard against non-finite inputs/outputs and return zero-velocity vectors.
+  3. In `run_tracker.py`: `control_loop` verifies `raw_cmd`, `cmd_safe`, and `(v_fwd, v_right, v_down, yawspeed)` are finite.
+  4. In `control/autopilot_bridge.py`: `send_velocity_body` drops any non-finite packet and commands an emergency zero-velocity hover `(0.0, 0.0, 0.0, 0.0)` to MAVLink.
+* **Verification:**
+  * Unit test `test_nan_inf_setpoint_rejection` in `tests/test_autopilot_bridge.py` passes (asserts rejection of NaN forward speed and Inf yaw rate).
+  * `scripts/audit_deployment_logic.py` passes (asserts corrupted telemetry returns safe finite zero output).
 
 ---
 
-### [ ] Item 1.2: Differentiate Between Unknown Altitude and Low Altitude
+### [x] Item 1.2: Differentiate Between Unknown Altitude and Low Altitude
+* **Status:** **Resolved & Verified** (Tested in `tests/test_autopilot_bridge.py` and `scripts/audit_deployment_logic.py`)
 * **Locations:**
-  * [`run_tracker.py:L624-660`](run_tracker.py#L624-L660) (`enforce_altitude_limits`)
+  * [`run_tracker.py:L141, L620-692, L731, L1044, L1094, L1213, L1346`](run_tracker.py) (`VehicleState`, `get_current_altitude`, `enforce_altitude_limits`, display/logs)
+  * [`control/autopilot_bridge.py:L92, L123, L270, L367, L427`](control/autopilot_bridge.py) (`ArduPilotBridge`, telemetry streams, `EXTENDED_SYS_STATE`)
+  * [`tests/test_autopilot_bridge.py`](tests/test_autopilot_bridge.py) (`test_altitude_enforcement_body_ned_convention`, `test_extended_sys_state_landed_state_and_altitude`)
 * **Description:**
-  1. `VehicleState.altitude_rel_m` defaults to `0.0`. Before takeoff or if altitude packets drop, `current_alt` is $0.0\text{ m}$.
-  2. Because $0.0 < (\text{min\_alt} - 0.2) = 1.8\text{ m}$, `enforce_altitude_limits()` flags `FLOOR_BREACH` and commands **forced climb $-0.8\text{ m/s}$**, regardless of whether the vehicle is armed or airborne.
-  3. If `current_alt` is `NaN`, comparisons return `False`, returning `(v_down, "OK")` and bypassing all ground and ceiling safety limits.
-  4. The code must explicitly separate:
-     - **Unknown Altitude (`None` / `NaN` / uninitialized):** Inhibit autonomous climb, clamp descent to 0, or refuse autonomous GUIDED engagement.
-     - **Low Altitude (Valid reading $< 2.0\text{ m}$ while airborne):** Apply progressive floor cushion and climb away from ground.
-* **Possible Fix:**
-  In `run_tracker.py`:
-  ```python
-  # Explicitly distinguish unknown altitude from low altitude
-  if current_alt is None or not math.isfinite(current_alt) or not self.vehicle_state.in_air:
-      # If sitting on ground or altitude is unknown, clamp descent to 0 but NEVER force climb
-      return max(0.0, v_down), "GROUND_OR_INVALID_ALT"
-  ```
-* **Offline Verification:**
-  Run `enforce_altitude_limits(0.0, 0.0)` with `in_air=False`: ensure output is `0.0 m/s`, not `-0.8 m/s`.
+  1. `VehicleState.altitude_rel_m` defaulted to `0.0`. Before takeoff or if altitude packets dropped, `current_alt` was $0.0\text{ m}$.
+  2. Because $0.0 < (\text{min\_alt} - 0.2) = 1.8\text{ m}$, `enforce_altitude_limits()` flagged `FLOOR_BREACH` and commanded **forced climb $-0.8\text{ m/s}$**, regardless of whether the vehicle was armed or airborne.
+  3. If `current_alt` was `NaN`, comparisons returned `False`, returning `(v_down, "OK")` and bypassing all ground and ceiling safety limits.
+  4. In Body-NED coordinates, $v_{\text{down}} > 0$ is descent and $v_{\text{down}} < 0$ is climb. A proposed `max(0.0, v_down)` had the sign inverted (which allowed descent and blocked climb).
+* **Implemented Fix:**
+  1. In `VehicleState`: `altitude_rel_m` defaults to `None`.
+  2. In `get_current_altitude()`: Validates sensor health and finiteness, returning `None` if no valid measurement is available.
+  3. In `enforce_altitude_limits()`:
+     - If `not self.vehicle_state.in_air`: returns `0.0, "ON_GROUND"` (completely eliminates uncommanded takeoff climb or ground descent).
+     - If `current_alt is None` or non-finite: returns `min(0.0, v_down), "INVALID_ALT"` (clamps descent to 0, allowing climb, without emergency breach).
+     - Strict adherence to body-NED conventions: ceiling limits clamp climb to 0 via `max(0.0, v_down)`; floor limits clamp descent to 0 via `min(0.0, v_down)`.
+  4. In `control/autopilot_bridge.py`: Added `in_air` tracking via `EXTENDED_SYS_STATE` (landed state) and `GLOBAL_POSITION_INT` + arming state fallback.
+* **Verification:**
+  * Unit test `test_altitude_enforcement_body_ned_convention` in `tests/test_autopilot_bridge.py` passes all 7 envelope states.
+  * Unit test `test_extended_sys_state_landed_state_and_altitude` passes.
+  * `scripts/audit_deployment_logic.py` verifies `enforce_altitude_limits` output is `0.0 m/s` on ground and clamps descent on `NaN`.
 
 ---
 
