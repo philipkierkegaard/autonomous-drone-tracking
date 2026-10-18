@@ -81,6 +81,11 @@ check("range sensor accepted without health or age", n.get_current_altitude() ==
 n.vehicle_state.in_air = True
 v, state = n.enforce_altitude_limits(1.0, float("nan"))
 check("remediated altitude logic clamps descent to zero on invalid altitude", v == 0.0 and state == "INVALID_ALT", (v, state))
+n.vehicle_state.is_taking_off = True
+n.vehicle_state.in_air = False
+v, state = n.enforce_altitude_limits(0.0, 0.0)
+check("takeoff transition inhibits autonomous vertical commands", v == 0.0 and state == "TAKEOFF_ACTIVE", (v, state))
+n.vehicle_state.is_taking_off = False
 
 k = ns["KalmanBoxTracker"](np.array([0., 0., 20., 20.]))
 k.x[4, 0] = 60.0

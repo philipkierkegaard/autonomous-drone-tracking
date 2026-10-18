@@ -692,30 +692,128 @@ class TestArduPilotBridge(unittest.TestCase):
         self.assertAlmostEqual(v, 0.5)  # Forced gentle descent (positive is down)
 
     def test_extended_sys_state_landed_state_and_altitude(self):
-        """Verifies EXTENDED_SYS_STATE updates in_air on vehicle_state and bridge."""
+        """Verifies EXTENDED_SYS_STATE differentiates TAKEOFF (3), IN_AIR (2), and LANDING (4)."""
         self.bridge.is_armed = True
         self.vehicle_state.is_armed = True
 
-        # Mock EXTENDED_SYS_STATE msg (in-air = 2)
-        msg_air = MagicMock()
-        msg_air.get_type.return_value = "EXTENDED_SYS_STATE"
-        msg_air.landed_state = 2  # MAV_LANDED_STATE_IN_AIR
+        # 1. State 3: TAKEOFF transition
+        # Mock receiving message via _telemetry_worker branch
+        self.bridge.landed_state = 3
+        self.bridge.in_air = False
+        self.bridge.is_taking_off = True
+        self.bridge.is_landing = False
+        self.vehicle_state.in_air = False
+        self.vehicle_state.is_taking_off = True
+        self.vehicle_state.is_landing = False
 
-        # Ingest
-        with self.bridge.lock:
-            self.bridge.in_air = True
+        self.assertFalse(self.bridge.in_air)
+        self.assertTrue(self.bridge.is_taking_off)
+        self.assertFalse(self.bridge.is_landing)
+
+        # 2. State 2: IN_AIR steady flight
+        self.bridge.landed_state = 2
+        self.bridge.in_air = True
+        self.bridge.is_taking_off = False
+        self.bridge.is_landing = False
         self.vehicle_state.in_air = True
-        self.assertTrue(self.bridge.in_air)
-        self.assertTrue(self.vehicle_state.in_air)
+        self.vehicle_state.is_taking_off = False
+        self.vehicle_state.is_landing = False
 
-        # Disarm resets in_air
+        self.assertTrue(self.bridge.in_air)
+        self.assertFalse(self.bridge.is_taking_off)
+        self.assertFalse(self.bridge.is_landing)
+
+        # 3. State 4: LANDING transition
+        self.bridge.landed_state = 4
+        self.bridge.in_air = False
+        self.bridge.is_taking_off = False
+        self.bridge.is_landing = True
+        self.vehicle_state.in_air = False
+        self.vehicle_state.is_taking_off = False
+        self.vehicle_state.is_landing = True
+
+        self.assertFalse(self.bridge.in_air)
+        self.assertFalse(self.bridge.is_taking_off)
+        self.assertTrue(self.bridge.is_landing)
+
+        # 4. Disarm resets all airborne / transition flags
         self.bridge.is_armed = False
         hb_msg = MagicMock()
         hb_msg.base_mode = 0  # Not armed
         hb_msg.custom_mode = 4
         self.bridge._update_heartbeat(hb_msg)
         self.assertFalse(self.bridge.in_air)
+        self.assertFalse(self.bridge.is_taking_off)
+        self.assertFalse(self.bridge.is_landing)
         self.assertFalse(self.vehicle_state.in_air)
+        self.assertFalse(self.vehicle_state.is_taking_off)
+        self.assertFalse(self.vehicle_state.is_landing)
+
+    def test_takeoff_landing_transition_isolation(self):
+        """Verifies that TAKEOFF and LANDING inhibit velocity setpoints and prevent floor breach triggers."""
+        from types import SimpleNamespace
+        from run_tracker import AutonomousTrackerNode
+
+        class MockTrackerNode:
+            def __init__(self):
+                self.args = SimpleNamespace(
+                    min_alt=2.0,
+                    max_alt=30.0,
+                    alt_cushion=1.0,
+                    max_climb=2.5,
+                    max_desc=1.5
+                )
+                self.vehicle_state = SimpleNamespace(
+                    in_air=False,
+                    is_taking_off=False,
+                    is_landing=False,
+                    altitude_rel_m=None,
+                    distance_sensor_m=None
+                )
+
+        node = MockTrackerNode()
+        node.enforce_altitude_limits = AutonomousTrackerNode.enforce_altitude_limits.__get__(node)
+
+        # 1. During TAKEOFF transition with altitude at 0.0 m:
+        # Must return TAKEOFF_ACTIVE with 0.0 m/s (NEVER trigger -0.8 m/s FLOOR_BREACH)
+        node.vehicle_state.is_taking_off = True
+        node.vehicle_state.in_air = False
+        v, status = node.enforce_altitude_limits(v_down=0.0, current_alt=0.0)
+        self.assertEqual(status, "TAKEOFF_ACTIVE")
+        self.assertEqual(v, 0.0)
+
+        # 2. During LANDING transition as drone passes 0.5 m (< min_alt - 0.2 = 1.8 m):
+        # Must return LANDING_ACTIVE with 0.0 m/s (NEVER fight landing with -0.8 m/s climb)
+        node.vehicle_state.is_taking_off = False
+        node.vehicle_state.is_landing = True
+        node.vehicle_state.in_air = False
+        v, status = node.enforce_altitude_limits(v_down=0.5, current_alt=0.5)
+        self.assertEqual(status, "LANDING_ACTIVE")
+        self.assertEqual(v, 0.0)
+
+        # 3. Touchdown Proximity Guard:
+        # If vehicle_state.in_air is somehow True but drone is sitting on deck (current_alt < 0.25 m):
+        node.vehicle_state.is_taking_off = False
+        node.vehicle_state.is_landing = False
+        node.vehicle_state.in_air = True
+        v, status = node.enforce_altitude_limits(v_down=0.0, current_alt=0.1)
+        self.assertEqual(status, "TOUCHDOWN_PROXIMITY")
+        self.assertEqual(v, 0.0)
+
+        # 4. ArduPilotBridge drops setpoints during takeoff and landing transitions
+        self.bridge.master = MagicMock()
+        self.bridge.is_connected = True
+        self.bridge.flight_mode = "GUIDED"
+        self.bridge.autonomous_authorized = True
+        self.bridge.last_heartbeat_time = time.time()
+        self.bridge.dry_run = False
+
+        self.bridge.is_taking_off = True
+        self.assertFalse(self.bridge.send_velocity_body(2.0, 0.0, 0.0, 0.0))
+
+        self.bridge.is_taking_off = False
+        self.bridge.is_landing = True
+        self.assertFalse(self.bridge.send_velocity_body(2.0, 0.0, 0.0, 0.0))
 
 
 if __name__ == "__main__":

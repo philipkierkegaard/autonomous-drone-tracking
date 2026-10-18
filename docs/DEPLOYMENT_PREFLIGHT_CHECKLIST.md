@@ -47,29 +47,36 @@
 
 ---
 
-### [x] Item 1.2: Differentiate Between Unknown Altitude and Low Altitude
+### [x] Item 1.2: Differentiate Between Unknown Altitude, Transitions, and Low Altitude
 * **Status:** **Resolved & Verified** (Tested in `tests/test_autopilot_bridge.py` and `scripts/audit_deployment_logic.py`)
 * **Locations:**
   * [`run_tracker.py:L141, L620-692, L731, L1044, L1094, L1213, L1346`](run_tracker.py) (`VehicleState`, `get_current_altitude`, `enforce_altitude_limits`, display/logs)
-  * [`control/autopilot_bridge.py:L92, L123, L270, L367, L427`](control/autopilot_bridge.py) (`ArduPilotBridge`, telemetry streams, `EXTENDED_SYS_STATE`)
-  * [`tests/test_autopilot_bridge.py`](tests/test_autopilot_bridge.py) (`test_altitude_enforcement_body_ned_convention`, `test_extended_sys_state_landed_state_and_altitude`)
+  * [`control/autopilot_bridge.py:L92, L123, L270, L367, L440, L750`](control/autopilot_bridge.py) (`ArduPilotBridge`, telemetry streams, `EXTENDED_SYS_STATE`, `send_velocity_body`)
+  * [`tests/test_autopilot_bridge.py`](tests/test_autopilot_bridge.py) (`test_altitude_enforcement_body_ned_convention`, `test_extended_sys_state_landed_state_and_altitude`, `test_takeoff_landing_transition_isolation`)
 * **Description:**
   1. `VehicleState.altitude_rel_m` defaulted to `0.0`. Before takeoff or if altitude packets dropped, `current_alt` was $0.0\text{ m}$.
   2. Because $0.0 < (\text{min\_alt} - 0.2) = 1.8\text{ m}$, `enforce_altitude_limits()` flagged `FLOOR_BREACH` and commanded **forced climb $-0.8\text{ m/s}$**, regardless of whether the vehicle was armed or airborne.
-  3. If `current_alt` was `NaN`, comparisons returned `False`, returning `(v_down, "OK")` and bypassing all ground and ceiling safety limits.
-  4. In Body-NED coordinates, $v_{\text{down}} > 0$ is descent and $v_{\text{down}} < 0$ is climb. A proposed `max(0.0, v_down)` had the sign inverted (which allowed descent and blocked climb).
+  3. During `TAKEOFF` ($h \approx 0\text{ m}$) or `LANDING` ($h < 1.8\text{ m}$), treating transitions as `in_air` would trigger `FLOOR_BREACH`, corrupting the autopilot's takeoff trajectory or fighting touchdown in a dangerous vertical yo-yo.
+  4. If `current_alt` was `NaN`, comparisons returned `False`, returning `(v_down, "OK")` and bypassing all ground and ceiling safety limits.
+  5. In Body-NED coordinates, $v_{\text{down}} > 0$ is descent and $v_{\text{down}} < 0$ is climb. A proposed `max(0.0, v_down)` had the sign inverted (which allowed descent and blocked climb).
 * **Implemented Fix:**
   1. In `VehicleState`: `altitude_rel_m` defaults to `None`.
   2. In `get_current_altitude()`: Validates sensor health and finiteness, returning `None` if no valid measurement is available.
   3. In `enforce_altitude_limits()`:
+     - If `self.vehicle_state.is_taking_off`: returns `0.0, "TAKEOFF_ACTIVE"` (allows autopilot to execute takeoff ramp uninhibited).
+     - If `self.vehicle_state.is_landing`: returns `0.0, "LANDING_ACTIVE"` (yields authority completely to landing detector).
      - If `not self.vehicle_state.in_air`: returns `0.0, "ON_GROUND"` (completely eliminates uncommanded takeoff climb or ground descent).
+     - If `current_alt < 0.25 m` touchdown proximity: returns `min(0.0, v_down), "TOUCHDOWN_PROXIMITY"` (clamps descent, prevents emergency climb step on deck).
      - If `current_alt is None` or non-finite: returns `min(0.0, v_down), "INVALID_ALT"` (clamps descent to 0, allowing climb, without emergency breach).
      - Strict adherence to body-NED conventions: ceiling limits clamp climb to 0 via `max(0.0, v_down)`; floor limits clamp descent to 0 via `min(0.0, v_down)`.
-  4. In `control/autopilot_bridge.py`: Added `in_air` tracking via `EXTENDED_SYS_STATE` (landed state) and `GLOBAL_POSITION_INT` + arming state fallback.
+  4. In `control/autopilot_bridge.py`:
+     - Distinguishes `in_air` (`MAV_LANDED_STATE_IN_AIR == 2`) from transitions `is_taking_off` (3) and `is_landing` (4).
+     - `send_velocity_body` drops setpoints during `is_taking_off` and `is_landing` to ensure zero companion interference with autopilot state machines.
 * **Verification:**
   * Unit test `test_altitude_enforcement_body_ned_convention` in `tests/test_autopilot_bridge.py` passes all 7 envelope states.
-  * Unit test `test_extended_sys_state_landed_state_and_altitude` passes.
-  * `scripts/audit_deployment_logic.py` verifies `enforce_altitude_limits` output is `0.0 m/s` on ground and clamps descent on `NaN`.
+  * Unit test `test_extended_sys_state_landed_state_and_altitude` verifies landed state 1, 2, 3, 4 separation.
+  * Unit test `test_takeoff_landing_transition_isolation` confirms setpoint inhibition and zero vertical command during transitions.
+  * `scripts/audit_deployment_logic.py` verifies `enforce_altitude_limits` output is `0.0 m/s` on ground, clamps descent on `NaN`, and inhibits vertical commands during takeoff.
 
 ---
 

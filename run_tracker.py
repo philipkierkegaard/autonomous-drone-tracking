@@ -143,7 +143,9 @@ class VehicleState:
         self.distance_sensor_m: Optional[float] = None  # Downward lidar/sonar rangefinder
         self.is_connected: bool = False
         self.is_armed: bool = False
-        self.in_air: bool = False
+        self.in_air: bool = False             # Confirmed steady-state airborne (MAV_LANDED_STATE_IN_AIR)
+        self.is_taking_off: bool = False       # Active takeoff transition (MAV_LANDED_STATE_TAKEOFF)
+        self.is_landing: bool = False          # Active landing transition (MAV_LANDED_STATE_LANDING)
         self.flight_mode: str = "DISCONNECTED"
         self.battery_pct: float = 100.0
         self.alt_safety_status: str = "OK"     # OK, FLOOR_CUSHION, FLOOR_LIMIT, FLOOR_BREACH, etc.
@@ -601,10 +603,20 @@ class AutonomousTrackerNode:
 
         async def watch_in_air():
             try:
-                async for in_air in self.drone.telemetry.in_air():
-                    if not self.running:
-                        break
-                    self.vehicle_state.in_air = bool(in_air)
+                # Prefer landed_state if exposed by MAVSDK to separate TAKEOFF/LANDING from IN_AIR
+                if hasattr(self.drone.telemetry, "landed_state"):
+                    async for state in self.drone.telemetry.landed_state():
+                        if not self.running:
+                            break
+                        state_str = str(state).upper()
+                        self.vehicle_state.in_air = ("IN_AIR" in state_str)
+                        self.vehicle_state.is_taking_off = ("TAKING_OFF" in state_str or "TAKEOFF" in state_str)
+                        self.vehicle_state.is_landing = ("LANDING" in state_str)
+                else:
+                    async for in_air in self.drone.telemetry.in_air():
+                        if not self.running:
+                            break
+                        self.vehicle_state.in_air = bool(in_air)
             except Exception as e:
                 print(f"[WARN] In-air telemetry stream interrupted: {e}")
 
@@ -651,8 +663,16 @@ class AutonomousTrackerNode:
             Tuple of (safe_v_down: float, safety_status: str)
         """
         # -------------------------------------------------------------
-        # 0. GROUND / DISARMED & UNKNOWN ALTITUDE PROTECTIONS
+        # 0. TRANSITION, GROUND, & INVALID ALTITUDE PROTECTIONS
         # -------------------------------------------------------------
+        if getattr(self.vehicle_state, "is_taking_off", False):
+            # Autopilot is executing autonomous takeoff ramp; companion setpoints inhibited
+            return 0.0, "TAKEOFF_ACTIVE"
+
+        if getattr(self.vehicle_state, "is_landing", False):
+            # Autopilot or pilot is executing landing descent; companion setpoints inhibited
+            return 0.0, "LANDING_ACTIVE"
+
         if not getattr(self.vehicle_state, "in_air", False):
             # Vehicle is sitting on the ground (disarmed or pre-takeoff pad)
             # Never command descent into the ground, and do not trigger autonomous climb
@@ -675,6 +695,9 @@ class AutonomousTrackerNode:
         if current_alt <= min_alt:
             # Below or at floor: Descent is strictly forbidden
             if current_alt < (min_alt - 0.2):
+                if current_alt < 0.25:
+                    # Ground proximity boundary (< 25 cm): Do not execute high-rate climb thrust step on deck
+                    return min(0.0, v_down), "TOUCHDOWN_PROXIMITY"
                 # Critical breach: Force active emergency climb (negative down)
                 safe_v_down = -min(self.args.max_climb, 0.8)
                 return safe_v_down, "FLOOR_BREACH"

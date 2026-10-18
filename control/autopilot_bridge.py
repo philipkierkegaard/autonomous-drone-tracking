@@ -89,7 +89,10 @@ class ArduPilotBridge:
 
         self.is_connected: bool = False
         self.is_armed: bool = False
-        self.in_air: bool = False
+        self.in_air: bool = False             # Steady-state airborne only (MAV_LANDED_STATE_IN_AIR)
+        self.is_taking_off: bool = False       # Active takeoff transition (MAV_LANDED_STATE_TAKEOFF)
+        self.is_landing: bool = False          # Active landing transition (MAV_LANDED_STATE_LANDING)
+        self.landed_state: int = 0             # MAV_LANDED_STATE_UNDEFINED
         self.flight_mode: str = "DISCONNECTED"
         self.last_heartbeat_time: float = 0.0
 
@@ -370,7 +373,12 @@ class ArduPilotBridge:
             self.vehicle_state.flight_mode = self.flight_mode
             if not self.is_armed:
                 self.in_air = False
+                self.is_taking_off = False
+                self.is_landing = False
+                self.landed_state = 1  # MAV_LANDED_STATE_ON_GROUND
                 self.vehicle_state.in_air = False
+                self.vehicle_state.is_taking_off = False
+                self.vehicle_state.is_landing = False
 
     def _telemetry_worker(self):
         """High-frequency non-blocking background thread reading MAVLink telemetry."""
@@ -433,26 +441,29 @@ class ArduPilotBridge:
                     with self.lock:
                         self.altitude_rel_m = rel_alt
                         self.altitude_amsl_m = amsl_alt
-                        if self.is_armed and rel_alt > 0.5:
+                        # Fallback for autopilots without EXTENDED_SYS_STATE
+                        if self.landed_state == 0 and self.is_armed and rel_alt > 1.0:
                             self.in_air = True
 
                     if self.vehicle_state is not None:
                         self.vehicle_state.altitude_rel_m = rel_alt
                         self.vehicle_state.altitude_amsl_m = amsl_alt
-                        if self.is_armed and rel_alt > 0.5:
+                        if self.landed_state == 0 and self.is_armed and rel_alt > 1.0:
                             self.vehicle_state.in_air = True
 
                 elif msg_type == "EXTENDED_SYS_STATE":
                     landed_state = getattr(msg, "landed_state", None)
-                    is_airborne = landed_state in (
-                        getattr(mavutil.mavlink, "MAV_LANDED_STATE_IN_AIR", 2),
-                        getattr(mavutil.mavlink, "MAV_LANDED_STATE_TAKEOFF", 3),
-                        getattr(mavutil.mavlink, "MAV_LANDED_STATE_LANDING", 4),
-                    )
                     with self.lock:
-                        self.in_air = is_airborne
+                        self.landed_state = landed_state
+                        # Only MAV_LANDED_STATE_IN_AIR (2) represents steady-state airborne flight
+                        self.in_air = (landed_state == getattr(mavutil.mavlink, "MAV_LANDED_STATE_IN_AIR", 2))
+                        self.is_taking_off = (landed_state == getattr(mavutil.mavlink, "MAV_LANDED_STATE_TAKEOFF", 3))
+                        self.is_landing = (landed_state == getattr(mavutil.mavlink, "MAV_LANDED_STATE_LANDING", 4))
+
                     if self.vehicle_state is not None:
-                        self.vehicle_state.in_air = is_airborne
+                        self.vehicle_state.in_air = self.in_air
+                        self.vehicle_state.is_taking_off = self.is_taking_off
+                        self.vehicle_state.is_landing = self.is_landing
 
                 elif msg_type == "DISTANCE_SENSOR":
                     dist_m = float(msg.current_distance) / 100.0
@@ -750,6 +761,10 @@ class ArduPilotBridge:
 
         # Inhibit setpoint streaming if pilot has manually switched modes or autonomy not authorized
         if not self.is_guided_and_authorized:
+            return False
+
+        # Inhibit setpoint streaming during takeoff or landing transitions (autopilot owns flight dynamics)
+        if self.is_taking_off or self.is_landing:
             return False
 
         # Non-finite (NaN / Inf) sanity barrier: reject corrupted setpoint and command emergency zero-velocity hover
