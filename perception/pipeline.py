@@ -47,7 +47,12 @@ class KalmanBoxTracker:
         dt: float = 1.0 / 30.0,
         q_pos: float = 1.0,
         q_vel: float = 30.0,
-        r_pos: float = 2.0
+        r_pos: float = 2.0,
+        q_dim: float = 2.0,
+        q_scale_rate: float = 10.0,
+        r_dim: float = 4.0,
+        q_cov: Optional[np.ndarray] = None,
+        r_cov: Optional[np.ndarray] = None
     ):
         """
         Initialize tracker from initial bounding box [x1, y1, x2, y2].
@@ -67,16 +72,22 @@ class KalmanBoxTracker:
             self.H[i, i] = 1.0
 
         # Process noise covariance Q (tuned for agile quadcopter dynamics)
-        self.Q = np.eye(8, dtype=np.float32)
-        self.Q[:2, :2] *= q_pos   # Position noise
-        self.Q[2:4, 2:4] *= 2.0   # Dimension noise (scale change when approaching/retreating)
-        self.Q[4:6, 4:6] *= q_vel # Velocity noise (maneuver accelerations)
-        self.Q[6:8, 6:8] *= 10.0  # Scale rate noise
+        if q_cov is not None:
+            self.Q = np.array(q_cov, dtype=np.float32)
+        else:
+            self.Q = np.eye(8, dtype=np.float32)
+            self.Q[:2, :2] *= q_pos           # Position noise
+            self.Q[2:4, 2:4] *= q_dim         # Dimension noise (scale change when approaching/retreating)
+            self.Q[4:6, 4:6] *= q_vel         # Velocity noise (maneuver accelerations)
+            self.Q[6:8, 6:8] *= q_scale_rate  # Scale rate noise
 
         # Measurement noise covariance R (YOLO bounding box jitter)
-        self.R = np.eye(4, dtype=np.float32)
-        self.R[:2, :2] *= r_pos   # Center detection precision
-        self.R[2:4, 2:4] *= 4.0   # Width/height precision
+        if r_cov is not None:
+            self.R = np.array(r_cov, dtype=np.float32)
+        else:
+            self.R = np.eye(4, dtype=np.float32)
+            self.R[:2, :2] *= r_pos   # Center detection precision
+            self.R[2:4, 2:4] *= r_dim # Width/height precision
 
         # State covariance matrix P
         self.P = np.eye(8, dtype=np.float32) * 10.0
@@ -211,7 +222,13 @@ class DroneTracker:
         dt: float = 1.0 / 30.0,
         q_pos: float = 1.0,
         q_vel: float = 18.0,
-        r_pos: float = 2.0
+        r_pos: float = 2.0,
+        q_dim: float = 2.0,
+        q_scale_rate: float = 10.0,
+        r_dim: float = 4.0,
+        dist_gate_scale: float = 2.5,
+        q_cov: Optional[np.ndarray] = None,
+        r_cov: Optional[np.ndarray] = None
     ):
         self.max_lost_frames = max_lost_frames
         self.min_hits_to_confirm = min_hits_to_confirm
@@ -220,6 +237,12 @@ class DroneTracker:
         self.q_pos = q_pos
         self.q_vel = q_vel
         self.r_pos = r_pos
+        self.q_dim = q_dim
+        self.q_scale_rate = q_scale_rate
+        self.r_dim = r_dim
+        self.dist_gate_scale = dist_gate_scale
+        self.q_cov = q_cov
+        self.r_cov = r_cov
         self.trackers: List[KalmanBoxTracker] = []
         self.primary_track_id: Optional[int] = None
 
@@ -265,7 +288,7 @@ class DroneTracker:
                     pred_diag = np.linalg.norm(predicted_boxes[r, 2:] - predicted_boxes[r, :2])
                     dist = np.linalg.norm(pred_center - det_center)
 
-                    if dist < max(80.0, 2.5 * pred_diag):
+                    if dist < max(80.0, self.dist_gate_scale * pred_diag):
                         matched_indices.append((r, c))
                         if c in unmatched_detections:
                             unmatched_detections.remove(c)
@@ -280,7 +303,9 @@ class DroneTracker:
         for det_idx in unmatched_detections:
             new_tracker = KalmanBoxTracker(
                 detections[det_idx], confs[det_idx], dt=self.dt,
-                q_pos=self.q_pos, q_vel=self.q_vel, r_pos=self.r_pos
+                q_pos=self.q_pos, q_vel=self.q_vel, r_pos=self.r_pos,
+                q_dim=self.q_dim, q_scale_rate=self.q_scale_rate, r_dim=self.r_dim,
+                q_cov=self.q_cov, r_cov=self.r_cov
             )
             self.trackers.append(new_tracker)
 
@@ -366,6 +391,12 @@ class DroneTrackingPipeline:
         q_pos: float = 1.0,
         q_vel: float = 18.0,
         r_pos: float = 2.0,
+        q_dim: float = 2.0,
+        q_scale_rate: float = 10.0,
+        r_dim: float = 4.0,
+        dist_gate_scale: float = 2.5,
+        q_cov: Optional[np.ndarray] = None,
+        r_cov: Optional[np.ndarray] = None,
         enable_kalman: bool = True,
         imgsz: int = 768,
         device: Optional[str] = None,
@@ -431,9 +462,17 @@ class DroneTrackingPipeline:
         self.tracker = DroneTracker(
             max_lost_frames=max_lost_frames,
             min_hits_to_confirm=min_hits_to_confirm,
+            iou_match_threshold=0.75,
+            dt=1.0 / 30.0,
             q_pos=q_pos,
             q_vel=q_vel,
-            r_pos=r_pos
+            r_pos=r_pos,
+            q_dim=q_dim,
+            q_scale_rate=q_scale_rate,
+            r_dim=r_dim,
+            dist_gate_scale=dist_gate_scale,
+            q_cov=q_cov,
+            r_cov=r_cov
         )
         self.enable_ego_ablation = enable_ego_ablation
         if self.enable_ego_ablation:
