@@ -357,16 +357,191 @@ class PursuitDatasetGenerator:
 
         return PursuitDataset(name=suite_name, scenarios=scenarios, metadata=metadata)
 
+    def generate_validation_suite(
+        self,
+        base_seed: int = 10_000,
+        duration: float = 25.0
+    ) -> PursuitDataset:
+        """
+        Creates the standardized 30-scenario validation suite for checkpoint selection
+        during training (30% Cruising, 45% Evasive, 25% Hyper-Evasive).
+        """
+        suite_name = "validation_suite_30"
+        val_specs = [
+            # 9 Cruising (30%)
+            ("cruising", EncounterType.TAIL_CHASE),
+            ("cruising", EncounterType.TAIL_CHASE),
+            ("cruising", EncounterType.CROSSING_RIGHT),
+            ("cruising", EncounterType.CROSSING_LEFT),
+            ("cruising", EncounterType.HEAD_ON),
+            ("cruising", EncounterType.HEAD_ON),
+            ("cruising", EncounterType.OBLIQUE_AWAY),
+            ("cruising", EncounterType.OBLIQUE_INWARD),
+            ("cruising", EncounterType.TAIL_CHASE),
+            # 14 Evasive (45%)
+            ("evasive", EncounterType.TAIL_CHASE),
+            ("evasive", EncounterType.TAIL_CHASE),
+            ("evasive", EncounterType.TAIL_CHASE),
+            ("evasive", EncounterType.CROSSING_RIGHT),
+            ("evasive", EncounterType.CROSSING_RIGHT),
+            ("evasive", EncounterType.CROSSING_LEFT),
+            ("evasive", EncounterType.CROSSING_LEFT),
+            ("evasive", EncounterType.HEAD_ON),
+            ("evasive", EncounterType.HEAD_ON),
+            ("evasive", EncounterType.OBLIQUE_AWAY),
+            ("evasive", EncounterType.OBLIQUE_AWAY),
+            ("evasive", EncounterType.OBLIQUE_INWARD),
+            ("evasive", EncounterType.OBLIQUE_INWARD),
+            ("evasive", EncounterType.OMNIDIRECTIONAL),
+            # 7 Hyper-Evasive (25%)
+            ("hyper_evasive", EncounterType.TAIL_CHASE),
+            ("hyper_evasive", EncounterType.CROSSING_RIGHT),
+            ("hyper_evasive", EncounterType.CROSSING_LEFT),
+            ("hyper_evasive", EncounterType.HEAD_ON),
+            ("hyper_evasive", EncounterType.OBLIQUE_AWAY),
+            ("hyper_evasive", EncounterType.OBLIQUE_INWARD),
+            ("hyper_evasive", EncounterType.OMNIDIRECTIONAL),
+        ]
+
+        scenarios = []
+        for idx, (prof, enc) in enumerate(val_specs):
+            seed = base_seed + idx
+            scen_id = f"val_{idx+1:02d}_{prof}_{enc.value}_s{seed}"
+            scenario = self.generate_scenario(
+                scenario_id=scen_id,
+                profile=prof,
+                encounter_type=enc,
+                seed=seed,
+                duration=duration
+            )
+            scenarios.append(scenario)
+
+        metadata = {
+            "suite_name": suite_name,
+            "type": "validation_fixed",
+            "num_scenarios": len(scenarios),
+            "base_seed": base_seed,
+            "profile_split": {"cruising": 9, "evasive": 14, "hyper_evasive": 7},
+            "duration_s": duration
+        }
+        return PursuitDataset(name=suite_name, scenarios=scenarios, metadata=metadata)
+
+    def generate_heldout_suite(
+        self,
+        base_seed: int = 20_000,
+        duration: float = 25.0
+    ) -> PursuitDataset:
+        """
+        Creates the strictly isolated 50-scenario held-out test suite reserved for
+        post-training benchmark tables (15 Cruising, 23 Evasive, 12 Hyper-Evasive).
+        """
+        suite_name = "heldout_test_suite_50"
+        test_specs = [
+            # 15 Cruising (30%)
+            ("cruising", EncounterType.TAIL_CHASE),
+            ("cruising", EncounterType.TAIL_CHASE),
+            ("cruising", EncounterType.TAIL_CHASE),
+            ("cruising", EncounterType.CROSSING_RIGHT),
+            ("cruising", EncounterType.CROSSING_RIGHT),
+            ("cruising", EncounterType.CROSSING_LEFT),
+            ("cruising", EncounterType.CROSSING_LEFT),
+            ("cruising", EncounterType.HEAD_ON),
+            ("cruising", EncounterType.HEAD_ON),
+            ("cruising", EncounterType.HEAD_ON),
+            ("cruising", EncounterType.OBLIQUE_AWAY),
+            ("cruising", EncounterType.OBLIQUE_AWAY),
+            ("cruising", EncounterType.OBLIQUE_INWARD),
+            ("cruising", EncounterType.OBLIQUE_INWARD),
+            ("cruising", EncounterType.OMNIDIRECTIONAL),
+            # 23 Evasive (46%)
+            ("evasive", EncounterType.TAIL_CHASE),
+            ("evasive", EncounterType.TAIL_CHASE),
+            ("evasive", EncounterType.TAIL_CHASE),
+            ("evasive", EncounterType.TAIL_CHASE),
+            ("evasive", EncounterType.CROSSING_RIGHT),
+            ("evasive", EncounterType.CROSSING_RIGHT),
+            ("evasive", EncounterType.CROSSING_RIGHT),
+            ("evasive", EncounterType.CROSSING_LEFT),
+            ("evasive", EncounterType.CROSSING_LEFT),
+            ("evasive", EncounterType.CROSSING_LEFT),
+            ("evasive", EncounterType.HEAD_ON),
+            ("evasive", EncounterType.HEAD_ON),
+            ("evasive", EncounterType.HEAD_ON),
+            ("evasive", EncounterType.OBLIQUE_AWAY),
+            ("evasive", EncounterType.OBLIQUE_AWAY),
+            ("evasive", EncounterType.OBLIQUE_AWAY),
+            ("evasive", EncounterType.OBLIQUE_INWARD),
+            ("evasive", EncounterType.OBLIQUE_INWARD),
+            ("evasive", EncounterType.OBLIQUE_INWARD),
+            ("evasive", EncounterType.OMNIDIRECTIONAL),
+            ("evasive", EncounterType.OMNIDIRECTIONAL),
+            ("evasive", EncounterType.OMNIDIRECTIONAL),
+            ("evasive", EncounterType.TAIL_CHASE),
+            # 12 Hyper-Evasive (24%)
+            ("hyper_evasive", EncounterType.TAIL_CHASE),
+            ("hyper_evasive", EncounterType.TAIL_CHASE),
+            ("hyper_evasive", EncounterType.CROSSING_RIGHT),
+            ("hyper_evasive", EncounterType.CROSSING_RIGHT),
+            ("hyper_evasive", EncounterType.CROSSING_LEFT),
+            ("hyper_evasive", EncounterType.CROSSING_LEFT),
+            ("hyper_evasive", EncounterType.HEAD_ON),
+            ("hyper_evasive", EncounterType.HEAD_ON),
+            ("hyper_evasive", EncounterType.OBLIQUE_AWAY),
+            ("hyper_evasive", EncounterType.OBLIQUE_INWARD),
+            ("hyper_evasive", EncounterType.OMNIDIRECTIONAL),
+            ("hyper_evasive", EncounterType.OMNIDIRECTIONAL),
+        ]
+
+        scenarios = []
+        for idx, (prof, enc) in enumerate(test_specs):
+            seed = base_seed + idx
+            scen_id = f"test_{idx+1:02d}_{prof}_{enc.value}_s{seed}"
+            scenario = self.generate_scenario(
+                scenario_id=scen_id,
+                profile=prof,
+                encounter_type=enc,
+                seed=seed,
+                duration=duration
+            )
+            scenarios.append(scenario)
+
+        metadata = {
+            "suite_name": suite_name,
+            "type": "heldout_test_isolated",
+            "num_scenarios": len(scenarios),
+            "base_seed": base_seed,
+            "profile_split": {"cruising": 15, "evasive": 23, "hyper_evasive": 12},
+            "duration_s": duration
+        }
+        return PursuitDataset(name=suite_name, scenarios=scenarios, metadata=metadata)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate benchmark encounter dataset for drone pursuit.")
     parser.add_argument("--name", type=str, default="benchmark_suite_v1", help="Dataset name")
     parser.add_argument("--seeds", type=int, default=10, help="Number of seeds per condition (default: 10)")
     parser.add_argument("--duration", type=float, default=25.0, help="Flight duration (default: 25.0s)")
+    parser.add_argument("--gen-suites", action="store_true", help="Generate the official 30-scenario validation and 50-scenario heldout suites")
     parser.add_argument("--out", type=str, default=None, help="Output JSON path")
     args = parser.parse_args()
 
     generator = PursuitDatasetGenerator()
+
+    if args.gen_suites:
+        datasets_dir = PROJECT_ROOT / "outputs" / "benchmarks" / "datasets"
+        datasets_dir.mkdir(parents=True, exist_ok=True)
+
+        val_ds = generator.generate_validation_suite(base_seed=10_000, duration=args.duration)
+        val_path = datasets_dir / "validation_suite_30.json"
+        val_ds.save_json(val_path)
+
+        test_ds = generator.generate_heldout_suite(base_seed=20_000, duration=args.duration)
+        test_path = datasets_dir / "heldout_test_suite_50.json"
+        test_ds.save_json(test_path)
+
+        print(f"\n[SUITES] Generated 30-scenario validation suite ({val_path}) and 50-scenario heldout suite ({test_path}) successfully!")
+        sys.exit(0)
+
     dataset = generator.generate_balanced_benchmark_suite(
         suite_name=args.name,
         seeds_per_condition=args.seeds,

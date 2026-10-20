@@ -108,14 +108,31 @@ class KalmanBoxTracker:
         self.history = deque(maxlen=40)  # Stores trajectory history of (cx, cy)
         self.history.append((float(cx), float(cy)))
 
-    def predict(self, ego_shift: Optional[Tuple[float, float, float, float]] = None) -> np.ndarray:
+    def predict(
+        self,
+        ego_shift: Optional[Tuple[float, float, float, float]] = None,
+        dt_step: Optional[float] = None
+    ) -> np.ndarray:
         """
         Advance state forward by dt with optional ego-motion compensation.
         ego_shift: (delta_cx, delta_cy, delta_w, delta_h) shift induced by drone movement
+        dt_step: Optional actual elapsed time since last prediction (seconds)
         Returns predicted [x1, y1, x2, y2].
         """
+        if dt_step is not None and dt_step > 0.0:
+            F = np.eye(8, dtype=np.float32)
+            for i in range(4):
+                F[i, i + 4] = float(dt_step)
+            scale_ratio = float(dt_step / max(1e-4, self.dt))
+            Q = self.Q.copy()
+            Q[4:6, 4:6] *= scale_ratio
+            Q[6:8, 6:8] *= scale_ratio
+        else:
+            F = self.F
+            Q = self.Q
+
         # x = F * x
-        self.x = np.dot(self.F, self.x)
+        self.x = np.dot(F, self.x)
 
         # Apply deterministic ego-motion control shift
         if ego_shift is not None:
@@ -126,7 +143,7 @@ class KalmanBoxTracker:
             self.x[3, 0] = max(1.0, self.x[3, 0] + dh)
 
         # P = F * P * F^T + Q
-        self.P = np.dot(np.dot(self.F, self.P), self.F.T) + self.Q
+        self.P = np.dot(np.dot(F, self.P), F.T) + Q
 
         self.age += 1
         self.time_since_update += 1
@@ -250,19 +267,21 @@ class DroneTracker:
         self,
         detections: np.ndarray,
         confs: np.ndarray,
-        ego_shifts: Optional[Dict[int, Tuple[float, float, float, float]]] = None
+        ego_shifts: Optional[Dict[int, Tuple[float, float, float, float]]] = None,
+        dt_step: Optional[float] = None
     ) -> List[Dict[str, Any]]:
         """
         Updates the tracker with new detections in the current frame.
         detections: array of [x1, y1, x2, y2]
         confs: array of detection confidences
         ego_shifts: optional dict of {track_id: (dcx, dcy, dw, dh)} for ego-motion compensation
+        dt_step: optional elapsed time since last prediction (seconds)
         """
         # 1. Predict new positions for all active trackers (incorporating ego-motion)
         predicted_boxes = []
         for trk in self.trackers:
             shift = ego_shifts.get(trk.id, None) if ego_shifts is not None else None
-            predicted_boxes.append(trk.predict(ego_shift=shift))
+            predicted_boxes.append(trk.predict(ego_shift=shift, dt_step=dt_step))
         predicted_boxes = np.array(predicted_boxes) if len(predicted_boxes) > 0 else np.empty((0, 4))
 
         # 2. Hungarian matching between predictions and detections
@@ -300,9 +319,10 @@ class DroneTracker:
             self.trackers[trk_idx].update(detections[det_idx], confs[det_idx])
 
         # 4. Create new tentative trackers for unmatched detections
+        step_dt = dt_step if dt_step is not None and dt_step > 0.0 else self.dt
         for det_idx in unmatched_detections:
             new_tracker = KalmanBoxTracker(
-                detections[det_idx], confs[det_idx], dt=self.dt,
+                detections[det_idx], confs[det_idx], dt=step_dt,
                 q_pos=self.q_pos, q_vel=self.q_vel, r_pos=self.r_pos,
                 q_dim=self.q_dim, q_scale_rate=self.q_scale_rate, r_dim=self.r_dim,
                 q_cov=self.q_cov, r_cov=self.r_cov
@@ -516,6 +536,13 @@ class DroneTrackingPipeline:
         6. Renders aeronautical HUD overlay in True Zoom POV or Wide FOV
         """
         t_start = time.perf_counter()
+        if self.prev_time is not None:
+            raw_dt = float(t_start - self.prev_time)
+            frame_dt = float(np.clip(raw_dt, 0.005, 0.200))
+        else:
+            frame_dt = float(self.tracker.dt)
+        self.prev_time = t_start
+
         h, w = frame.shape[:2]
         img_center = (w / 2.0, h / 2.0)
 
@@ -708,7 +735,7 @@ class DroneTrackingPipeline:
         # 3. Update 8D Kalman Filter in Global Sensor Coordinates (or Pure Raw Mode)
         # ----------------------------------------------------------------------
         if self.enable_kalman:
-            active_tracks = self.tracker.update(detections, confs, ego_shifts=ego_shifts)
+            active_tracks = self.tracker.update(detections, confs, ego_shifts=ego_shifts, dt_step=frame_dt)
             primary_track = None
             for trk in active_tracks:
                 if trk["id"] == self.tracker.primary_track_id:
@@ -720,14 +747,14 @@ class DroneTrackingPipeline:
             full_primary = None
             if getattr(self, "enable_ego_ablation", False):
                 if getattr(self, "uncomp_tracker", None) is not None:
-                    uncomp_active_tracks = self.uncomp_tracker.update(detections, confs, ego_shifts=None)
+                    uncomp_active_tracks = self.uncomp_tracker.update(detections, confs, ego_shifts=None, dt_step=frame_dt)
                     for trk in uncomp_active_tracks:
                         if trk["id"] == self.uncomp_tracker.primary_track_id:
                             uncomp_primary = trk
                             break
 
                 if getattr(self, "full_tracker", None) is not None:
-                    full_active_tracks = self.full_tracker.update(detections, confs, ego_shifts=ego_shifts_full)
+                    full_active_tracks = self.full_tracker.update(detections, confs, ego_shifts=ego_shifts_full, dt_step=frame_dt)
                     for trk in full_active_tracks:
                         if trk["id"] == self.full_tracker.primary_track_id:
                             full_primary = trk

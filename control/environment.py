@@ -99,6 +99,8 @@ class DronePursuitEnv(gym.Env):
         self.empirical_profile_path = empirical_profile_path
         self.time_since_camera = 0.0
 
+        self.coasting_step_limit = int(round(0.50 / self.dt))  # Deployment baseline: 0.50s (25 steps at 50 Hz)
+
         if self.use_empirical_perception:
             self.synthetic_sensor = SyntheticYOLOSensor(
                 profile_path=self.empirical_profile_path,
@@ -108,7 +110,7 @@ class DronePursuitEnv(gym.Env):
             )
             self.tracker = DroneTracker(
                 dt=self.dt,
-                max_lost_frames=int(round(self.lost_target_timeout / self.dt)),
+                max_lost_frames=self.coasting_step_limit,
                 min_hits_to_confirm=2
             )
         else:
@@ -415,7 +417,54 @@ class DronePursuitEnv(gym.Env):
     ) -> Tuple[np.ndarray, Dict[str, Any]]:
         super().reset(seed=seed)
 
-        cfg = self._sample_scenario_config()
+        if options and "scenario" in options:
+            scen = options["scenario"]
+            if hasattr(scen, "profile"):
+                c_yaw = float(scen.initial_chaser_yaw)
+                c_vel = getattr(scen, "initial_chaser_vel", None)
+                if c_vel is None:
+                    c, s = np.cos(c_yaw), np.sin(c_yaw)
+                    c_vel = np.array([c * 6.0, s * 6.0, 0.0], dtype=np.float64)
+                else:
+                    c_vel = np.array(c_vel, dtype=np.float64)
+
+                cfg = {
+                    "mode": "scenario",
+                    "profile": scen.profile,
+                    "chaser_pos": np.array(scen.initial_chaser_pos, dtype=np.float64),
+                    "chaser_yaw": c_yaw,
+                    "chaser_vel": c_vel,
+                    "target_pos": np.array(scen.initial_target_pos, dtype=np.float64),
+                    "target_heading": float(scen.initial_target_heading_rad),
+                    "initial_time_lost": 0.0,
+                }
+                seed_val = int(scen.seed)
+            elif isinstance(scen, dict):
+                c_yaw = float(scen.get("chaser_yaw", 0.0))
+                c_vel = scen.get("chaser_vel", None)
+                if c_vel is None:
+                    c, s = np.cos(c_yaw), np.sin(c_yaw)
+                    c_vel = np.array([c * 6.0, s * 6.0, 0.0], dtype=np.float64)
+                else:
+                    c_vel = np.array(c_vel, dtype=np.float64)
+
+                cfg = {
+                    "mode": scen.get("mode", "scenario"),
+                    "profile": scen.get("profile", "evasive"),
+                    "chaser_pos": np.array(scen.get("chaser_pos", [0.0, 0.0, -2.5]), dtype=np.float64),
+                    "chaser_yaw": c_yaw,
+                    "chaser_vel": c_vel,
+                    "target_pos": np.array(scen.get("target_pos", [12.0, 0.0, -2.5]), dtype=np.float64),
+                    "target_heading": float(scen.get("target_heading", 0.0)),
+                    "initial_time_lost": float(scen.get("initial_time_lost", 0.0)),
+                }
+                seed_val = int(scen.get("seed", int(self.np_random.integers(0, 1_000_000))))
+            else:
+                cfg = self._sample_scenario_config()
+                seed_val = int(self.np_random.integers(0, 1_000_000))
+        else:
+            cfg = self._sample_scenario_config()
+            seed_val = int(self.np_random.integers(0, 1_000_000))
 
         # Reset simulator
         self.sim.reset(
@@ -425,7 +474,6 @@ class DronePursuitEnv(gym.Env):
         self.sim.vel = cfg["chaser_vel"].copy()
 
         # Initialize target B-spline oracle
-        seed_val = int(self.np_random.integers(0, 1_000_000))
         self.target_oracle = StochasticTargetTrajectory(
             duration=self.max_duration + 5.0,
             profile=cfg["profile"],
@@ -501,7 +549,7 @@ class DronePursuitEnv(gym.Env):
             self.synthetic_sensor.reset(seed=sensor_seed)
             self.tracker = DroneTracker(
                 dt=self.dt,
-                max_lost_frames=int(round(self.lost_target_timeout / self.dt)),
+                max_lost_frames=self.coasting_step_limit,
                 min_hits_to_confirm=2
             )
             # Initial camera measurement at t=0 (30 Hz camera frame)
@@ -728,12 +776,12 @@ class DronePursuitEnv(gym.Env):
 
                 det_arr = np.array(detections, dtype=np.float32) if detections else np.empty((0, 4), dtype=np.float32)
                 conf_arr = np.array(confs, dtype=np.float32) if confs else np.empty((0,), dtype=np.float32)
-                self.tracker.update(det_arr, conf_arr)
+                self.tracker.update(det_arr, conf_arr, dt_step=self.dt)
             else:
                 # Between camera frames (50 Hz control tick between 30 Hz camera updates):
                 # Kalman filter performs prediction/dead reckoning without receiving new measurements
                 for trk in self.tracker.trackers:
-                    trk.predict()
+                    trk.predict(dt_step=self.dt)
 
             # Retrieve state estimate from primary tracker
             primary = None
@@ -748,8 +796,18 @@ class DronePursuitEnv(gym.Env):
                 bh_est = max(1.0, bbox[3] - bbox[1])
                 ex_est = float((cx - self.img_w / 2.0) / (self.img_w / 2.0))
                 ey_est = float((cy - self.img_h / 2.0) / (self.img_h / 2.0))
-                is_fresh = (primary.time_since_update == 0)
-                force_flag = 1.0 if is_fresh else 0.0
+
+                # 3-State Visibility Flag:
+                # 1.0: Fresh camera measurement associated and updated in current frame
+                # 0.5: Valid Kalman dead-reckoning prediction during coasting (within 0.50s baseline)
+                # 0.0: Track expired or unconfirmed
+                if primary.time_since_update == 0:
+                    force_flag = 1.0
+                elif primary.time_since_update <= self.coasting_step_limit:
+                    force_flag = 0.5
+                else:
+                    force_flag = 0.0
+
                 obs = self._get_observation(ex_est, ey_est, True, bw_est, bh_est, force_flag=force_flag)
             else:
                 # Target unconfirmed or lost
@@ -758,11 +816,17 @@ class DronePursuitEnv(gym.Env):
                     self.last_seen_w * self.img_w, self.last_seen_h * self.img_h, force_flag=0.0
                 )
         else:
+            primary = None
             obs = self._get_observation(raw_ex, raw_ey, raw_in_view, raw_bw, raw_bh)
 
-        # Engagement Basket Condition: 5.0m <= dist <= 7.0m AND visible in camera FOV
-        # Matches benchmark evaluation standard exactly!
-        in_basket = (self.standoff_min <= dist <= self.standoff_max) and raw_in_view
+        # Engagement Basket Condition: 5.0m <= dist <= 7.0m AND visible in camera FOV AND active tracker lock
+        has_tracker_lock = (
+            primary is not None
+            and primary.hits >= self.tracker.min_hits_to_confirm
+            and primary.time_since_update <= self.coasting_step_limit
+        ) if self.use_empirical_perception else raw_in_view
+
+        in_basket = (self.standoff_min <= dist <= self.standoff_max) and raw_in_view and has_tracker_lock
         r_milestone = 0.0
         r_sustain = 0.0
 

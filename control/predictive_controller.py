@@ -226,6 +226,8 @@ class RecurrentVisualServoController:
         self.filtered_d_ey = 0.0
         self.filtered_d_w = 0.0
         self.was_in_view_prev = False
+        self.prev_frame_idx = None
+        self.last_frame_time = None
 
     def compute_cmd(
         self,
@@ -246,7 +248,7 @@ class RecurrentVisualServoController:
                 - 'error_y': Normalized [-1, 1] vertical error
                 - 'bbox_w': Bounding box width (pixels)
                 - 'bbox_h': Bounding box height (pixels)
-                - 'status': 'TRACKING', 'LOCKED', or 'SEARCHING'
+                - 'status': 'TRACKING', 'LOCKED', 'COASTING', or 'SEARCHING'
             drone_pitch: Instantaneous pitch angle (+ is nose down)
             drone_roll: Instantaneous roll angle (+ is right wing down)
             dt: Loop timestep (default: 0.02s = 50 Hz)
@@ -258,15 +260,23 @@ class RecurrentVisualServoController:
             np.ndarray of shape (4,): [v_forward (m/s), v_right (m/s), v_down (m/s), yaw_rate (deg/s)]
         """
         status = telemetry.get("status", "SEARCHING")
-        if "in_view" in telemetry:
-            is_visible = bool(telemetry["in_view"])
+        if status in ("TRACKING", "LOCKED"):
+            flag = 1.0
+            is_visible = True
+        elif status == "COASTING":
+            flag = 0.5
+            is_visible = True
         else:
-            is_visible = status in ("TRACKING", "LOCKED")
+            flag = 0.0
+            is_visible = False
 
         raw_ex = telemetry.get("error_x", 0.0)
         raw_ey = telemetry.get("error_y", 0.0)
         bbox_w = telemetry.get("bbox_w", telemetry.get("target_size", 35.0))
         bbox_h = telemetry.get("bbox_h", 20.0)
+
+        current_frame_idx = telemetry.get("frame_idx", None)
+        is_fresh_frame = (current_frame_idx is None or current_frame_idx != self.prev_frame_idx)
 
         if is_visible:
             # SO(3) Attitude Decoupling: Un-roll & un-pitch camera frame errors to horizon frame
@@ -283,37 +293,39 @@ class RecurrentVisualServoController:
             ey = float(np.clip(h_ey, -1.0, 1.0))
             w_norm = float(np.clip(bbox_w / self.img_w, 0.01, 1.0))
             h_norm = float(np.clip(bbox_h / self.img_h, 0.01, 1.0))
-            flag = 1.0
             self.last_seen_ex = ex
             self.last_seen_ey = ey
             self.last_seen_w = w_norm
             self.last_seen_h = h_norm
 
             if self.obs_dim >= 13:
-                if self.was_in_view_prev:
-                    raw_d_ex = (ex - self.prev_ex) / dt
-                    raw_d_ey = (ey - self.prev_ey) / dt
-                    raw_d_w  = (w_norm - self.prev_w) / dt
-                else:
-                    raw_d_ex = 0.0
-                    raw_d_ey = 0.0
-                    raw_d_w  = 0.0
+                if is_fresh_frame:
+                    if self.was_in_view_prev:
+                        dt_cam = max(0.005, dt)
+                        raw_d_ex = (ex - self.prev_ex) / dt_cam
+                        raw_d_ey = (ey - self.prev_ey) / dt_cam
+                        raw_d_w  = (w_norm - self.prev_w) / dt_cam
+                    else:
+                        raw_d_ex = 0.0
+                        raw_d_ey = 0.0
+                        raw_d_w  = 0.0
 
-                alpha_rate = 0.4
-                self.filtered_d_ex = alpha_rate * raw_d_ex + (1.0 - alpha_rate) * self.filtered_d_ex
-                self.filtered_d_ey = alpha_rate * raw_d_ey + (1.0 - alpha_rate) * self.filtered_d_ey
-                self.filtered_d_w  = alpha_rate * raw_d_w  + (1.0 - alpha_rate) * self.filtered_d_w
+                    alpha_rate = 0.4
+                    self.filtered_d_ex = alpha_rate * raw_d_ex + (1.0 - alpha_rate) * self.filtered_d_ex
+                    self.filtered_d_ey = alpha_rate * raw_d_ey + (1.0 - alpha_rate) * self.filtered_d_ey
+                    self.filtered_d_w  = alpha_rate * raw_d_w  + (1.0 - alpha_rate) * self.filtered_d_w
 
-                self.prev_ex = ex
-                self.prev_ey = ey
-                self.prev_w = w_norm
+                    self.prev_ex = ex
+                    self.prev_ey = ey
+                    self.prev_w = w_norm
+                    self.prev_frame_idx = current_frame_idx
+
                 self.was_in_view_prev = True
         else:
             ex = self.last_seen_ex
             ey = self.last_seen_ey
             w_norm = self.last_seen_w
             h_norm = self.last_seen_h
-            flag = 0.0
 
             if self.obs_dim >= 13:
                 self.filtered_d_ex *= 0.5
@@ -321,9 +333,15 @@ class RecurrentVisualServoController:
                 self.filtered_d_w  *= 0.5
                 self.was_in_view_prev = False
 
-        # Construct observation vector
-        v_body = vehicle_vel if vehicle_vel is not None else np.zeros(3)
-        alt_norm = float(np.clip(current_alt_m / 5.0, 0.0, 2.0))
+        # Construct observation vector with robust fallback for missing/stale telemetry
+        if vehicle_vel is not None and np.all(np.isfinite(vehicle_vel)):
+            v_body = np.asarray(vehicle_vel, dtype=np.float32)
+        else:
+            v_body = np.array([self.prev_cmd[0], self.prev_cmd[1], self.prev_cmd[2]], dtype=np.float32)
+
+        yaw_rate_val = float(vehicle_yaw_rate) if (vehicle_yaw_rate is not None and np.isfinite(vehicle_yaw_rate)) else float(np.deg2rad(self.prev_cmd[3]))
+        alt_m = float(current_alt_m) if (current_alt_m is not None and np.isfinite(current_alt_m)) else 2.5
+        alt_norm = float(np.clip(alt_m / 5.0, 0.0, 2.0))
         scale_err = float(np.clip((self.w_nominal - w_norm) / self.w_nominal, -1.0, 1.0))
 
         base_obs = [
@@ -335,7 +353,7 @@ class RecurrentVisualServoController:
             float(np.clip(v_body[0] / self.max_vel_xy, -1.0, 1.0)),
             float(np.clip(v_body[1] / 6.0, -1.0, 1.0)),
             float(np.clip(v_body[2] / self.max_vel_up, -1.0, 1.0)),
-            float(np.clip(vehicle_yaw_rate / np.deg2rad(self.max_yaw_rate), -1.0, 1.0)),
+            float(np.clip(yaw_rate_val / np.deg2rad(self.max_yaw_rate), -1.0, 1.0)),
             alt_norm,
         ]
 

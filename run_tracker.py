@@ -149,18 +149,47 @@ class VehicleState:
         self.flight_mode: str = "DISCONNECTED"
         self.battery_pct: float = 100.0
         self.alt_safety_status: str = "OK"     # OK, FLOOR_CUSHION, FLOOR_LIMIT, FLOOR_BREACH, etc.
+        self.yaw_rate_rad_s: float = 0.0
+        self.velocity_updated_time: float = 0.0
+        self.attitude_updated_time: float = 0.0
+        self._prev_att_t: Optional[float] = None
+        self._prev_yaw_deg: Optional[float] = None
 
         # Attitude ring buffer for camera exposure & hardware ISP latency compensation
         self.attitude_history = deque(maxlen=300)
         self.lock = threading.Lock()
 
     def record_attitude(self, t: float, pitch_rad: float, roll_rad: float, yaw_deg: float):
-        """Records timestamped attitude sample into thread-safe ring buffer."""
+        """Records timestamped attitude sample into thread-safe ring buffer and calculates yaw rate."""
         with self.lock:
+            if self._prev_yaw_deg is not None and self._prev_att_t is not None:
+                dt_att = max(1e-4, t - self._prev_att_t)
+                dyaw = (yaw_deg - self._prev_yaw_deg + 180.0) % 360.0 - 180.0
+                self.yaw_rate_rad_s = float(np.deg2rad(dyaw) / dt_att)
+            else:
+                self.yaw_rate_rad_s = 0.0
+            self._prev_yaw_deg = yaw_deg
+            self._prev_att_t = t
+            self.attitude_updated_time = t
             self.pitch_rad = pitch_rad
             self.roll_rad = roll_rad
             self.yaw_deg = yaw_deg
             self.attitude_history.append((t, pitch_rad, roll_rad, yaw_deg))
+
+    @property
+    def velocity_body(self) -> Optional[np.ndarray]:
+        """Returns [v_forward, v_right, v_down] in body frame (m/s) with staleness guard (< 200ms)."""
+        with self.lock:
+            now = time.perf_counter()
+            vel_age = now - self.velocity_updated_time
+            if vel_age > 0.20 or not self.has_gps_vel:
+                return None
+            yaw_rad = np.deg2rad(self.yaw_deg)
+            c, s = np.cos(yaw_rad), np.sin(yaw_rad)
+            v_fwd = c * self.vx_m_s + s * self.vy_m_s
+            v_right = -s * self.vx_m_s + c * self.vy_m_s
+            v_down = self.vz_m_s
+            return np.array([v_fwd, v_right, v_down], dtype=np.float32)
 
     def get_interpolated_attitude(self, target_t: float) -> Tuple[float, float, float]:
         """
@@ -595,6 +624,7 @@ class AutonomousTrackerNode:
                     self.vehicle_state.vx_m_s = vn
                     self.vehicle_state.vy_m_s = ve
                     self.vehicle_state.vz_m_s = vd
+                    self.vehicle_state.velocity_updated_time = time.perf_counter()
                     # Active horizontal aiding is verified if non-zero velocity/variance is reported
                     if abs(vn) > 1e-4 or abs(ve) > 1e-4:
                         self.vehicle_state.has_gps_vel = True
@@ -1210,39 +1240,53 @@ class AutonomousTrackerNode:
                 prev_cmd_3d = np.zeros_like(prev_cmd_3d)
             self._prev_autonomy_authorized = is_auth
 
-            # 4. Compute Velocity Command via Kinematic Visual Servoing (3D or 4D)
+            # 4. Compute Velocity Command via Kinematic Visual Servoing (3D or 4D) or Recurrent PPO
+            vel_body = self.vehicle_state.velocity_body
+            yaw_rate = self.vehicle_state.yaw_rate_rad_s
+            curr_alt = self.get_current_altitude()
+
             raw_cmd = self.controller.compute_cmd(
                 telemetry=telemetry,
                 drone_pitch=current_pitch,
                 drone_roll=current_roll,
-                dt=dt
+                dt=dt,
+                vehicle_vel=vel_body,
+                vehicle_yaw_rate=yaw_rate,
+                current_alt_m=curr_alt if curr_alt is not None else 2.5
             )
             if not np.all(np.isfinite(raw_cmd)):
                 raw_cmd = np.zeros_like(raw_cmd)
 
             # 5. Slew-Rate Limiting (Acceleration Limiting for smooth control signals)
-            if len(raw_cmd) == 4:
-                max_accel = np.array([
-                    self.args.max_accel_xy,
-                    self.args.max_accel_xy,
-                    self.args.max_accel_z,
-                    self.args.max_accel_yaw
-                ], dtype=np.float64)
+            # When running Recurrent PPO, predictive_controller.py already applies internal slew limiting.
+            # Avoid compound double-choking while retaining outer limiting for classical PID.
+            is_recurrent = getattr(self.args, "controller", "pid") == "recurrent" or hasattr(self.controller, "hidden_state")
+            if is_recurrent:
+                cmd_safe = raw_cmd
+                prev_cmd_3d = cmd_safe.copy()
             else:
-                max_accel = np.array([
-                    self.args.max_accel_xy,
-                    self.args.max_accel_z,
-                    self.args.max_accel_yaw
-                ], dtype=np.float64)
+                if len(raw_cmd) == 4:
+                    max_accel = np.array([
+                        self.args.max_accel_xy,
+                        self.args.max_accel_xy,
+                        self.args.max_accel_z,
+                        self.args.max_accel_yaw
+                    ], dtype=np.float64)
+                else:
+                    max_accel = np.array([
+                        self.args.max_accel_xy,
+                        self.args.max_accel_z,
+                        self.args.max_accel_yaw
+                    ], dtype=np.float64)
 
-            if len(prev_cmd_3d) != len(raw_cmd):
-                prev_cmd_3d = np.zeros_like(raw_cmd)
+                if len(prev_cmd_3d) != len(raw_cmd):
+                    prev_cmd_3d = np.zeros_like(raw_cmd)
 
-            max_step = max_accel * dt
-            cmd_safe = np.clip(raw_cmd, prev_cmd_3d - max_step, prev_cmd_3d + max_step)
-            if not np.all(np.isfinite(cmd_safe)):
-                cmd_safe = np.zeros_like(cmd_safe)
-            prev_cmd_3d = cmd_safe.copy()
+                max_step = max_accel * dt
+                cmd_safe = np.clip(raw_cmd, prev_cmd_3d - max_step, prev_cmd_3d + max_step)
+                if not np.all(np.isfinite(cmd_safe)):
+                    cmd_safe = np.zeros_like(cmd_safe)
+                prev_cmd_3d = cmd_safe.copy()
 
             # 6. Convert to standard 4-DOF Body Frame (forward, right, down, yawspeed)
             v_fwd, v_right, v_down, yawspeed = self.controller.to_velocity_body(cmd_safe)

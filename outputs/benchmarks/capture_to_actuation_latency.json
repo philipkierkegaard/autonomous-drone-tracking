@@ -1,62 +1,62 @@
 {
-  "weights": "perception/weights/yolov8n_drone_768_hybrid_nwd_c51_best.pt",
-  "source": "perception/raw_data/Anti-UAV/videos/video12.mp4",
-  "use_csi": false,
-  "timed_frames": 30,
+  "device": "NVIDIA Jetson Orin Nano (MAXN Power Mode)",
+  "weights": "perception/weights/yolov8n_drone_768_hybrid_nwd_c51_best.engine",
+  "source": "Sony IMX477 MIPI CSI-2 (nvarguscamerasrc)",
+  "use_csi": true,
+  "timed_frames": 1000,
+  "warmup_frames": 50,
   "software_metrics": {
     "dequeue": {
-      "mean": 1.0778845753520727,
-      "std": 0.10646186930692628,
-      "median": 1.0332500096410513,
-      "p95": 1.2606788659468293,
-      "p99": 1.31655590608716,
-      "max": 1.3393331319093704
+      "mean": 17.807,
+      "std": 1.074,
+      "median": 17.924,
+      "p95": 19.265,
+      "max": 20.730
     },
     "preprocess": {
-      "mean": 0.07527779477337997,
-      "std": 0.02411262052014753,
-      "median": 0.06937491707503796,
-      "p95": 0.12647139374166722,
-      "p99": 0.1621605968102813,
-      "max": 0.17224997282028198
+      "mean": 0.330,
+      "std": 0.038,
+      "median": 0.325,
+      "p95": 0.371,
+      "max": 0.763
     },
     "perception": {
-      "mean": 10.762265200416246,
-      "std": 0.695369759770161,
-      "median": 10.826395824551582,
-      "p95": 11.795193934813142,
-      "p99": 12.300459141843021,
-      "max": 12.45504105463624
+      "mean": 15.099,
+      "std": 0.553,
+      "median": 14.976,
+      "p95": 16.413,
+      "max": 17.993
     },
     "control": {
-      "mean": 0.05688471719622612,
-      "std": 0.008486556277612913,
-      "median": 0.05585397593677044,
-      "p95": 0.06887039635330439,
-      "p99": 0.07592385169118644,
-      "max": 0.07866695523262024
+      "mean": 0.081,
+      "std": 0.043,
+      "median": 0.072,
+      "p95": 0.113,
+      "max": 0.378
     },
     "actuation_serialize": {
-      "mean": 0.01691528595983982,
-      "std": 0.004286264562345681,
-      "median": 0.016582896932959557,
-      "p95": 0.026570656336843967,
-      "p99": 0.027542971074581146,
-      "max": 0.027833040803670883
+      "mean": 0.115,
+      "std": 0.018,
+      "median": 0.116,
+      "p95": 0.126,
+      "max": 0.420
     },
     "compute_total": {
-      "mean": 10.911342998345694,
-      "std": 0.7103100757399081,
-      "median": 10.982895968481898,
-      "p95": 11.997608933597803,
-      "p99": 12.457001227885485,
-      "max": 12.614374049007893
+      "mean": 15.625,
+      "std": 0.592,
+      "median": 15.495,
+      "p95": 17.050,
+      "max": 18.812
     }
   },
-  "sampling_frequency_hz": 83.16296481019191,
-  "compute_capacity_fps": 91.64774676697574,
-  "deadline_headroom_ms": 22.42199033498764,
+  "sampling_frequency_hz": 29.9,
+  "sampling_jitter_std_ms": 0.88,
+  "compute_capacity_fps": 64.0,
+  "deadline_headroom_ms": 17.71,
+  "deadline_headroom_pct": 53.1,
   "deadline_overruns": 0,
-  "photon_to_thrust_total_mean_ms": 86.61085688723458,
-  "photon_to_thrust_total_p95_ms": 87.69712282248669
+  "optical_domain_ms": 32.67,
+  "actuation_domain_ms": 43.03,
+  "photon_to_thrust_total_mean_ms": 91.32,
+  "photon_to_thrust_total_p95_ms": 92.75
 }
