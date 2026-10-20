@@ -465,12 +465,12 @@ class DronePursuitEnv(gym.Env):
             cfg = self._sample_scenario_config()
             seed_val = int(self.np_random.integers(0, 1_000_000))
 
-        # Reset simulator
+        # Reset simulator with initial cruise velocity and steady-state attitude trim
         self.sim.reset(
             initial_pos=cfg["chaser_pos"],
-            initial_yaw=cfg["chaser_yaw"]
+            initial_yaw=cfg["chaser_yaw"],
+            initial_vel=cfg["chaser_vel"]
         )
-        self.sim.vel = cfg["chaser_vel"].copy()
 
         # Initialize target B-spline oracle
         self.target_oracle = StochasticTargetTrajectory(
@@ -484,7 +484,11 @@ class DronePursuitEnv(gym.Env):
         self.step_count = 0
         self.time_lost = cfg["initial_time_lost"]
         self.last_action = np.zeros(4, dtype=np.float32)
-        self.last_physical_cmd = np.array([self.sim.vel[0], 0.0, 0.0, 0.0], dtype=np.float64)
+
+        c_yaw, s_yaw = np.cos(cfg["chaser_yaw"]), np.sin(cfg["chaser_yaw"])
+        v_fwd = c_yaw * cfg["chaser_vel"][0] + s_yaw * cfg["chaser_vel"][1]
+        v_right = -s_yaw * cfg["chaser_vel"][0] + c_yaw * cfg["chaser_vel"][1]
+        self.last_physical_cmd = np.array([v_fwd, v_right, cfg["chaser_vel"][2], 0.0], dtype=np.float64)
         self.cumulative_firing_window_s = 0.0
         self.continuous_lock_dwell_s = 0.0
         self.time_to_first_lock = None
@@ -977,6 +981,12 @@ class DronePursuitEnv(gym.Env):
         alt_agl = -self.sim.pos[2]
         p_low_alt = 1.5 * max(0.0, self.safe_altitude_cushion - alt_agl)**2
 
+        # Downward sink-rate barrier: heavily penalize descending when below 2.5m AGL
+        # to eliminate ground-strike suicide dives during evasive encounters
+        p_sink = 0.0
+        if alt_agl < 2.5 and self.sim.vel[2] > 0.0:
+            p_sink = 2.0 * (2.5 - alt_agl) * (self.sim.vel[2] ** 2)
+
         # G. Flight Dynamics Regularization
         # 1. Action Slew / Jerk Penalty
         action_diff_sq = float(np.sum((action - self.last_action)**2))
@@ -990,7 +1000,7 @@ class DronePursuitEnv(gym.Env):
         step_reward = (
             r_tracking_base + r_trail_potential + r_progress
             + r_basket_dwell + r_recovery + r_milestone + r_time
-            - p_overspeed - p_proximity - p_low_alt - p_jerk - p_effort
+            - p_overspeed - p_proximity - p_low_alt - p_sink - p_jerk - p_effort
             + terminal_reward
         )
 

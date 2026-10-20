@@ -45,18 +45,40 @@ class FastPixhawkQuadSim:
 
         self.reset()
 
-    def reset(self, initial_pos=None, initial_yaw=0.0):
+    def reset(self, initial_pos=None, initial_yaw=0.0, initial_vel=None):
         self.pos = np.array(initial_pos, dtype=np.float64) if initial_pos is not None else np.zeros(3)
-        self.vel = np.zeros(3)
         self.yaw = float(initial_yaw)
         self.yaw_rate = 0.0
-        self.pitch = 0.0
-        self.roll = 0.0
-        self.cam_pitch = -self.camera_uptilt
-        
-        # Delay queue initialized to exact delay steps
-        self.cmd_buffer = deque([np.zeros(4) for _ in range(self.delay_steps)], 
-                                maxlen=self.delay_steps + 1)
+
+        if initial_vel is not None:
+            self.vel = np.array(initial_vel, dtype=np.float64)
+            c, s = np.cos(self.yaw), np.sin(self.yaw)
+            v_fwd = c * self.vel[0] + s * self.vel[1]
+            v_right = -s * self.vel[0] + c * self.vel[1]
+            v_horiz_speed = np.hypot(v_fwd, v_right)
+
+            # Aerodynamic drag at initial cruise velocity
+            drag_coeff = self.k_drag_lin + self.k_drag_quad * v_horiz_speed
+            drag_fwd = drag_coeff * v_fwd
+            drag_right = drag_coeff * v_right
+
+            # Steady-state rotor pitch and roll to balance aerodynamic drag
+            self.pitch = np.arctan2(drag_fwd, 9.81)
+            self.roll = np.arctan2(-drag_right, 9.81)
+            self.cam_pitch = self.pitch - self.camera_uptilt
+
+            # Pre-fill delay queue with the initial body velocity command
+            cruise_cmd = np.array([v_fwd, v_right, self.vel[2], 0.0], dtype=np.float64)
+            self.cmd_buffer = deque([cruise_cmd.copy() for _ in range(self.delay_steps)],
+                                    maxlen=self.delay_steps + 1)
+        else:
+            self.vel = np.zeros(3)
+            self.pitch = 0.0
+            self.roll = 0.0
+            self.cam_pitch = -self.camera_uptilt
+            self.cmd_buffer = deque([np.zeros(4) for _ in range(self.delay_steps)], 
+                                    maxlen=self.delay_steps + 1)
+
         return self._get_obs()
 
     def step(self, cmd_body_vel_yawspeed):
