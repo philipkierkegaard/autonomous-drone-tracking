@@ -1138,6 +1138,8 @@ class AutonomousTrackerNode:
                 )
 
             with self.perception_state.lock:
+                telemetry["timestamp"] = time.perf_counter()
+                telemetry["frame_idx"] = self.pipeline.frame_idx
                 self.perception_state.telemetry = telemetry
                 self.perception_state.latest_frame = annotated_frame
                 self.perception_state.latest_raw_frame = clean_raw_frame

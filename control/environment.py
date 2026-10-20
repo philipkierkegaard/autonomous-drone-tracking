@@ -175,6 +175,8 @@ class DronePursuitEnv(gym.Env):
         self.filtered_d_ey = 0.0
         self.filtered_d_w = 0.0
         self.was_in_view_prev = True
+        self.prev_camera_time = 0.0
+        self.last_camera_status = 0.0
 
         # Mission Objective: Reach 5.0m - 7.0m basket & maintain continuous lock
         self.dwell_time_required = 3.0
@@ -569,6 +571,7 @@ class DronePursuitEnv(gym.Env):
             if self.tracker.primary_track_id is not None:
                 primary = next((t for t in self.tracker.trackers if t.id == self.tracker.primary_track_id), None)
 
+            self.prev_camera_time = 0.0
             if primary is not None and primary.hits >= self.tracker.min_hits_to_confirm:
                 bbox = primary.get_state()
                 cx = (bbox[0] + bbox[2]) / 2.0
@@ -577,11 +580,15 @@ class DronePursuitEnv(gym.Env):
                 bh_est = max(1.0, bbox[3] - bbox[1])
                 ex_est = float((cx - self.img_w / 2.0) / (self.img_w / 2.0))
                 ey_est = float((cy - self.img_h / 2.0) / (self.img_h / 2.0))
-                obs = self._get_observation(ex_est, ey_est, True, bw_est, bh_est, force_flag=1.0)
+                self.last_camera_status = 1.0
+                obs = self._get_observation(ex_est, ey_est, True, bw_est, bh_est, force_flag=1.0, is_fresh_camera=True, dt_cam=self.camera_dt)
             else:
-                obs = self._get_observation(self.last_seen_ex, self.last_seen_ey, False, self.last_seen_w * self.img_w, self.last_seen_h * self.img_h, force_flag=0.0)
+                self.last_camera_status = 0.0
+                obs = self._get_observation(self.last_seen_ex, self.last_seen_ey, False, self.last_seen_w * self.img_w, self.last_seen_h * self.img_h, force_flag=0.0, is_fresh_camera=True, dt_cam=self.camera_dt)
         else:
-            obs = self._get_observation(ex, ey, in_view, bw, bh)
+            self.prev_camera_time = 0.0
+            self.last_camera_status = 1.0 if in_view else 0.0
+            obs = self._get_observation(ex, ey, in_view, bw, bh, is_fresh_camera=True, dt_cam=self.camera_dt)
 
         info = {
             "mode": cfg["mode"],
@@ -599,7 +606,9 @@ class DronePursuitEnv(gym.Env):
         raw_in_view: bool,
         raw_bw: float,
         raw_bh: float,
-        force_flag: Optional[float] = None
+        force_flag: Optional[float] = None,
+        is_fresh_camera: bool = True,
+        dt_cam: Optional[float] = None
     ) -> np.ndarray:
         """
         Constructs the 13D normalized state vector with SO(3) attitude decoupling,
@@ -645,24 +654,28 @@ class DronePursuitEnv(gym.Env):
             flag = force_flag if force_flag is not None else 1.0
 
             # Causal exponential filter for optical rates (alpha = 0.4 suppresses noise while preserving 1-2 Hz turns)
-            if self.was_in_view_prev:
-                raw_d_ex = (ex - self.prev_ex) / self.dt
-                raw_d_ey = (ey - self.prev_ey) / self.dt
-                raw_d_w  = (w_norm - self.prev_w) / self.dt
-            else:
-                raw_d_ex = 0.0
-                raw_d_ey = 0.0
-                raw_d_w  = 0.0
+            # Optical rates are updated only when a fresh camera frame arrives with dt_cam (approx 33 ms).
+            # On intermediate 50 Hz steps between camera frames, the filtered rates are held to maintain sim-to-real parity.
+            if is_fresh_camera:
+                delta_t = dt_cam if dt_cam is not None and dt_cam > 0.0 else self.camera_dt
+                if self.was_in_view_prev:
+                    raw_d_ex = (ex - self.prev_ex) / delta_t
+                    raw_d_ey = (ey - self.prev_ey) / delta_t
+                    raw_d_w  = (w_norm - self.prev_w) / delta_t
+                else:
+                    raw_d_ex = 0.0
+                    raw_d_ey = 0.0
+                    raw_d_w  = 0.0
 
-            alpha_rate = 0.4
-            self.filtered_d_ex = alpha_rate * raw_d_ex + (1.0 - alpha_rate) * self.filtered_d_ex
-            self.filtered_d_ey = alpha_rate * raw_d_ey + (1.0 - alpha_rate) * self.filtered_d_ey
-            self.filtered_d_w  = alpha_rate * raw_d_w  + (1.0 - alpha_rate) * self.filtered_d_w
+                alpha_rate = 0.4
+                self.filtered_d_ex = alpha_rate * raw_d_ex + (1.0 - alpha_rate) * self.filtered_d_ex
+                self.filtered_d_ey = alpha_rate * raw_d_ey + (1.0 - alpha_rate) * self.filtered_d_ey
+                self.filtered_d_w  = alpha_rate * raw_d_w  + (1.0 - alpha_rate) * self.filtered_d_w
 
-            self.prev_ex = ex
-            self.prev_ey = ey
-            self.prev_w = w_norm
-            self.was_in_view_prev = True
+                self.prev_ex = ex
+                self.prev_ey = ey
+                self.prev_w = w_norm
+                self.was_in_view_prev = True
 
         else:
             # Target is lost / occluded: Observation holds last seen track with flag = 0
@@ -755,6 +768,8 @@ class DronePursuitEnv(gym.Env):
             is_camera_tick = (self.time_since_camera >= self.camera_dt - 1e-5)
 
             if is_camera_tick:
+                dt_cam = max(0.010, t_sim - self.prev_camera_time) if self.prev_camera_time > 0.0 else self.camera_dt
+                self.prev_camera_time = t_sim
                 self.time_since_camera -= self.camera_dt
                 norm_cx = float((raw_ex + 1.0) / 2.0)
                 norm_cy = float((raw_ey + 1.0) / 2.0)
@@ -778,6 +793,7 @@ class DronePursuitEnv(gym.Env):
                 conf_arr = np.array(confs, dtype=np.float32) if confs else np.empty((0,), dtype=np.float32)
                 self.tracker.update(det_arr, conf_arr, dt_step=self.dt)
             else:
+                dt_cam = self.camera_dt
                 # Between camera frames (50 Hz control tick between 30 Hz camera updates):
                 # Kalman filter performs prediction/dead reckoning without receiving new measurements
                 for trk in self.tracker.trackers:
@@ -797,27 +813,33 @@ class DronePursuitEnv(gym.Env):
                 ex_est = float((cx - self.img_w / 2.0) / (self.img_w / 2.0))
                 ey_est = float((cy - self.img_h / 2.0) / (self.img_h / 2.0))
 
-                # 3-State Visibility Flag:
-                # 1.0: Fresh camera measurement associated and updated in current frame
-                # 0.5: Valid Kalman dead-reckoning prediction during coasting (within 0.50s baseline)
-                # 0.0: Track expired or unconfirmed
-                if primary.time_since_update == 0:
-                    force_flag = 1.0
-                elif primary.time_since_update <= self.coasting_step_limit:
-                    force_flag = 0.5
-                else:
-                    force_flag = 0.0
+                # Update latched status on fresh camera ticks
+                if is_camera_tick:
+                    if primary.time_since_update == 0:
+                        self.last_camera_status = 1.0  # Fresh YOLO measurement
+                    else:
+                        self.last_camera_status = 0.5  # Coasting on missed frame
 
-                obs = self._get_observation(ex_est, ey_est, True, bw_est, bh_est, force_flag=force_flag)
+                # Check track expiration against the 0.50s baseline
+                if primary.time_since_update > self.coasting_step_limit:
+                    flag = 0.0
+                else:
+                    flag = self.last_camera_status
+
+                obs = self._get_observation(
+                    ex_est, ey_est, True, bw_est, bh_est,
+                    force_flag=flag, is_fresh_camera=is_camera_tick, dt_cam=dt_cam
+                )
             else:
-                # Target unconfirmed or lost
+                self.last_camera_status = 0.0
                 obs = self._get_observation(
                     self.last_seen_ex, self.last_seen_ey, False,
-                    self.last_seen_w * self.img_w, self.last_seen_h * self.img_h, force_flag=0.0
+                    self.last_seen_w * self.img_w, self.last_seen_h * self.img_h,
+                    force_flag=0.0, is_fresh_camera=is_camera_tick, dt_cam=dt_cam
                 )
         else:
             primary = None
-            obs = self._get_observation(raw_ex, raw_ey, raw_in_view, raw_bw, raw_bh)
+            obs = self._get_observation(raw_ex, raw_ey, raw_in_view, raw_bw, raw_bh, is_fresh_camera=True, dt_cam=self.dt)
 
         # Engagement Basket Condition: 5.0m <= dist <= 7.0m AND visible in camera FOV AND active tracker lock
         has_tracker_lock = (

@@ -862,9 +862,13 @@ class DroneTrackingPipeline:
                 "desired_size": float(self.desired_target_size),
                 "velocity_x": vx,
                 "velocity_y": vy,
-                "area_ratio": float(area_ratio)
+                "area_ratio": float(area_ratio),
+                "timestamp": float(t_start),
+                "frame_idx": int(self.frame_idx)
             })
 
+        telemetry["timestamp"] = float(t_start)
+        telemetry["frame_idx"] = int(self.frame_idx)
         telemetry["comp_velocity_mag"] = float(np.hypot(telemetry.get("velocity_x", 0.0), telemetry.get("velocity_y", 0.0)))
         telemetry["raw_yolo_detections_count"] = len(detections)
         if len(detections) > 0:

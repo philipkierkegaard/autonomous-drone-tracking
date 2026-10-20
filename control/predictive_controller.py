@@ -133,6 +133,8 @@ class RecurrentVisualServoController:
         self.filtered_d_ey = 0.0
         self.filtered_d_w = 0.0
         self.was_in_view_prev = False
+        self.prev_frame_idx = None
+        self.prev_frame_timestamp = None
 
         if model_path is not None:
             self.load_model(model_path)
@@ -227,6 +229,7 @@ class RecurrentVisualServoController:
         self.filtered_d_w = 0.0
         self.was_in_view_prev = False
         self.prev_frame_idx = None
+        self.prev_frame_timestamp = None
         self.last_frame_time = None
 
     def compute_cmd(
@@ -276,6 +279,7 @@ class RecurrentVisualServoController:
         bbox_h = telemetry.get("bbox_h", 20.0)
 
         current_frame_idx = telemetry.get("frame_idx", None)
+        frame_timestamp = telemetry.get("timestamp", None)
         is_fresh_frame = (current_frame_idx is None or current_frame_idx != self.prev_frame_idx)
 
         if is_visible:
@@ -301,7 +305,13 @@ class RecurrentVisualServoController:
             if self.obs_dim >= 13:
                 if is_fresh_frame:
                     if self.was_in_view_prev:
-                        dt_cam = max(0.005, dt)
+                        # Determine true camera interval dt_cam from consecutive frame timestamps
+                        if frame_timestamp is not None and getattr(self, "prev_frame_timestamp", None) is not None:
+                            raw_dt_cam = float(frame_timestamp - self.prev_frame_timestamp)
+                            dt_cam = raw_dt_cam if 0.005 <= raw_dt_cam <= 0.150 else (1.0 / 30.0)
+                        else:
+                            dt_cam = 1.0 / 30.0
+
                         raw_d_ex = (ex - self.prev_ex) / dt_cam
                         raw_d_ey = (ey - self.prev_ey) / dt_cam
                         raw_d_w  = (w_norm - self.prev_w) / dt_cam
@@ -319,6 +329,7 @@ class RecurrentVisualServoController:
                     self.prev_ey = ey
                     self.prev_w = w_norm
                     self.prev_frame_idx = current_frame_idx
+                    self.prev_frame_timestamp = frame_timestamp
 
                 self.was_in_view_prev = True
         else:

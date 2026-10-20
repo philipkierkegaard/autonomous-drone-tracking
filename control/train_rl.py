@@ -87,6 +87,7 @@ class TaskMetricEvalCallback(BaseCallback):
         self.best_model_save_path = Path(best_model_save_path) if best_model_save_path else None
         self.log_path = Path(log_path) if log_path else None
         self.best_score = -float("inf")
+        self.best_safe_score = -float("inf")
         self.last_eval_step = 0
         self.eval_history: List[Dict[str, Any]] = []
 
@@ -172,22 +173,25 @@ class TaskMetricEvalCallback(BaseCallback):
         lost_timeout_rate = n_lost / max(1, n_scenarios)
 
         mean_distance = float(np.mean(all_step_distances)) if all_step_distances else 0.0
-        standoff_error = abs(mean_distance - 6.0)
+        mae_standoff_error = float(np.mean([abs(d - 6.0) for d in all_step_distances])) if all_step_distances else 0.0
         fov_retention = float(np.mean(all_step_in_view) * 100.0) if all_step_in_view else 0.0
         mean_dwell_s = float(np.mean([r["dwell_s"] for r in results]))
         mean_reward = float(np.mean([r["reward"] for r in results]))
 
-        # Task-level composite score: Success% * 100 - 15 * |d - 6.0| - 50 * Collision%
-        task_score = float(success_rate * 100.0 - 15.0 * standoff_error - 50.0 * (collision_rate * 100.0))
+        # Task-level composite score: Success% * 100 - 15 * MAE_d - 50 * Collision%
+        task_score = float(success_rate * 100.0 - 15.0 * mae_standoff_error - 50.0 * (collision_rate * 100.0))
 
-        # Gate criteria for best_model.zip qualification
+        # Gate criteria for best_safe_model.zip qualification
         gate_collision = (n_collisions == 0)
         gate_ground_strike = (n_ground_strikes == 0)
         gate_success = (success_rate >= 0.60)
         gate_passed = gate_collision and gate_ground_strike and gate_success
 
         is_new_best = False
-        if gate_passed and task_score > self.best_score:
+        is_new_best_safe = False
+
+        # 1. Unconstrained best candidate model (guarantees peak performing checkpoint is ALWAYS preserved)
+        if task_score > self.best_score:
             self.best_score = task_score
             is_new_best = True
             if self.best_model_save_path:
@@ -197,18 +201,42 @@ class TaskMetricEvalCallback(BaseCallback):
                     "timestep": self.num_timesteps,
                     "task_score": task_score,
                     "success_rate_pct": success_rate * 100.0,
-                    "standoff_error_m": standoff_error,
+                    "mae_standoff_error_m": mae_standoff_error,
                     "mean_distance_m": mean_distance,
                     "collision_rate_pct": collision_rate * 100.0,
                     "ground_strike_rate_pct": ground_strike_rate * 100.0,
                     "fov_retention_pct": fov_retention,
                     "mean_dwell_s": mean_dwell_s,
                     "mean_reward": mean_reward,
+                    "gate_passed": gate_passed,
                 }
                 with open(self.best_model_save_path / "best_metrics.json", "w", encoding="utf-8") as f:
                     json.dump(best_meta, f, indent=2)
 
-        # Always persist latest checkpoint for inspection
+        # 2. Strict aerospace-gated best model (requires 0% collision, 0% ground strike, >=60% success)
+        if gate_passed and task_score > self.best_safe_score:
+            self.best_safe_score = task_score
+            is_new_best_safe = True
+            if self.best_model_save_path:
+                best_safe_file = self.best_model_save_path / "best_safe_model.zip"
+                self.model.save(str(best_safe_file))
+                safe_meta = {
+                    "timestep": self.num_timesteps,
+                    "task_score": task_score,
+                    "success_rate_pct": success_rate * 100.0,
+                    "mae_standoff_error_m": mae_standoff_error,
+                    "mean_distance_m": mean_distance,
+                    "collision_rate_pct": collision_rate * 100.0,
+                    "ground_strike_rate_pct": ground_strike_rate * 100.0,
+                    "fov_retention_pct": fov_retention,
+                    "mean_dwell_s": mean_dwell_s,
+                    "mean_reward": mean_reward,
+                    "gate_passed": True,
+                }
+                with open(self.best_model_save_path / "best_safe_metrics.json", "w", encoding="utf-8") as f:
+                    json.dump(safe_meta, f, indent=2)
+
+        # 3. Always persist latest checkpoint for inspection
         if self.best_model_save_path:
             latest_file = self.best_model_save_path / "latest_model.zip"
             self.model.save(str(latest_file))
@@ -217,7 +245,7 @@ class TaskMetricEvalCallback(BaseCallback):
         if self.logger:
             self.logger.record("eval/task_score", task_score)
             self.logger.record("eval/success_rate", success_rate * 100.0)
-            self.logger.record("eval/standoff_error_m", standoff_error)
+            self.logger.record("eval/mae_standoff_error_m", mae_standoff_error)
             self.logger.record("eval/mean_distance_m", mean_distance)
             self.logger.record("eval/collision_rate", collision_rate * 100.0)
             self.logger.record("eval/ground_strike_rate", ground_strike_rate * 100.0)
@@ -231,10 +259,11 @@ class TaskMetricEvalCallback(BaseCallback):
             "timestep": self.num_timesteps,
             "task_score": task_score,
             "best_score": self.best_score if self.best_score != -float("inf") else None,
+            "best_safe_score": self.best_safe_score if self.best_safe_score != -float("inf") else None,
             "success_rate_pct": success_rate * 100.0,
             "n_successes": n_successes,
             "n_scenarios": n_scenarios,
-            "standoff_error_m": standoff_error,
+            "mae_standoff_error_m": mae_standoff_error,
             "mean_distance_m": mean_distance,
             "fov_retention_pct": fov_retention,
             "mean_dwell_s": mean_dwell_s,
@@ -247,6 +276,7 @@ class TaskMetricEvalCallback(BaseCallback):
             "mean_reward": mean_reward,
             "gate_passed": gate_passed,
             "is_new_best": is_new_best,
+            "is_new_best_safe": is_new_best_safe,
             "duration_s": time.time() - start_time,
         }
         self.eval_history.append(eval_summary)
@@ -258,19 +288,23 @@ class TaskMetricEvalCallback(BaseCallback):
         self._print_eval_report(eval_summary)
 
     def _print_eval_report(self, s: Dict[str, Any]):
-        gate_str = (
-            "PASSED [NEW BEST SAVED]" if s["is_new_best"]
-            else ("PASSED [Score Not Higher]" if s["gate_passed"]
+        cand_str = " [NEW BEST CANDIDATE]" if s["is_new_best"] else ""
+        safe_str = (
+            "PASSED [NEW BEST SAFE MODEL SAVED]" if s["is_new_best_safe"]
+            else ("PASSED [Safe Score Not Higher]" if s["gate_passed"]
                   else "BLOCKED (Did not meet safety criteria)")
         )
-        best_str = f"{s['best_score']:.2f}" if s['best_score'] is not None else "None"
+        best_cand_str = f"{s['best_score']:.2f}" if s['best_score'] is not None else "None"
+        best_safe_str = f"{s['best_safe_score']:.2f}" if s['best_safe_score'] is not None else "None"
 
         print("\n" + "=" * 76)
         print(f"  TASK-LEVEL EVALUATION REPORT  |  Timestep: {s['timestep']:,}")
         print("=" * 76)
-        print(f"  Composite Task Score:     {s['task_score']:.2f}  (Best: {best_str})")
+        print(f"  Composite Task Score:     {s['task_score']:.2f}{cand_str}")
+        print(f"  Best Candidate Score:     {best_cand_str} (Saved to best_model.zip)")
+        print(f"  Best Safe Model Score:    {best_safe_str} (Saved to best_safe_model.zip)")
         print(f"  Interception Success:     {s['success_rate_pct']:.1f}% ({s['n_successes']}/{s['n_scenarios']} scenarios)  [Gate >= 60%]")
-        print(f"  Mean Standoff Distance:   {s['mean_distance_m']:.2f} m  (Error: {s['standoff_error_m']:.2f} m from 6.0m)")
+        print(f"  MAE Standoff Error:       {s['mae_standoff_error_m']:.2f} m from 6.0m  (Mean Dist: {s['mean_distance_m']:.2f} m)")
         print(f"  FOV Lock Retention:       {s['fov_retention_pct']:.1f}%")
         print(f"  Mean Basket Dwell:        {s['mean_dwell_s']:.2f} s")
         print(f"  Collision Breaches:       {s['collision_rate_pct']:.1f}% ({s['n_collisions']}/{s['n_scenarios']})  [Gate == 0%]")
@@ -278,7 +312,7 @@ class TaskMetricEvalCallback(BaseCallback):
         print(f"  Lost Target Timeouts:     {s['lost_timeout_rate_pct']:.1f}% ({s['n_lost']}/{s['n_scenarios']})")
         print(f"  Mean Episode Reward:      {s['mean_reward']:.2f}")
         print(f"  Evaluation Duration:      {s['duration_s']:.2f} s")
-        print(f"  Aerospace Gate Status:    {gate_str}")
+        print(f"  Aerospace Safe Gate:      {safe_str}")
         print("=" * 76 + "\n")
 
 
