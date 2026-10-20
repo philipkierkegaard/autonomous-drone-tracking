@@ -919,43 +919,38 @@ class DronePursuitEnv(gym.Env):
             termination_reason = "max_horizon"
 
         # -------------------------------------------------------------
-        # 6. Calibrated 3.5m Standoff Reward Shaping
+        # 6. Continuous Gamma Standoff Reward Shaping
         # -------------------------------------------------------------
-        # A. Visual Acquisition & Sightline Tracking
-        if raw_in_view:
-            r_in_view = 1.0
-            r_center = 1.5 * max(0.0, 1.0 - (obs[0]**2 + obs[1]**2) / (0.45**2))
-        else:
-            r_in_view = 0.0
-            r_center = 0.0
-        r_tracking_base = r_in_view + r_center
+        # A. Visual FOV Retention (Free kinematics — no artificial dead-center reticle constraint)
+        r_fov = 1.0 if raw_in_view else 0.0
 
-        # B. Multi-Scale Continuous Trail Anchor Potential Field (Targeted at 3.5m Rear Wake)
-        if raw_in_view:
-            # Wide approach basin (sigma = 2.5m) guides drone inward from 10m-12m
-            r_wide = 2.5 * float(np.exp(-(d_trail ** 2) / (2.0 * (2.5 ** 2))))
-            # Tight core well (sigma = 0.8m) provides steep precision centering at 3.5m
-            r_tight = 4.0 * float(np.exp(-(d_trail ** 2) / (2.0 * (0.8 ** 2))))
-            r_trail_potential = r_wide + r_tight
-
-            # Distance Closing Rate Progress toward rear trail anchor
-            trail_closing_rate = (self.prev_trail_error - d_trail) / self.dt
-            r_progress = 0.5 * float(np.clip(trail_closing_rate, -1.0, 4.0))
+        # B. Continuous Shifted Gamma Standoff Potential Field
+        # Peaks at exactly 3.5m standoff, drops naturally to 0.0 at the 1.2m collision sphere,
+        # and has a smooth exponential tail providing a persistent inward gradient from 10m-15m.
+        if raw_in_view and dist > self.collision_dist:
+            x_col = dist - self.collision_dist
+            x_peak = self.standoff_nominal - self.collision_dist  # 3.5 - 1.2 = 2.3m
+            r_gamma = 6.0 * ((x_col / x_peak) ** 2.0) * float(np.exp(-(2.0 / x_peak) * (x_col - x_peak)))
         else:
-            r_trail_potential = 0.0
+            r_gamma = 0.0
+
+        # Distance Closing Rate Progress toward 3.5m standoff (rewards aggressive closing speed)
+        if raw_in_view:
+            closing_rate = (self.prev_distance_error - dist_err) / self.dt
+            r_progress = 0.8 * float(np.clip(closing_rate, -2.0, 5.0))
+        else:
             r_progress = 0.0
 
-        r_basket = r_trail_potential + r_progress
-
         # C. Out-of-FOV Sightline Recovery Incentive
-        r_recovery = 0.0 if raw_in_view else -0.15
+        r_recovery = 0.0 if raw_in_view else -0.20
 
         # D. Direct In-Basket Continuous Dwell Holding Reward:
         # Awards +2.0/step (+100.0/s) continuously while inside the exact 2.8m - 4.2m benchmark basket.
         r_basket_dwell = 2.0 if in_basket else 0.0
 
         # E. Sprint Time Incentive:
-        r_time = 0.0 if self.milestone_1s_awarded else -0.05
+        # Actively penalizes every step spent outside the standoff basket (-7.5/s) to force rapid sprint
+        r_time = 0.0 if in_basket else -0.15
 
         # Pre-Braking / Velocity Damping: penalize excessive closing speed when approaching the basket
         p_overspeed = 0.0
@@ -998,7 +993,7 @@ class DronePursuitEnv(gym.Env):
 
         # Step Reward Total
         step_reward = (
-            r_tracking_base + r_trail_potential + r_progress
+            r_fov + r_gamma + r_progress
             + r_basket_dwell + r_recovery + r_milestone + r_time
             - p_overspeed - p_proximity - p_low_alt - p_sink - p_jerk - p_effort
             + terminal_reward
@@ -1018,16 +1013,16 @@ class DronePursuitEnv(gym.Env):
             "p_jerk": float(p_jerk),
             "p_effort": float(p_effort),
             "termination_reason": termination_reason,
-            "r_tracking_base": float(r_tracking_base),
-            "r_basket": float(r_basket),
+            "r_fov": float(r_fov),
+            "r_gamma": float(r_gamma),
             "r_basket_dwell": float(r_basket_dwell),
-            "r_trail_potential": float(r_trail_potential),
             "r_progress": float(r_progress),
             "r_recovery": float(r_recovery),
             "r_milestone": float(r_milestone),
             "r_time": float(r_time),
             "p_proximity": float(p_proximity),
             "p_low_alt": float(p_low_alt),
+            "p_sink": float(p_sink),
         }
 
         return obs, float(step_reward), bool(terminated), bool(truncated), info
