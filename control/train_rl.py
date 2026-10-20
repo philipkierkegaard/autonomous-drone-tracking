@@ -30,6 +30,15 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+# Weights & Biases environment routing (defaults to DTU educational org)
+os.environ.setdefault("WANDB_BASE_URL", "https://api.wandb.ai")
+try:
+    import wandb
+    HAS_WANDB = True
+except ImportError:
+    wandb = None
+    HAS_WANDB = False
+
 import gymnasium as gym
 from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv, VecMonitor
 from stable_baselines3.common.callbacks import CheckpointCallback, BaseCallback
@@ -255,6 +264,31 @@ class TaskMetricEvalCallback(BaseCallback):
             self.logger.record("eval/mean_reward", mean_reward)
             self.logger.dump(step=self.num_timesteps)
 
+        # Weights & Biases Logging (synchronized to global step)
+        if wandb is not None and wandb.run is not None:
+            wandb.log({
+                "global_step": self.num_timesteps,
+                "eval/task_score": task_score,
+                "eval/best_score": self.best_score if self.best_score != -float("inf") else 0.0,
+                "eval/best_safe_score": self.best_safe_score if self.best_safe_score != -float("inf") else 0.0,
+                "eval/success_rate_pct": success_rate * 100.0,
+                "eval/mae_standoff_error_m": mae_standoff_error,
+                "eval/mean_distance_m": mean_distance,
+                "eval/fov_retention_pct": fov_retention,
+                "eval/mean_dwell_s": mean_dwell_s,
+                "eval/collision_rate_pct": collision_rate * 100.0,
+                "eval/ground_strike_rate_pct": ground_strike_rate * 100.0,
+                "eval/lost_timeout_rate_pct": lost_timeout_rate * 100.0,
+                "eval/mean_reward": mean_reward,
+                "eval/gate_passed": int(gate_passed),
+            })
+            wandb.run.summary["best_task_score"] = self.best_score if self.best_score != -float("inf") else None
+            wandb.run.summary["best_safe_score"] = self.best_safe_score if self.best_safe_score != -float("inf") else None
+            if is_new_best:
+                wandb.run.summary["best_candidate_timestep"] = self.num_timesteps
+            if is_new_best_safe:
+                wandb.run.summary["best_safe_timestep"] = self.num_timesteps
+
         eval_summary = {
             "timestep": self.num_timesteps,
             "task_score": task_score,
@@ -329,11 +363,70 @@ def train(
     resume_path: Optional[Union[str, Path]] = None,
     output_dir: Path = PROJECT_ROOT / "control" / "weights" / "recurrent_ppo_scratch",
     log_dir: Path = PROJECT_ROOT / "runs" / "recurrent_ppo_tensorboard",
-    seed: int = 42
+    seed: int = 42,
+    use_wandb: bool = True,
+    wandb_project: str = "autonomous-drone-tracking",
+    wandb_entity: str = "philipkierkegaard-danmarks-tekniske-universitet-dtu",
+    wandb_run_name: Optional[str] = None,
+    wandb_notes: Optional[str] = None,
 ):
-    """Executes the RecurrentPPO training loop with task-level evaluation."""
+    """Executes the RecurrentPPO training loop with task-level evaluation and W&B tracking."""
     output_dir.mkdir(parents=True, exist_ok=True)
     log_dir.mkdir(parents=True, exist_ok=True)
+
+    # Initialize Weights & Biases run if requested
+    wb_run = None
+    if use_wandb:
+        if not HAS_WANDB:
+            print("[WANDB] Warning: wandb package not installed, falling back to local TensorBoard.")
+        else:
+            run_name = wandb_run_name or f"recurrent-ppo-{time.strftime('%Y%m%d-%H%M%S')}"
+            wb_config = {
+                "total_timesteps": total_timesteps,
+                "n_envs": n_envs,
+                "hidden_size": hidden_size,
+                "learning_rate": learning_rate,
+                "lr_annealing_min": 1.5e-5,
+                "ent_coef": ent_coef,
+                "gamma": gamma,
+                "n_epochs": n_epochs,
+                "n_steps": 256,
+                "batch_size": 64,
+                "clip_range": 0.2,
+                "eval_freq": eval_freq,
+                "checkpoint_freq": checkpoint_freq,
+                "seed": seed,
+                "standoff_distance_m": 6.0,
+                "standoff_basket_m": [5.0, 7.0],
+                "encounter_distribution": "70% rear pursuit, 30% in-medias-res",
+                "observation_dim": 13,
+                "action_dim": 4,
+                "policy": "MlpLstmPolicy",
+            }
+            try:
+                wb_run = wandb.init(
+                    project=wandb_project,
+                    entity=wandb_entity,
+                    name=run_name,
+                    notes=wandb_notes or "Recurrent PPO with calibrated 6m standoff reward & strict safety gating",
+                    tags=["recurrent-ppo", "lstm", "drone-pursuit", "dtu-thesis"],
+                    config=wb_config,
+                    sync_tensorboard=True,
+                )
+                wandb.define_metric("global_step")
+                wandb.define_metric("eval/*", step_metric="global_step")
+                wandb.define_metric("train/*", step_metric="global_step")
+                wandb.define_metric("rollout/*", step_metric="global_step")
+                wandb.define_metric("eval/task_score", summary="max")
+                wandb.define_metric("eval/success_rate_pct", summary="max")
+                wandb.define_metric("eval/mae_standoff_error_m", summary="min")
+                wandb.define_metric("eval/collision_rate_pct", summary="min")
+                wandb.define_metric("eval/ground_strike_rate_pct", summary="min")
+                print(f"[WANDB] Run tracking initialized: {wb_run.name}")
+                print(f"[WANDB] Live dashboard URL: {wb_run.url}")
+            except Exception as e:
+                print(f"[WANDB] Warning: Failed to initialize W&B ({e}). Continuing with TensorBoard only.")
+                wb_run = None
 
     print("\n" + "=" * 76)
     print("  AUTONOMOUS DRONE PURSUIT: RECURRENT PPO TRAINING PIPELINE")
@@ -348,6 +441,8 @@ def train(
     print(f"  Checkpoint Freq:     Every {checkpoint_freq:,} timesteps")
     print(f"  Model Output Dir:    {output_dir}")
     print(f"  Tensorboard Logs:    {log_dir}")
+    if wb_run is not None:
+        print(f"  W&B Dashboard:       {wb_run.url}")
     print("=" * 76 + "\n")
 
     # Set seeds
@@ -457,6 +552,17 @@ def train(
     print(f"\n[DONE] Training complete! Final policy saved to: {final_path}")
     print(f"[BEST] Best checkpoint stored in: {output_dir / 'best_model'}")
 
+    # Finalize Weights & Biases session and upload best models
+    if wb_run is not None:
+        best_model_file = output_dir / "best_model" / "best_model.zip"
+        if best_model_file.exists():
+            wandb.save(str(best_model_file), base_path=str(output_dir))
+        best_safe_file = output_dir / "best_model" / "best_safe_model.zip"
+        if best_safe_file.exists():
+            wandb.save(str(best_safe_file), base_path=str(output_dir))
+        wb_run.finish()
+        print(f"[WANDB] Run finalized. View complete run results at: {wb_run.url}")
+
     env.close()
     eval_env.close()
 
@@ -475,6 +581,11 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=42, help="Random seed (default: 42)")
     parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint zip to resume training from")
     parser.add_argument("--output-dir", type=str, default=None, help="Directory to save model weights")
+    parser.add_argument("--wandb", action=argparse.BooleanOptionalAction, default=True, help="Enable Weights & Biases logging (default: True, use --no-wandb to disable)")
+    parser.add_argument("--wandb-project", type=str, default="autonomous-drone-tracking", help="W&B project name")
+    parser.add_argument("--wandb-entity", type=str, default="philipkierkegaard-danmarks-tekniske-universitet-dtu", help="W&B entity name")
+    parser.add_argument("--wandb-run-name", type=str, default=None, help="Custom W&B run name")
+    parser.add_argument("--wandb-notes", type=str, default=None, help="Custom notes for the W&B run")
     args = parser.parse_args()
 
     out_p = Path(args.output_dir) if args.output_dir else PROJECT_ROOT / "control" / "weights" / "recurrent_ppo_scratch"
@@ -491,5 +602,10 @@ if __name__ == "__main__":
         checkpoint_freq=args.checkpoint_freq,
         resume_path=args.resume,
         output_dir=out_p,
-        seed=args.seed
+        seed=args.seed,
+        use_wandb=args.wandb,
+        wandb_project=args.wandb_project,
+        wandb_entity=args.wandb_entity,
+        wandb_run_name=args.wandb_run_name,
+        wandb_notes=args.wandb_notes,
     )
