@@ -1243,30 +1243,33 @@ class AutonomousTrackerNode:
             self._prev_autonomy_authorized = is_auth
 
             # 4. Compute Velocity Command via Kinematic Visual Servoing (3D or 4D) or Recurrent PPO
-            vel_body = self.vehicle_state.velocity_body
-            yaw_rate = self.vehicle_state.yaw_rate_rad_s
-            curr_alt = self.get_current_altitude()
-
-            raw_cmd = self.controller.compute_cmd(
-                telemetry=telemetry,
-                drone_pitch=current_pitch,
-                drone_roll=current_roll,
-                dt=dt,
-                vehicle_vel=vel_body,
-                vehicle_yaw_rate=yaw_rate,
-                current_alt_m=curr_alt if curr_alt is not None else 2.5
-            )
-            if not np.all(np.isfinite(raw_cmd)):
-                raw_cmd = np.zeros_like(raw_cmd)
-
-            # 5. Slew-Rate Limiting (Acceleration Limiting for smooth control signals)
-            # When running Recurrent PPO, predictive_controller.py already applies internal slew limiting.
-            # Avoid compound double-choking while retaining outer limiting for classical PID.
             is_recurrent = getattr(self.args, "controller", "pid") == "recurrent" or hasattr(self.controller, "hidden_state")
             if is_recurrent:
+                raw_cmd = self.controller.compute_cmd(
+                    telemetry=telemetry,
+                    drone_pitch=current_pitch,
+                    drone_roll=current_roll,
+                    dt=dt,
+                    vehicle_vel=self.vehicle_state.velocity_body,
+                    vehicle_yaw_rate=self.vehicle_state.yaw_rate_rad_s,
+                    current_alt_m=self.get_current_altitude() if self.get_current_altitude() is not None else 2.5
+                )
+                if not np.all(np.isfinite(raw_cmd)):
+                    raw_cmd = np.zeros_like(raw_cmd)
+                # Recurrent PPO already applies internal slew limiting
                 cmd_safe = raw_cmd
                 prev_cmd_3d = cmd_safe.copy()
             else:
+                raw_cmd = self.controller.compute_cmd(
+                    telemetry=telemetry,
+                    drone_pitch=current_pitch,
+                    drone_roll=current_roll,
+                    dt=dt
+                )
+                if not np.all(np.isfinite(raw_cmd)):
+                    raw_cmd = np.zeros_like(raw_cmd)
+
+                # 5. Slew-Rate Limiting for classical PID controller
                 if len(raw_cmd) == 4:
                     max_accel = np.array([
                         self.args.max_accel_xy,

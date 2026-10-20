@@ -14,6 +14,7 @@ Outputs:
 import sys
 import math
 from pathlib import Path
+from typing import Optional, Union, Dict, Any, List, Tuple
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.patches import Polygon
@@ -203,7 +204,11 @@ class KinematicVisualServoController:
         telemetry: dict,
         drone_pitch: float = 0.0,
         drone_roll: float = 0.0,
-        dt: float = 0.02
+        dt: float = 0.02,
+        vehicle_vel: Optional[np.ndarray] = None,
+        vehicle_yaw_rate: float = 0.0,
+        current_alt_m: float = 2.5,
+        **kwargs
     ) -> np.ndarray:
         """
         Main interface: Takes vision telemetry dictionary and returns a 3D or 4D command vector.
