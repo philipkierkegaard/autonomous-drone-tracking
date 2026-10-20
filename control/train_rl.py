@@ -182,7 +182,7 @@ class TaskMetricEvalCallback(BaseCallback):
         lost_timeout_rate = n_lost / max(1, n_scenarios)
 
         mean_distance = float(np.mean(all_step_distances)) if all_step_distances else 0.0
-        mae_standoff_error = float(np.mean([abs(d - 6.0) for d in all_step_distances])) if all_step_distances else 0.0
+        mae_standoff_error = float(np.mean([abs(d - 3.5) for d in all_step_distances])) if all_step_distances else 0.0
         fov_retention = float(np.mean(all_step_in_view) * 100.0) if all_step_in_view else 0.0
         mean_dwell_s = float(np.mean([r["dwell_s"] for r in results]))
         mean_reward = float(np.mean([r["reward"] for r in results]))
@@ -338,7 +338,7 @@ class TaskMetricEvalCallback(BaseCallback):
         print(f"  Best Candidate Score:     {best_cand_str} (Saved to best_model.zip)")
         print(f"  Best Safe Model Score:    {best_safe_str} (Saved to best_safe_model.zip)")
         print(f"  Interception Success:     {s['success_rate_pct']:.1f}% ({s['n_successes']}/{s['n_scenarios']} scenarios)  [Gate >= 60%]")
-        print(f"  MAE Standoff Error:       {s['mae_standoff_error_m']:.2f} m from 6.0m  (Mean Dist: {s['mean_distance_m']:.2f} m)")
+        print(f"  MAE Standoff Error:       {s['mae_standoff_error_m']:.2f} m from 3.5m  (Mean Dist: {s['mean_distance_m']:.2f} m)")
         print(f"  FOV Lock Retention:       {s['fov_retention_pct']:.1f}%")
         print(f"  Mean Basket Dwell:        {s['mean_dwell_s']:.2f} s")
         print(f"  Collision Breaches:       {s['collision_rate_pct']:.1f}% ({s['n_collisions']}/{s['n_scenarios']})  [Gate == 0%]")
@@ -396,8 +396,8 @@ def train(
                 "eval_freq": eval_freq,
                 "checkpoint_freq": checkpoint_freq,
                 "seed": seed,
-                "standoff_distance_m": 6.0,
-                "standoff_basket_m": [5.0, 7.0],
+                "standoff_distance_m": 3.5,
+                "standoff_basket_m": [2.8, 4.2],
                 "encounter_distribution": "70% rear pursuit, 30% in-medias-res",
                 "observation_dim": 13,
                 "action_dim": 4,

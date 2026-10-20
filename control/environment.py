@@ -48,9 +48,9 @@ class DronePursuitEnv(gym.Env):
         self,
         dt: float = 0.02,
         max_duration: float = 25.0,
-        standoff_nominal_m: float = 6.0,
-        standoff_min_m: float = 5.0,
-        standoff_max_m: float = 7.0,
+        standoff_nominal_m: float = 3.5,
+        standoff_min_m: float = 2.8,
+        standoff_max_m: float = 4.2,
         collision_dist_m: float = 1.2,
         min_altitude_agl_m: float = 1.0,
         safe_altitude_cushion_m: float = 2.0,
@@ -88,7 +88,7 @@ class DronePursuitEnv(gym.Env):
         self.img_h = img_h
         self.half_hfov = float(np.tan(np.deg2rad(hfov_deg / 2.0)))
         self.half_vfov = float(np.tan(np.deg2rad(vfov_deg / 2.0)))
-        self.w_nominal = 0.0505 # Target bbox width fraction at 6.0m standoff (~32.3 pixels)
+        self.w_nominal = 0.0866 # Target bbox width fraction at 3.5m standoff (~55.4 pixels on 640x480)
         self.max_decel = 2.8    # Calibrated quadrotor braking deceleration (m/s^2)
 
         # Empirical YOLO perception & Kalman tracking configuration
@@ -196,9 +196,9 @@ class DronePursuitEnv(gym.Env):
         physical quadrotor flight envelope to eliminate bang-bang control chatter.
         """
         a = np.clip(action, -1.0, 1.0)
-        # a0: [-1, 1] -> [-5.0 m/s (active reverse/braking), +15.0 m/s (high-speed sprint)]
-        # Neutral stick (a0 = 0.0) commands 5.0 m/s, aligning closely with cruising target speed.
-        target_vx = 5.0 + a[0] * 10.0
+        # a0: [-1, 1] -> [-5.0 m/s (active reverse/braking), +13.0 m/s (sprint pursuit)]
+        # Neutral stick (a0 = 0.0) commands 4.0 m/s, aligning closely with cruising/evasive target speed.
+        target_vx = 4.0 + a[0] * 9.0
 
         # a1: [-1, 1] -> [-6.0 m/s (strafe left), +6.0 m/s (strafe right)]
         target_vy = a[1] * 6.0
@@ -262,19 +262,16 @@ class DronePursuitEnv(gym.Env):
             # Realistic initial forward cruising speed matching target encounter (5.0 to 8.5 m/s)
             chaser_vel = np.array([rng.uniform(5.0, 8.5), 0.0, 0.0], dtype=np.float64)
 
-            # Encounter-adaptive spawn distance:
-            # - Away encounters (tail_chase, oblique_away): Target is fleeing forward.
-            #   50% close spawn (5.5m - 8.0m) trains basket retention & 3.0s lock dwell.
-            #   50% far sprint spawn (10.0m - 16.0m) trains long-range max-throttle gap closure.
-            # - Inward / crossing encounters (head_on, crossing, oblique_inward): Target closing or crossing at 11 m/s.
-            #   Wide spawn (12.0m - 16.0m) provides physical reaction horizon (>1.0s) and wide FOV arc.
+            # Encounter-adaptive spawn distance for 3.5m standoff:
+            # - Away encounters: 50% close spawn (4.0m - 6.5m), 50% sprint spawn (6.5m - 11.0m)
+            # - Inward / crossing encounters: (7.0m - 11.0m)
             if encounter in ["tail_chase", "oblique_away"]:
                 if rng.random() < 0.50:
-                    spawn_dist_range = (5.5, 8.0)
+                    spawn_dist_range = (4.0, 6.5)
                 else:
-                    spawn_dist_range = (10.0, 16.0)
+                    spawn_dist_range = (6.5, 11.0)
             else:
-                spawn_dist_range = (12.0, 16.0)
+                spawn_dist_range = (7.0, 11.0)
 
             target_pos, dist, az, el = self.scenario_gen.sample_initial_target_pos(
                 chaser_pos=chaser_pos,
@@ -313,8 +310,8 @@ class DronePursuitEnv(gym.Env):
             if sub_mode == "fov_border":
                 # Target positioned at extreme FOV edge moving outwards
                 edge_az = rng.choice([-24.0, 24.0]) + rng.uniform(-2.0, 2.0)
-                edge_el = rng.uniform(-10.0, 10.0)
-                dist = rng.uniform(6.0, 12.0)
+                edge_el = rng.uniform(-8.0, 8.0)
+                dist = rng.uniform(4.0, 8.0)
 
                 target_pos, _, _, _ = self.scenario_gen.sample_initial_target_pos(
                     chaser_pos=chaser_pos, chaser_yaw=chaser_yaw, rng=rng,
@@ -339,18 +336,18 @@ class DronePursuitEnv(gym.Env):
                 }
 
             elif sub_mode == "danger_close":
-                # Overshoot recovery: target is close (4.5m - 6.0m) with closing speed requiring braking
-                dist = rng.uniform(4.5, 6.0)
+                # Overshoot recovery: target is close (2.5m - 3.8m) with closing speed requiring braking
+                dist = rng.uniform(2.5, 3.8)
                 target_pos, _, _, _ = self.scenario_gen.sample_initial_target_pos(
                     chaser_pos=chaser_pos, chaser_yaw=chaser_yaw, rng=rng,
                     distance_range=(dist, dist),
                     azimuth_deg_range=(-10.0, 10.0),
-                    elevation_deg_range=(-8.0, 8.0)
+                    elevation_deg_range=(-6.0, 6.0)
                 )
                 target_heading = float(chaser_yaw + rng.uniform(-0.3, 0.3))
                 # Chaser has forward velocity (testing active deceleration / flare recovery)
                 c, s = np.cos(chaser_yaw), np.sin(chaser_yaw)
-                v_fwd = rng.uniform(4.0, 7.0)
+                v_fwd = rng.uniform(3.5, 6.0)
                 chaser_vel = np.array([c * v_fwd, s * v_fwd, 0.0])
 
                 return {
@@ -365,8 +362,8 @@ class DronePursuitEnv(gym.Env):
                 }
 
             elif sub_mode == "fly_by":
-                # Target passes across perpendicular at high speed (10-14 m/s)
-                dist = rng.uniform(5.0, 9.0)
+                # Target passes across perpendicular at high speed
+                dist = rng.uniform(3.5, 6.5)
                 target_pos, _, _, _ = self.scenario_gen.sample_initial_target_pos(
                     chaser_pos=chaser_pos, chaser_yaw=chaser_yaw, rng=rng,
                     distance_range=(dist, dist),
@@ -910,7 +907,7 @@ class DronePursuitEnv(gym.Env):
         elif self.time_lost > self.lost_target_timeout:
             terminated = True
             termination_reason = "lost_target_timeout"
-            terminal_reward = -30.0
+            terminal_reward = -80.0
 
         # Time Horizon Reached (25.0 seconds = 1250 steps)
         elif self.step_count >= self.max_steps:
@@ -918,7 +915,7 @@ class DronePursuitEnv(gym.Env):
             termination_reason = "max_horizon"
 
         # -------------------------------------------------------------
-        # 6. Generation 5 Calibrated Reward Shaping
+        # 6. Calibrated 3.5m Standoff Reward Shaping
         # -------------------------------------------------------------
         # A. Visual Acquisition & Sightline Tracking
         if raw_in_view:
@@ -929,17 +926,17 @@ class DronePursuitEnv(gym.Env):
             r_center = 0.0
         r_tracking_base = r_in_view + r_center
 
-        # B. Multi-Scale Continuous Trail Anchor Potential Field
+        # B. Multi-Scale Continuous Trail Anchor Potential Field (Targeted at 3.5m Rear Wake)
         if raw_in_view:
-            # Wide basin (sigma = 3.5m) pulls drone relentlessly toward rear wake anchor
-            r_wide = 3.0 * float(np.exp(-(d_trail ** 2) / (2.0 * (3.5 ** 2))))
-            # Tight core (sigma = 1.2m) provides steep precision centering at 6.0m rear wake
-            r_tight = 6.0 * float(np.exp(-(d_trail ** 2) / (2.0 * (1.2 ** 2))))
+            # Wide approach basin (sigma = 2.5m) guides drone inward from 10m-12m
+            r_wide = 2.5 * float(np.exp(-(d_trail ** 2) / (2.0 * (2.5 ** 2))))
+            # Tight core well (sigma = 0.8m) provides steep precision centering at 3.5m
+            r_tight = 4.0 * float(np.exp(-(d_trail ** 2) / (2.0 * (0.8 ** 2))))
             r_trail_potential = r_wide + r_tight
 
             # Distance Closing Rate Progress toward rear trail anchor
             trail_closing_rate = (self.prev_trail_error - d_trail) / self.dt
-            r_progress = 0.5 * float(np.clip(trail_closing_rate, -1.0, 5.0))
+            r_progress = 0.5 * float(np.clip(trail_closing_rate, -1.0, 4.0))
         else:
             r_trail_potential = 0.0
             r_progress = 0.0
@@ -947,28 +944,33 @@ class DronePursuitEnv(gym.Env):
         r_basket = r_trail_potential + r_progress
 
         # C. Out-of-FOV Sightline Recovery Incentive
-        # Clean potential-invariant penalty when lost: encourages finding target without oscillatory spinning
-        r_recovery = 0.0 if raw_in_view else -0.10
+        r_recovery = 0.0 if raw_in_view else -0.15
 
         # D. Direct In-Basket Continuous Dwell Holding Reward:
-        # Awards +2.0/step (+100.0/s) continuously while inside the exact 5.0m - 7.0m benchmark basket.
-        # Creates an immediate step-level incentive to avoid creeping below 5.0m or drifting past 7.0m.
+        # Awards +2.0/step (+100.0/s) continuously while inside the exact 2.8m - 4.2m benchmark basket.
         r_basket_dwell = 2.0 if in_basket else 0.0
 
         # E. Sprint Time Incentive:
         r_time = 0.0 if self.milestone_1s_awarded else -0.05
 
+        # Pre-Braking / Velocity Damping: penalize excessive closing speed when approaching the basket
+        p_overspeed = 0.0
+        if dist < 4.8 and dist > 3.2:
+            rel_closing = float((self.prev_distance_error - dist_err) / self.dt)
+            if rel_closing > 1.0:
+                p_overspeed = 0.4 * float((rel_closing - 1.0) ** 2)
+
         self.prev_trail_error = d_trail
         self.prev_distance_error = dist_err
 
-        # F. Proximity & Altitude Soft Barriers
-        # Continuous two-tier proximity repeller:
-        # - Tier 1: Soft under-standoff cushion between 3.0m and 5.0m prevents creeping inside the 5.0m basket floor.
-        # - Tier 2: Steep quadratic barrier below 3.0m prevents physical collision breach (< 1.2m).
-        if dist < 3.0 and dist >= self.collision_dist:
-            p_proximity = 2.0 + 4.0 * ((3.0 - dist) / (3.0 - self.collision_dist)) ** 2
-        elif dist < 5.0 and dist >= 3.0:
-            p_proximity = 2.0 * ((5.0 - dist) / 2.0) ** 2
+        # F. Proximity & Altitude Soft Barriers (3.5m Standoff)
+        # Collision radius is 1.2m. The basket floor is 2.8m.
+        # - Tier 1 (2.0m <= dist < 2.8m): Soft under-standoff cushion prevents creeping inside 2.8m floor.
+        # - Tier 2 (dist < 2.0m): Steep quadratic repeller prevents physical collision (< 1.2m).
+        if dist < 2.0 and dist >= self.collision_dist:
+            p_proximity = 3.0 + 8.0 * ((2.0 - dist) / (2.0 - self.collision_dist)) ** 2
+        elif dist < 2.8 and dist >= 2.0:
+            p_proximity = 3.0 * ((2.8 - dist) / 0.8) ** 2
         else:
             p_proximity = 0.0
 
@@ -982,15 +984,13 @@ class DronePursuitEnv(gym.Env):
         self.last_action = action.copy()
 
         # 2. Symmetric Low-Gain Control Effort Regularization:
-        # Treats acceleration and deceleration symmetrically, allowing the drone to comfortably
-        # command a0 = -0.15 (3.5 m/s) on cruising targets without incurring asymmetric braking penalties.
         p_effort = 0.01 * float(action[0]**2) + 0.01 * float(action[2]**2) + 0.02 * float(action[1]**2 + action[3]**2)
 
         # Step Reward Total
         step_reward = (
             r_tracking_base + r_trail_potential + r_progress
             + r_basket_dwell + r_recovery + r_milestone + r_time
-            - p_proximity - p_low_alt - p_jerk - p_effort
+            - p_overspeed - p_proximity - p_low_alt - p_jerk - p_effort
             + terminal_reward
         )
 

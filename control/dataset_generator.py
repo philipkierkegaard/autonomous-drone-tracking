@@ -126,9 +126,9 @@ class PursuitDatasetGenerator:
         hfov_deg: float = 60.0,
         vfov_deg: float = 45.0,
         fov_margin_deg: float = 5.0,
-        min_distance_m: float = 8.0,
-        max_distance_m: float = 20.0,
-        nominal_altitude_m: float = 2.5
+        min_distance_m: float = 5.0,
+        max_distance_m: float = 10.0,
+        nominal_altitude_m: float = 3.0
     ):
         self.camera_uptilt_deg = camera_uptilt_deg
         self.camera_uptilt = np.deg2rad(camera_uptilt_deg)
@@ -263,7 +263,7 @@ class PursuitDatasetGenerator:
         encounter_type: Union[str, EncounterType] = EncounterType.TAIL_CHASE,
         seed: int = 42,
         duration: float = 25.0,
-        chaser_alt_m: float = 2.5
+        chaser_alt_m: float = 3.0
     ) -> PursuitScenario:
         """Generates a single deterministic, fully-validated pursuit scenario."""
         rng = np.random.default_rng(seed)
@@ -274,7 +274,10 @@ class PursuitDatasetGenerator:
         target_pos, R, az_deg, el_deg = self.sample_initial_target_pos(
             chaser_pos=chaser_pos,
             chaser_yaw=chaser_yaw,
-            rng=rng
+            rng=rng,
+            distance_range=(5.0, 10.0),
+            azimuth_deg_range=(-15.0, 15.0),
+            elevation_deg_range=(-6.0, 6.0)
         )
 
         target_heading = self.compute_encounter_heading(

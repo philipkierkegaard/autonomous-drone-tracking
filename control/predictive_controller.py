@@ -99,14 +99,14 @@ class RecurrentVisualServoController:
         max_vel_up: float = 4.0,
         max_yaw_rate: float = 120.0,
         deterministic: bool = True,
-        w_nominal: float = 0.0505,
+        w_nominal: float = 0.0866,
     ):
         self.img_w = img_w
         self.img_h = img_h
         self.camera_uptilt = float(np.deg2rad(camera_uptilt_deg))
         self.half_hfov = float(np.tan(np.deg2rad(hfov_deg / 2.0)))
         self.half_vfov = float(np.tan(np.deg2rad(vfov_deg / 2.0)))
-        self.w_nominal = w_nominal  # Target bbox width fraction at 6.0m standoff (~32.3 pixels)
+        self.w_nominal = w_nominal  # Target bbox width fraction at 3.5m standoff (~55.4 pixels on 640x480)
         self.max_vel_xy = max_vel_xy
         self.max_vel_down = max_vel_down
         self.max_vel_up = max_vel_up
@@ -391,7 +391,7 @@ class RecurrentVisualServoController:
 
         # Unpack continuous action [-1, 1]^4 into physical velocity setpoints
         a = np.clip(action, -1.0, 1.0)
-        target_vx = float(5.0 + a[0] * 10.0)        # [-5.0 m/s, 15.0 m/s]
+        target_vx = float(4.0 + a[0] * 9.0)         # [-5.0 m/s, 13.0 m/s]
         target_vy = float(a[1] * 6.0)                # [-6.0 m/s, +6.0 m/s]
         target_vz = float(-0.75 + a[2] * 3.25)       # [-4.0 m/s, +2.5 m/s]
         target_yaw = float(a[3] * self.max_yaw_rate) # [-120 deg/s, +120 deg/s]
