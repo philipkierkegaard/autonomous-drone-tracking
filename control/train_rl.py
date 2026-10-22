@@ -53,20 +53,23 @@ def linear_schedule(initial_value: float, min_value: float = 1.5e-5) -> Callable
     Linear learning rate scheduler that decays from initial_value down to min_value.
     progress_remaining starts at 1.0 (start of training) and transitions to 0.0 (end of training).
     """
+    actual_min = min(min_value, initial_value * 0.25)
     def _schedule(progress_remaining: float) -> float:
         clamped_p = float(np.clip(progress_remaining, 0.0, 1.0))
-        return min_value + clamped_p * (initial_value - min_value)
+        return actual_min + clamped_p * (initial_value - actual_min)
     return _schedule
 
 
-def make_env(rank: int, seed: int = 0, domain_randomization: bool = True, frame_drop_rate: float = 0.0):
+def make_env(rank: int, seed: int = 0, domain_randomization: bool = True, frame_drop_rate: float = 0.0, reward_mode: str = "monotone_potential", profile_dist=None):
     """Utility factory for creating vectorized DronePursuitEnv instances."""
     def _init():
         env = DronePursuitEnv(
             domain_randomization=domain_randomization,
             in_medias_res_ratio=0.30 if domain_randomization else 0.0,
             frame_drop_rate=frame_drop_rate,
-            use_empirical_perception=True
+            use_empirical_perception=True,
+            reward_mode=reward_mode,
+            profile_distribution=profile_dist,
         )
         env.reset(seed=seed + rank)
         return env
@@ -221,6 +224,10 @@ class TaskMetricEvalCallback(BaseCallback):
                 }
                 with open(self.best_model_save_path / "best_metrics.json", "w", encoding="utf-8") as f:
                     json.dump(best_meta, f, indent=2)
+                try:
+                    torch.save(self.model.policy.state_dict(), str(self.best_model_save_path / "actor_weights.pt"))
+                except Exception:
+                    pass
 
         # 2. Strict aerospace-gated best model (requires 0% collision, 0% ground strike, >=60% success)
         if gate_passed and task_score > self.best_safe_score:
@@ -251,7 +258,7 @@ class TaskMetricEvalCallback(BaseCallback):
             self.model.save(str(latest_file))
 
         # TensorBoard Logging
-        if self.logger:
+        if getattr(self.model, "_logger", None) is not None:
             self.logger.record("eval/task_score", task_score)
             self.logger.record("eval/success_rate", success_rate * 100.0)
             self.logger.record("eval/mae_standoff_error_m", mae_standoff_error)
@@ -361,6 +368,7 @@ def train(
     eval_freq: int = 25_000,
     checkpoint_freq: int = 50_000,
     resume_path: Optional[Union[str, Path]] = None,
+    warm_start_weights: Optional[Union[str, Path]] = None,
     output_dir: Path = PROJECT_ROOT / "control" / "weights" / "recurrent_ppo_scratch",
     log_dir: Path = PROJECT_ROOT / "runs" / "recurrent_ppo_tensorboard",
     seed: int = 42,
@@ -369,10 +377,19 @@ def train(
     wandb_entity: str = "philipkierkegaard-danmarks-tekniske-universitet-dtu",
     wandb_run_name: Optional[str] = None,
     wandb_notes: Optional[str] = None,
+    reward_mode: str = "monotone_potential",
+    hyper_weight: float = 0.45,
+    warm_start_log_std: float = -0.8,
 ):
     """Executes the RecurrentPPO training loop with task-level evaluation and W&B tracking."""
     output_dir.mkdir(parents=True, exist_ok=True)
     log_dir.mkdir(parents=True, exist_ok=True)
+
+    # Compute target flight profile distribution
+    c_weight = 0.10
+    e_weight = max(0.05, 1.0 - c_weight - hyper_weight)
+    h_weight = hyper_weight
+    profile_dist = [c_weight, e_weight, h_weight]
 
     # Initialize Weights & Biases run if requested
     wb_run = None
@@ -397,8 +414,11 @@ def train(
                 "checkpoint_freq": checkpoint_freq,
                 "seed": seed,
                 "standoff_distance_m": 3.5,
-                "standoff_basket_m": [2.8, 4.2],
+                "standoff_basket_m": [2.5, 4.5],
                 "encounter_distribution": "70% rear pursuit, 30% in-medias-res",
+                "camera_resolution": "1280x720",
+                "camera_hfov_deg": 62.0,
+                "camera_vfov_deg": 38.0,
                 "observation_dim": 13,
                 "action_dim": 4,
                 "policy": "MlpLstmPolicy",
@@ -408,7 +428,7 @@ def train(
                     project=wandb_project,
                     entity=wandb_entity,
                     name=run_name,
-                    notes=wandb_notes or "Recurrent PPO with calibrated 6m standoff reward & strict safety gating",
+                    notes=wandb_notes or "Recurrent PPO with calibrated 3.5m standoff on 1280x720 (62°x38° FOV)",
                     tags=["recurrent-ppo", "lstm", "drone-pursuit", "dtu-thesis"],
                     config=wb_config,
                     sync_tensorboard=True,
@@ -451,9 +471,9 @@ def train(
 
     # Vectorized training environments with VecMonitor for rollout logging
     if n_envs > 1:
-        raw_env = DummyVecEnv([make_env(i, seed=seed) for i in range(n_envs)])
+        raw_env = DummyVecEnv([make_env(i, seed=seed, reward_mode=reward_mode, profile_dist=profile_dist) for i in range(n_envs)])
     else:
-        raw_env = DummyVecEnv([make_env(0, seed=seed)])
+        raw_env = DummyVecEnv([make_env(0, seed=seed, reward_mode=reward_mode, profile_dist=profile_dist)])
     env = VecMonitor(raw_env)
 
     # Evaluation environment: single DronePursuitEnv (deterministic, empirical perception)
@@ -461,7 +481,9 @@ def train(
         domain_randomization=False,
         in_medias_res_ratio=0.0,
         frame_drop_rate=0.0,
-        use_empirical_perception=True
+        use_empirical_perception=True,
+        reward_mode=reward_mode,
+        profile_distribution=profile_dist,
     )
 
     # Load or generate the fixed 30-scenario validation suite
@@ -539,6 +561,35 @@ def train(
         )
         reset_timesteps = True
 
+    # Inject warm-start imitation learning weights if requested
+    if warm_start_weights is not None and Path(warm_start_weights).exists():
+        print(f"\n[WARM_START] Injecting cloned expert weights from: {warm_start_weights}")
+        standalone_sd = torch.load(str(warm_start_weights), map_location="cpu")
+        sb3_sd = model.policy.state_dict()
+        mapping = {
+            "lstm.weight_ih_l0": "lstm_actor.weight_ih_l0",
+            "lstm.weight_hh_l0": "lstm_actor.weight_hh_l0",
+            "lstm.bias_ih_l0": "lstm_actor.bias_ih_l0",
+            "lstm.bias_hh_l0": "lstm_actor.bias_hh_l0",
+            "mlp.0.weight": "mlp_extractor.policy_net.0.weight",
+            "mlp.0.bias": "mlp_extractor.policy_net.0.bias",
+            "action_net.weight": "action_net.weight",
+            "action_net.bias": "action_net.bias",
+        }
+        for src_k, dst_k in mapping.items():
+            if src_k in standalone_sd and dst_k in sb3_sd:
+                sb3_sd[dst_k] = standalone_sd[src_k].clone()
+        # Seed critic LSTM with the same spatial/temporal encoder
+        if "lstm.weight_ih_l0" in standalone_sd:
+            sb3_sd["lstm_critic.weight_ih_l0"] = standalone_sd["lstm.weight_ih_l0"].clone()
+            sb3_sd["lstm_critic.weight_hh_l0"] = standalone_sd["lstm.weight_hh_l0"].clone()
+            sb3_sd["lstm_critic.bias_ih_l0"] = standalone_sd["lstm.bias_ih_l0"].clone()
+            sb3_sd["lstm_critic.bias_hh_l0"] = standalone_sd["lstm.bias_hh_l0"].clone()
+        # Set exploration log_std to configured level (default: -0.8 -> std ~ 0.45)
+        sb3_sd["log_std"] = torch.full((4,), float(warm_start_log_std))
+        model.policy.load_state_dict(sb3_sd)
+        print("[WARM_START] Weights successfully transferred into RecurrentPPO policy!")
+
     print("[TRAIN] Starting policy gradient optimization...")
     model.learn(
         total_timesteps=total_timesteps,
@@ -551,6 +602,17 @@ def train(
     model.save(str(final_path))
     print(f"\n[DONE] Training complete! Final policy saved to: {final_path}")
     print(f"[BEST] Best checkpoint stored in: {output_dir / 'best_model'}")
+
+    # Export standalone PyTorch actor weights for fast, pickle-free deployment
+    try:
+        actor_weights_path = output_dir / "actor_weights.pt"
+        torch.save(model.policy.state_dict(), str(actor_weights_path))
+        print(f"[WEIGHTS] Exported standalone policy state dict to: {actor_weights_path}")
+        best_actor_path = output_dir / "best_model" / "actor_weights.pt"
+        if best_actor_path.parent.exists():
+            torch.save(model.policy.state_dict(), str(best_actor_path))
+    except Exception as e:
+        print(f"[WARN] Could not export standalone weights: {e}")
 
     # Finalize Weights & Biases session and upload best models
     if wb_run is not None:
@@ -580,12 +642,18 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint-freq", type=int, default=50_000, help="Checkpoint save frequency in timesteps (default: 50,000)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed (default: 42)")
     parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint zip to resume training from")
+    parser.add_argument("--warm-start-weights", type=str, default=None, help="Path to StandaloneRecurrentPolicy .pt actor weights to warm start from")
+    parser.add_argument("--warm-start-log-std", type=float, default=-0.8, help="Action distribution log_std when warm-starting (default: -0.8 -> std ~ 0.45)")
     parser.add_argument("--output-dir", type=str, default=None, help="Directory to save model weights")
     parser.add_argument("--wandb", action=argparse.BooleanOptionalAction, default=True, help="Enable Weights & Biases logging (default: True, use --no-wandb to disable)")
     parser.add_argument("--wandb-project", type=str, default="autonomous-drone-tracking", help="W&B project name")
     parser.add_argument("--wandb-entity", type=str, default="philipkierkegaard-danmarks-tekniske-universitet-dtu", help="W&B entity name")
     parser.add_argument("--wandb-run-name", type=str, default=None, help="Custom W&B run name")
     parser.add_argument("--wandb-notes", type=str, default=None, help="Custom notes for the W&B run")
+    parser.add_argument("--reward-mode", type=str, default="monotone_potential",
+                        help="Reward function architecture (e.g. monotone_potential, huber_loss, lead_pursuit, speed_adaptive, closing_speed_bell, tight_centering, optical_expansion_lead, cumulative_dwell_jackpot, terminal_bonus_steep, unified_dogfight_optimal)")
+    parser.add_argument("--hyper-weight", type=float, default=0.45,
+                        help="Weight ratio of hyper-evasive trajectories (default: 0.45, e.g. 0.60 for 60 percent hyper-evasive)")
     args = parser.parse_args()
 
     out_p = Path(args.output_dir) if args.output_dir else PROJECT_ROOT / "control" / "weights" / "recurrent_ppo_scratch"
@@ -601,6 +669,7 @@ if __name__ == "__main__":
         eval_freq=args.eval_freq,
         checkpoint_freq=args.checkpoint_freq,
         resume_path=args.resume,
+        warm_start_weights=args.warm_start_weights,
         output_dir=out_p,
         seed=args.seed,
         use_wandb=args.wandb,
@@ -608,4 +677,7 @@ if __name__ == "__main__":
         wandb_entity=args.wandb_entity,
         wandb_run_name=args.wandb_run_name,
         wandb_notes=args.wandb_notes,
+        reward_mode=args.reward_mode,
+        hyper_weight=args.hyper_weight,
+        warm_start_log_std=args.warm_start_log_std,
     )

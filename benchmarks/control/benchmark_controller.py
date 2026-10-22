@@ -36,8 +36,10 @@ import matplotlib.pyplot as plt
 
 from control.simulation import FastPixhawkQuadSim
 from control.pid_controller import KinematicVisualServoController
+from control.predictive_controller import RecurrentVisualServoController
 from control.trajectory import StochasticTargetTrajectory, PROFILES
-from perception.pipeline import KalmanBoxTracker
+from perception.pipeline import DroneTracker, KalmanBoxTracker
+from control.synthetic_sensor import SyntheticYOLOSensor
 from control.dataset_generator import PursuitScenario, PursuitDataset
 
 
@@ -48,22 +50,37 @@ def evaluate_single_run(
     frame_drop_rate: float = 0.0,
     duration: float = 25.0,
     dt: float = 0.02,
-    standoff_min: float = 5.0,
-    standoff_max: float = 7.0,
-    dwell_time_required: float = 1.5,
+    standoff_nominal: float = 3.5,
+    standoff_min: float = 2.5,
+    standoff_max: float = 4.5,
+    dwell_time_required: float = 3.0,
+    desired_bbox_size: float = 110.0,
     max_lost_frames: int = 15,
-    img_w: int = 640,
-    img_h: int = 480,
-    max_decel: float = 2.8,
-    scenario: Optional[Any] = None
+    img_w: int = 1280,
+    img_h: int = 720,
+    max_decel: float = 6.0,
+    controller_type: str = "pid",
+    model_path: Optional[Union[str, Path]] = None,
+    scenario: Optional[Any] = None,
+    controller: Optional[Any] = None,
+    noise_mode: str = "empirical",
+    camera_fps: float = 30.0,
 ) -> Dict[str, Any]:
     """
     Executes a single closed-loop pursuit simulation run and computes performance metrics.
     Can run either a parameterized scenario from PursuitDataset or standalone parameters.
     """
+    sim_kwargs = dict(
+        dt=dt,
+        max_vel_xy=6.5,
+        max_accel_xy=6.0,
+        max_vel_up=2.5,
+        max_vel_down=1.5
+    )
+
     if scenario is not None:
         target_oracle = scenario.create_target_oracle()
-        sim = FastPixhawkQuadSim(dt=dt)
+        sim = FastPixhawkQuadSim(**sim_kwargs)
         sim.reset(initial_pos=scenario.initial_chaser_pos, initial_yaw=scenario.initial_chaser_yaw)
         profile = scenario.profile
         seed = scenario.seed
@@ -74,31 +91,83 @@ def evaluate_single_run(
         target_oracle = StochasticTargetTrajectory(
             duration=duration + 5.0,
             profile=profile,
-            initial_pos=np.array([12.0, 0.0, -2.0], dtype=np.float64),
+            initial_pos=np.array([12.0, 0.0, -2.5], dtype=np.float64),
             initial_heading_rad=0.0,
             seed=seed
         )
-        sim = FastPixhawkQuadSim(dt=dt)
-        sim.reset(initial_pos=[0.0, 0.0, -2.0], initial_yaw=0.0)
+        sim = FastPixhawkQuadSim(**sim_kwargs)
+        sim.reset(initial_pos=[0.0, 0.0, -2.5], initial_yaw=0.0)
         encounter_type = "tail_chase"
         scenario_id = f"{profile}_{seed}"
 
     rng = np.random.default_rng(seed)
     total_steps = int(round(duration / dt))
 
-    # 1. Initialize Drone Controller
-    controller = KinematicVisualServoController(
-        camera_uptilt_deg=15.0,
-        hfov_deg=60.0,
-        vfov_deg=45.0,
-        desired_bbox_size=35.0,
-        max_decel=max_decel,
-    )
+    # 1. Initialize Drone Controller (PID vs Recurrent RL)
+    if controller is None:
+        if controller_type.lower() == "rl":
+            if model_path is None:
+                default_p = PROJECT_ROOT / "control" / "weights" / "recurrent_ppo_scratch" / "checkpoints" / "recurrent_ppo_drone_850000_steps.zip"
+                if not default_p.exists():
+                    default_p = PROJECT_ROOT / "control" / "weights" / "recurrent_ppo_scratch" / "best_model" / "best_model.zip"
+                model_path = default_p
+            controller = RecurrentVisualServoController(
+                model_path=str(model_path),
+                img_w=img_w,
+                img_h=img_h,
+                hfov_deg=62.0,
+                vfov_deg=38.0,
+                w_nominal=0.0859
+            )
+        else:
+            controller = KinematicVisualServoController(
+                camera_uptilt_deg=15.0,
+                hfov_deg=62.0,
+                vfov_deg=38.0,
+                desired_bbox_size=desired_bbox_size,
+                desired_standoff_dist=standoff_nominal,
+                scale_mode="width",
+                use_bbox_size=True,
+                enable_lateral_strafe=True,
+                kp_lat=2.5,
+                kd_lat=0.35,
+                max_lat_vel=2.5,
+                max_lat_accel=4.0,
+                max_accel=6.0,
+                max_decel=max_decel,
+                min_limits=np.array([-0.5, -2.5, -2.5, -90.0]),
+                max_limits=np.array([ 6.5,  2.5,  1.5,  90.0]),
+                search_mode="decay",
+            )
+    else:
+        if hasattr(controller, "reset"):
+            controller.reset()
 
-    # 2. Perception Tracker Setup (8D Kalman Filter vs Raw)
-    tracker: Optional[KalmanBoxTracker] = None
+    # 2. Perception Tracker Setup (Empirical YOLO Noise vs. Legacy Bernoulli vs. None)
+    is_empirical = (str(noise_mode).lower().strip() == "empirical")
+    is_none_noise = (str(noise_mode).lower().strip() == "none")
+
+    synthetic_sensor: Optional[SyntheticYOLOSensor] = None
+    drone_tracker: Optional[DroneTracker] = None
+    kalman_tracker: Optional[KalmanBoxTracker] = None
     last_valid_raw_telem: Optional[Dict[str, Any]] = None
     raw_time_since_valid = 0
+
+    camera_dt = 1.0 / camera_fps
+    time_since_camera = 0.0
+
+    if is_empirical:
+        synthetic_sensor = SyntheticYOLOSensor(
+            img_w=img_w,
+            img_h=img_h,
+            env_mode="nominal",
+            seed=seed
+        )
+        drone_tracker = DroneTracker(
+            dt=dt,
+            max_lost_frames=max_lost_frames,
+            min_hits_to_confirm=2
+        )
 
     # 3. Telemetry & Metric Accumulators
     continuous_lock_dwell = 0.0
@@ -119,51 +188,78 @@ def evaluate_single_run(
         # Ground-truth camera projection
         true_telem = sim.get_camera_telemetry(
             target_world,
-            hfov_deg=60.0,
-            vfov_deg=45.0,
+            hfov_deg=62.0,
+            vfov_deg=38.0,
             target_w_m=0.35,
             target_h_m=0.20,
             img_w=img_w,
             img_h=img_h,
-            desired_target_size=35.0
+            desired_target_size=desired_bbox_size
         )
 
-        # Simulate camera frame drop / detector miss
-        is_dropped = (rng.uniform(0.0, 1.0) < frame_drop_rate)
-        measured_bbox = true_telem["bbox"] if (true_telem["in_view"] and not is_dropped) else None
-
         # -------------------------------------------------------------
-        # Perception Processing (Kalman Filter vs. Raw Zero-Order Hold)
+        # Perception Processing (Empirical YOLO Noise vs. Kalman vs. Raw)
         # -------------------------------------------------------------
-        if use_kalman:
-            if tracker is not None:
-                tracker.predict()
+        if is_empirical:
+            time_since_camera += dt
+            is_camera_tick = (time_since_camera >= camera_dt - 1e-5)
+            if is_camera_tick:
+                time_since_camera -= camera_dt
+                norm_cx = (true_telem["error_x"] + 1.0) / 2.0
+                norm_cy = (true_telem["error_y"] + 1.0) / 2.0
+                norm_w = true_telem["bbox_w"] / img_w
+                norm_h = true_telem["bbox_h"] / img_h
+                in_fov = bool(true_telem["in_view"])
 
-            if measured_bbox is not None:
-                if tracker is None:
-                    tracker = KalmanBoxTracker(np.array(measured_bbox, dtype=np.float32), dt=dt)
-                else:
-                    tracker.update(np.array(measured_bbox, dtype=np.float32))
+                det_bbox, conf, fps_boxes = synthetic_sensor.step(
+                    norm_cx, norm_cy, norm_w, norm_h, in_fov=in_fov
+                )
+                if frame_drop_rate > 0.0 and rng.uniform(0.0, 1.0) < frame_drop_rate:
+                    det_bbox = None
 
-            if tracker is not None and tracker.time_since_update <= max_lost_frames:
-                pred_box = tracker.get_state()
+                detections = []
+                confs = []
+                if det_bbox is not None:
+                    detections.append(det_bbox)
+                    confs.append(conf)
+                for fp in fps_boxes:
+                    detections.append(fp)
+                    confs.append(0.36)
+
+                det_arr = np.array(detections, dtype=np.float32) if detections else np.empty((0, 4), dtype=np.float32)
+                conf_arr = np.array(confs, dtype=np.float32) if confs else np.empty((0,), dtype=np.float32)
+                drone_tracker.update(det_arr, conf_arr, dt_step=dt)
+            else:
+                for trk in drone_tracker.trackers:
+                    trk.predict(dt_step=dt)
+
+            primary = None
+            if drone_tracker.primary_track_id is not None:
+                primary = next((t for t in drone_tracker.trackers if t.id == drone_tracker.primary_track_id), None)
+
+            if primary is not None and primary.hits >= drone_tracker.min_hits_to_confirm and primary.time_since_update <= max_lost_frames:
+                pred_box = primary.get_state()
                 tcx = (pred_box[0] + pred_box[2]) / 2.0
                 tcy = (pred_box[1] + pred_box[3]) / 2.0
                 bw = max(1.0, pred_box[2] - pred_box[0])
                 bh = max(1.0, pred_box[3] - pred_box[1])
-                curr_sz = max(bw, bh)
+                curr_sz = bw
 
                 err_x = (tcx - img_w / 2.0) / (img_w / 2.0)
                 err_y = (tcy - img_h / 2.0) / (img_h / 2.0)
-                range_err = (35.0 - curr_sz) / 35.0
+                range_err = (desired_bbox_size - curr_sz) / desired_bbox_size
 
                 ctrl_telem = {
-                    "status": "COASTING" if tracker.time_since_update > 0 else "LOCKED",
+                    "status": "COASTING" if primary.time_since_update > 0 else "LOCKED",
                     "error_x": float(np.clip(err_x, -1.0, 1.0)),
                     "error_y": float(np.clip(err_y, -1.0, 1.0)),
                     "error_range": float(np.clip(range_err, -1.0, 1.0)),
                     "target_size": float(curr_sz),
-                    "desired_size": 35.0,
+                    "desired_size": desired_bbox_size,
+                    "bbox_w": float(bw),
+                    "bbox_h": float(bh),
+                    "w_norm": float(bw / img_w) if img_w > 0 else 0.0,
+                    "scale_mode": "width",
                     "distance": true_telem["distance"]
                 }
             else:
@@ -173,11 +269,71 @@ def evaluate_single_run(
                     "error_y": 0.0,
                     "error_range": 0.0,
                     "target_size": 0.0,
-                    "desired_size": 35.0,
+                    "desired_size": desired_bbox_size,
+                    "bbox_w": 0.0,
+                    "bbox_h": 0.0,
+                    "w_norm": 0.0,
+                    "scale_mode": "width",
+                    "distance": true_telem["distance"]
+                }
+        elif use_kalman:
+            # Legacy Bernoulli / Kalman mode
+            is_dropped = (rng.uniform(0.0, 1.0) < frame_drop_rate) if not is_none_noise else False
+            measured_bbox = true_telem["bbox"] if (true_telem["in_view"] and not is_dropped) else None
+
+            if kalman_tracker is not None:
+                kalman_tracker.predict()
+
+            if measured_bbox is not None:
+                if kalman_tracker is None:
+                    kalman_tracker = KalmanBoxTracker(np.array(measured_bbox, dtype=np.float32), dt=dt)
+                else:
+                    kalman_tracker.update(np.array(measured_bbox, dtype=np.float32))
+
+            if kalman_tracker is not None and kalman_tracker.time_since_update <= max_lost_frames:
+                pred_box = kalman_tracker.get_state()
+                tcx = (pred_box[0] + pred_box[2]) / 2.0
+                tcy = (pred_box[1] + pred_box[3]) / 2.0
+                bw = max(1.0, pred_box[2] - pred_box[0])
+                bh = max(1.0, pred_box[3] - pred_box[1])
+                curr_sz = bw
+
+                err_x = (tcx - img_w / 2.0) / (img_w / 2.0)
+                err_y = (tcy - img_h / 2.0) / (img_h / 2.0)
+                range_err = (desired_bbox_size - curr_sz) / desired_bbox_size
+
+                ctrl_telem = {
+                    "status": "COASTING" if kalman_tracker.time_since_update > 0 else "LOCKED",
+                    "error_x": float(np.clip(err_x, -1.0, 1.0)),
+                    "error_y": float(np.clip(err_y, -1.0, 1.0)),
+                    "error_range": float(np.clip(range_err, -1.0, 1.0)),
+                    "target_size": float(curr_sz),
+                    "desired_size": desired_bbox_size,
+                    "bbox_w": float(bw),
+                    "bbox_h": float(bh),
+                    "w_norm": float(bw / img_w) if img_w > 0 else 0.0,
+                    "scale_mode": "width",
+                    "distance": true_telem["distance"]
+                }
+            else:
+                ctrl_telem = {
+                    "status": "SEARCHING",
+                    "error_x": 0.0,
+                    "error_y": 0.0,
+                    "error_range": 0.0,
+                    "target_size": 0.0,
+                    "desired_size": desired_bbox_size,
+                    "bbox_w": 0.0,
+                    "bbox_h": 0.0,
+                    "w_norm": 0.0,
+                    "scale_mode": "width",
                     "distance": true_telem["distance"]
                 }
         else:
             # Raw Mode (Zero-Order Hold / Stale lock on drops)
+            is_dropped = (rng.uniform(0.0, 1.0) < frame_drop_rate) if not is_none_noise else False
+            measured_bbox = true_telem["bbox"] if (true_telem["in_view"] and not is_dropped) else None
+
             if measured_bbox is not None:
                 last_valid_raw_telem = true_telem.copy()
                 raw_time_since_valid = 0
@@ -194,14 +350,33 @@ def evaluate_single_run(
                     "error_y": 0.0,
                     "error_range": 0.0,
                     "target_size": 0.0,
-                    "desired_size": 35.0,
+                    "desired_size": desired_bbox_size,
+                    "bbox_w": 0.0,
+                    "bbox_h": 0.0,
+                    "w_norm": 0.0,
+                    "scale_mode": "width",
                     "distance": true_telem["distance"]
                 }
 
         # -------------------------------------------------------------
         # Flight Control Step
         # -------------------------------------------------------------
-        cmd = controller.compute_cmd(ctrl_telem, drone_pitch=sim.pitch, dt=dt)
+        if controller_type.lower() == "rl":
+            c, s = np.cos(sim.yaw), np.sin(sim.yaw)
+            vx_b = c * sim.vel[0] + s * sim.vel[1]
+            vy_b = -s * sim.vel[0] + c * sim.vel[1]
+            vz_b = sim.vel[2]
+            cmd = controller.compute_cmd(
+                ctrl_telem,
+                drone_pitch=sim.pitch,
+                drone_roll=sim.roll,
+                dt=dt,
+                vehicle_vel=np.array([vx_b, vy_b, vz_b]),
+                vehicle_yaw_rate=sim.yaw_rate,
+                current_alt_m=-sim.pos[2]
+            )
+        else:
+            cmd = controller.compute_cmd(ctrl_telem, drone_pitch=sim.pitch, drone_roll=sim.roll, dt=dt)
         sim.step(cmd)
 
         # -------------------------------------------------------------
@@ -220,7 +395,7 @@ def evaluate_single_run(
         if in_view_gt:
             in_view_count += 1
 
-        # Check engagement envelope condition: 5.0m <= distance <= 7.0m AND visible in FOV
+        # Check engagement envelope condition: 2.5m <= distance <= 4.5m AND visible in FOV
         in_envelope = (standoff_min <= dist <= standoff_max) and in_view_gt
         if in_envelope:
             cumulative_firing_time += dt
@@ -229,7 +404,7 @@ def evaluate_single_run(
                 time_to_first_lock = t - dwell_time_required
                 lock_achieved = True
         else:
-            continuous_lock_dwell = 0.0
+            continuous_lock_dwell = max(0.0, continuous_lock_dwell - 0.5 * dt)
 
     return {
         "scenario_id": scenario_id,
@@ -237,6 +412,7 @@ def evaluate_single_run(
         "profile": profile,
         "seed": seed,
         "use_kalman": use_kalman,
+        "noise_mode": noise_mode,
         "frame_drop_rate": frame_drop_rate,
         "success": lock_achieved,
         "time_to_lock": time_to_first_lock,
@@ -244,7 +420,7 @@ def evaluate_single_run(
         "firing_window_s": cumulative_firing_time,
         "firing_window_pct": (cumulative_firing_time / duration) * 100.0,
         "min_distance": min_dist,
-        "collision_breach": bool(min_dist < 2.5),
+        "collision_breach": bool(min_dist < 1.2),
         "path_length": total_path_length,
         "control_effort": control_effort
     }
@@ -256,8 +432,11 @@ def run_benchmark_matrix(
     num_seeds: int = 20,
     test_ablation: bool = True,
     duration: float = 25.0,
-    max_decel: float = 2.8,
-    output_dir: Path = PROJECT_ROOT / "outputs" / "benchmarks" / "control"
+    max_decel: float = 6.0,
+    controller_type: str = "pid",
+    model_path: Optional[Union[str, Path]] = None,
+    output_dir: Path = PROJECT_ROOT / "outputs" / "benchmarks" / "control",
+    noise_mode: str = "empirical",
 ) -> Dict[str, Any]:
     """
     Executes the full Monte Carlo benchmarking matrix and exports structured reports & plots.
@@ -270,15 +449,52 @@ def run_benchmark_matrix(
 
     print(f"\n{'='*76}")
     print(f"  RUNNING AUTONOMOUS PURSUIT BENCHMARK MATRIX ({total_runs} RUNS)")
+    print(f"  Controller:  {controller_type.upper()}")
     print(f"  Profiles:    {profiles}")
     print(f"  Drop Rates:  {[f'{int(d*100)}%' for d in drop_rates]}")
     print(f"  Ablation:    {'Kalman vs Raw' if test_ablation else 'Kalman Only'}")
     print(f"  Seeds/Cond:  {num_seeds} runs")
-    print(f"  Duration:    {duration:.1f}s at 50 Hz")
+    print(f"  Duration:    {duration:.1f}s at 50 Hz (Standoff: 3.5m, Basket: 2.5-4.5m)")
     print(f"{'='*76}\n")
 
     raw_results = []
     completed = 0
+
+    # Instantiate controller once across runs to avoid repeated disk I/O
+    if controller_type.lower() == "rl":
+        if model_path is None:
+            default_p = PROJECT_ROOT / "control" / "weights" / "recurrent_ppo_scratch" / "checkpoints" / "recurrent_ppo_drone_850000_steps.zip"
+            if not default_p.exists():
+                default_p = PROJECT_ROOT / "control" / "weights" / "recurrent_ppo_scratch" / "best_model" / "best_model.zip"
+            model_path = default_p
+        shared_ctrl = RecurrentVisualServoController(
+            model_path=str(model_path),
+            img_w=1280,
+            img_h=720,
+            hfov_deg=62.0,
+            vfov_deg=38.0,
+            w_nominal=0.0859
+        )
+    else:
+        shared_ctrl = KinematicVisualServoController(
+            camera_uptilt_deg=15.0,
+            hfov_deg=62.0,
+            vfov_deg=38.0,
+            desired_bbox_size=110.0,
+            desired_standoff_dist=3.5,
+            scale_mode="width",
+            use_bbox_size=True,
+            enable_lateral_strafe=True,
+            kp_lat=2.5,
+            kd_lat=0.35,
+            max_lat_vel=2.5,
+            max_lat_accel=4.0,
+            max_accel=4.0,
+            max_decel=max_decel,
+            min_limits=np.array([-0.5, -2.5, -2.5, -90.0]),
+            max_limits=np.array([ 6.0,  2.5,  1.5,  90.0]),
+            search_mode="decay",
+        )
 
     for profile in profiles:
         for drop_rate in drop_rates:
@@ -291,7 +507,11 @@ def run_benchmark_matrix(
                         use_kalman=use_kalman,
                         frame_drop_rate=drop_rate,
                         duration=duration,
-                        max_decel=max_decel
+                        max_decel=max_decel,
+                        controller_type=controller_type,
+                        model_path=model_path,
+                        controller=shared_ctrl,
+                        noise_mode=noise_mode
                     )
                     raw_results.append(res)
                     completed += 1
@@ -351,7 +571,7 @@ def run_benchmark_matrix(
         "raw_results": raw_results
     }
 
-    json_path = output_dir / "pid_baseline_benchmark.json"
+    json_path = output_dir / f"{controller_type.lower()}_benchmark.json"
     with open(json_path, "w") as f:
         json.dump(report_data, f, indent=2)
     print(f"[REPORT] Structured benchmark data saved to: {json_path}")
@@ -370,7 +590,7 @@ def run_benchmark_matrix(
     # -------------------------------------------------------------
     # Generate Scientific Comparison Plots
     # -------------------------------------------------------------
-    plot_path = output_dir / "pid_benchmark_analysis.png"
+    plot_path = output_dir / f"{controller_type.lower()}_benchmark_analysis.png"
     _generate_benchmark_plots(summary_table, profiles, drop_rates, plot_path)
     print(f"[PLOTS] Benchmark performance plots saved to: {plot_path}")
 
@@ -455,8 +675,11 @@ def run_dataset_benchmark(
     dataset_path: Union[str, Path],
     use_kalman: bool = True,
     frame_drop_rate: float = 0.0,
-    max_decel: float = 2.8,
-    output_dir: Path = PROJECT_ROOT / "outputs" / "benchmarks" / "control"
+    max_decel: float = 6.0,
+    controller_type: str = "pid",
+    model_path: Optional[Union[str, Path]] = None,
+    output_dir: Path = PROJECT_ROOT / "outputs" / "benchmarks" / "control",
+    noise_mode: str = "empirical",
 ) -> Dict[str, Any]:
     """
     Evaluates the controller across a standardized PursuitDataset manifest and prints grouped metrics.
@@ -468,17 +691,59 @@ def run_dataset_benchmark(
     mode_str = "Kalman" if use_kalman else "Raw"
     print(f"\n{'='*95}")
     print(f"  BENCHMARKING ON DATASET: {dataset.name} ({len(dataset)} SCENARIOS)")
-    print(f"  Perception Mode:  {mode_str} | Frame Drop Rate: {int(frame_drop_rate*100)}%")
-    print(f"  Max Deceleration: {max_decel:.1f} m/s^2")
+    print(f"  Controller:       {controller_type.upper()}")
+    print(f"  Perception Mode:  {mode_str} | Noise Model: {noise_mode.upper()} | Frame Drops: {int(frame_drop_rate*100)}%")
+    print(f"  Max Deceleration: {max_decel:.1f} m/s^2 (Standoff: 3.5m, Basket: 2.5-4.5m)")
     print(f"{'='*95}\n")
 
     raw_results = []
+
+    # Instantiate controller once across runs to avoid repeated disk I/O
+    if controller_type.lower() == "rl":
+        if model_path is None:
+            default_p = PROJECT_ROOT / "control" / "weights" / "recurrent_ppo_v5_clean_accum" / "best_model" / "best_model.zip"
+            if not default_p.exists():
+                default_p = PROJECT_ROOT / "control" / "weights" / "recurrent_ppo_scratch" / "best_model" / "best_model.zip"
+            model_path = default_p
+        shared_ctrl = RecurrentVisualServoController(
+            model_path=str(model_path),
+            img_w=1280,
+            img_h=720,
+            hfov_deg=62.0,
+            vfov_deg=38.0,
+            w_nominal=0.0859
+        )
+    else:
+        shared_ctrl = KinematicVisualServoController(
+            camera_uptilt_deg=15.0,
+            hfov_deg=62.0,
+            vfov_deg=38.0,
+            desired_bbox_size=110.0,
+            desired_standoff_dist=3.5,
+            scale_mode="width",
+            use_bbox_size=True,
+            enable_lateral_strafe=True,
+            kp_lat=2.5,
+            kd_lat=0.35,
+            max_lat_vel=2.5,
+            max_lat_accel=4.0,
+            max_accel=4.0,
+            max_decel=max_decel,
+            min_limits=np.array([-0.5, -2.5, -2.5, -90.0]),
+            max_limits=np.array([ 6.0,  2.5,  1.5,  90.0]),
+            search_mode="decay",
+        )
+
     for idx, scenario in enumerate(dataset.scenarios, 1):
         res = evaluate_single_run(
             scenario=scenario,
             use_kalman=use_kalman,
             frame_drop_rate=frame_drop_rate,
-            max_decel=max_decel
+            max_decel=max_decel,
+            controller_type=controller_type,
+            model_path=model_path,
+            controller=shared_ctrl,
+            noise_mode=noise_mode
         )
         raw_results.append(res)
         if idx % 20 == 0 or idx == len(dataset):
@@ -525,9 +790,9 @@ def run_dataset_benchmark(
 
     print("=" * 95 + "\n")
 
-    out_json = output_dir / f"benchmark_results_{dataset.name}_{mode_str.lower()}_d{int(frame_drop_rate*100)}.json"
+    out_json = output_dir / f"benchmark_results_{dataset.name}_{controller_type.lower()}_{mode_str.lower()}_{noise_mode}_d{int(frame_drop_rate*100)}.json"
     with open(out_json, "w", encoding="utf-8") as f:
-        json.dump({"dataset": dataset.name, "summary": summary_rows, "results": raw_results}, f, indent=2)
+        json.dump({"dataset": dataset.name, "controller": controller_type, "noise_mode": noise_mode, "summary": summary_rows, "results": raw_results}, f, indent=2)
     print(f"[REPORT] Dataset benchmark report saved to: {out_json}")
     return {"summary": summary_rows, "results": raw_results}
 
@@ -535,24 +800,37 @@ def run_dataset_benchmark(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Autonomous Drone Pursuit Benchmark Suite")
     parser.add_argument("--dataset", type=str, default=None, help="Path to PursuitDataset JSON manifest to benchmark")
+    parser.add_argument("--controller", type=str, default="pid", choices=["pid", "rl", "both"], help="Controller type to benchmark ('pid', 'rl', or 'both')")
+    parser.add_argument("--model-path", type=str, default=None, help="Path to RL model checkpoint zip for 'rl' controller")
     parser.add_argument("--seeds", type=int, default=15, help="Number of Monte Carlo seeds per condition (default: 15)")
     parser.add_argument("--duration", type=float, default=25.0, help="Flight duration in seconds (default: 25.0)")
-    parser.add_argument("--max-decel", type=float, default=2.8, help="Controller forward deceleration limit in m/s^2 (default: 2.8)")
+    parser.add_argument("--max-decel", type=float, default=6.0, help="Controller forward deceleration limit in m/s^2 (default: 6.0)")
     parser.add_argument("--no-ablation", action="store_true", help="Skip Kalman vs Raw ablation comparison")
     parser.add_argument("--drop-rate", type=float, default=0.0, help="Frame drop rate when running dataset (default: 0.0)")
+    parser.add_argument("--noise-mode", type=str, default="empirical", choices=["empirical", "bernoulli", "none"], help="Perception noise model: 'empirical' (calibrated Jetson YOLO noise + AR(1) colored jitter), 'bernoulli' (simple random dropouts on ground truth), or 'none' (default: empirical)")
     args = parser.parse_args()
 
-    if args.dataset:
-        run_dataset_benchmark(
-            dataset_path=args.dataset,
-            use_kalman=True,
-            frame_drop_rate=args.drop_rate,
-            max_decel=args.max_decel
-        )
-    else:
-        run_benchmark_matrix(
-            num_seeds=args.seeds,
-            test_ablation=(not args.no_ablation),
-            duration=args.duration,
-            max_decel=args.max_decel
-        )
+    controllers_to_run = ["pid", "rl"] if args.controller == "both" else [args.controller]
+
+    for ctrl in controllers_to_run:
+        print(f"\n{'#'*80}\n# EXECUTING BENCHMARK FOR CONTROLLER: {ctrl.upper()}\n{'#'*80}")
+        if args.dataset:
+            run_dataset_benchmark(
+                dataset_path=args.dataset,
+                use_kalman=True,
+                frame_drop_rate=args.drop_rate,
+                max_decel=args.max_decel,
+                controller_type=ctrl,
+                model_path=args.model_path,
+                noise_mode=args.noise_mode
+            )
+        else:
+            run_benchmark_matrix(
+                num_seeds=args.seeds,
+                test_ablation=(not args.no_ablation),
+                duration=args.duration,
+                max_decel=args.max_decel,
+                controller_type=ctrl,
+                model_path=args.model_path,
+                noise_mode=args.noise_mode
+            )

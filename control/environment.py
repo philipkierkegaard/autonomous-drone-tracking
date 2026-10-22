@@ -49,26 +49,30 @@ class DronePursuitEnv(gym.Env):
         dt: float = 0.02,
         max_duration: float = 25.0,
         standoff_nominal_m: float = 3.5,
-        standoff_min_m: float = 2.8,
-        standoff_max_m: float = 4.2,
+        standoff_min_m: float = 2.5,
+        standoff_max_m: float = 4.5,
         collision_dist_m: float = 1.2,
-        min_altitude_agl_m: float = 1.0,
-        safe_altitude_cushion_m: float = 2.0,
+        min_altitude_agl_m: float = 0.8,
+        safe_altitude_cushion_m: float = 1.5,
         lost_target_timeout_s: float = 3.5,
         in_medias_res_ratio: float = 0.30,
         domain_randomization: bool = True,
         frame_drop_rate: float = 0.05,
-        img_w: int = 640,
-        img_h: int = 480,
-        hfov_deg: float = 60.0,
-        vfov_deg: float = 45.0,
+        img_w: int = 1280,
+        img_h: int = 720,
+        hfov_deg: float = 62.0,
+        vfov_deg: float = 38.0,
         use_empirical_perception: bool = True,
         empirical_profile_path: Optional[Union[str, Path]] = None,
         camera_fps: float = 30.0,
         env_perception_mode: str = "nominal",
+        reward_mode: str = "monotone_potential",
+        profile_distribution: Optional[Tuple[float, float, float]] = None,
     ):
         super().__init__()
 
+        self.reward_mode = reward_mode
+        self.profile_distribution = profile_distribution
         self.dt = dt
         self.max_duration = max_duration
         self.max_steps = int(round(max_duration / dt))
@@ -86,10 +90,24 @@ class DronePursuitEnv(gym.Env):
         self.frame_drop_rate = frame_drop_rate
         self.img_w = img_w
         self.img_h = img_h
+        self.hfov_deg = hfov_deg
+        self.vfov_deg = vfov_deg
         self.half_hfov = float(np.tan(np.deg2rad(hfov_deg / 2.0)))
         self.half_vfov = float(np.tan(np.deg2rad(vfov_deg / 2.0)))
-        self.w_nominal = 0.0866 # Target bbox width fraction at 3.5m standoff (~55.4 pixels on 640x480)
-        self.max_decel = 2.8    # Calibrated quadrotor braking deceleration (m/s^2)
+        self.w_nominal = 0.0859 # Target bbox width fraction at 3.5m standoff (110.0 pixels on 1280x720)
+        self.max_decel = 4.0
+
+        # Physical Kinematic Flight Envelope Limits (matched identically to KinematicVisualServoController & run_tracker.py)
+        self.max_fwd_vel = 12.0         # Forward speed cap: 12.0 m/s (sufficient to intercept 9.5 m/s hyper-evasive targets)
+        self.max_rev_vel = 0.5          # Max reverse cushion: 0.5 m/s
+        self.max_lat_vel = 2.5          # Max lateral velocity: 2.5 m/s
+        self.max_climb_vel = 2.5        # Max climb velocity: 2.5 m/s (NED: -2.5)
+        self.max_desc_vel = 1.5         # Max descent velocity: 1.5 m/s (NED: +1.5)
+        self.max_yaw_rate_deg = 90.0    # Max yaw rate: 90 deg/s
+        self.max_accel_xy = 6.0         # Max horizontal accel: 6.0 m/s^2 (agile intercept sprint)
+        self.max_decel_xy = 6.0         # Max horizontal decel: 6.0 m/s^2 (calibrated braking)
+        self.max_accel_z = 3.0          # Max vertical accel: 3.0 m/s^2
+        self.max_accel_yaw = 180.0      # Max yaw accel: 180 deg/s^2
 
         # Empirical YOLO perception & Kalman tracking configuration
         self.use_empirical_perception = use_empirical_perception
@@ -117,8 +135,14 @@ class DronePursuitEnv(gym.Env):
             self.synthetic_sensor = None
             self.tracker = None
 
-        # Underlying calibrated physics simulator (50 Hz, 60ms delay, drag, kinodynamics)
-        self.sim = FastPixhawkQuadSim(dt=dt)
+        # Underlying calibrated physics simulator matching identical limits
+        self.sim = FastPixhawkQuadSim(
+            dt=dt,
+            max_vel_xy=self.max_fwd_vel,
+            max_accel_xy=self.max_accel_xy,
+            max_vel_up=self.max_climb_vel,
+            max_vel_down=self.max_desc_vel
+        )
         self.scenario_gen = PursuitDatasetGenerator()
 
         # -------------------------------------------------------------
@@ -133,23 +157,25 @@ class DronePursuitEnv(gym.Env):
         )
 
         # -------------------------------------------------------------
-        # Observation Space: 13D Normalized State Vector (Generation 5)
+        # Observation Space: 15D Normalized State Vector (Generation 6)
         # [0] ex: Normalized Centroid Horizontal Error   [-1, 1]
         # [1] ey: Normalized Centroid Vertical Error     [-1, 1]
-        # [2] scale_err: Standoff Scale Error            [-1, 1] (0 = 6m, >0 far, <0 close)
+        # [2] scale_err: Standoff Scale Error            [-1, 1] (0 = 3.5m, >0 far, <0 close)
         # [3] w_norm: Normalized Bounding Box Width      [0, 1]
         # [4] in_fov: Target Visibility Flag             {0.0, 1.0}
-        # [5] vx_body: Normalized Forward Velocity       [-1, 1] (norm by 18 m/s)
-        # [6] vy_body: Normalized Lateral Velocity       [-1, 1] (norm by 6 m/s)
-        # [7] vz_body: Normalized Vertical Velocity      [-1, 1] (norm by 4 m/s)
-        # [8] yaw_rate: Normalized Yaw Rate              [-1, 1] (norm by 120 deg/s)
+        # [5] vx_body: Normalized Forward Velocity       [-1, 1] (norm by 12 m/s)
+        # [6] vy_body: Normalized Lateral Velocity       [-1, 1] (norm by 2.5 m/s)
+        # [7] vz_body: Normalized Vertical Velocity      [-1, 1] (norm by 2.5 m/s)
+        # [8] yaw_rate: Normalized Yaw Rate              [-1, 1] (norm by 90 deg/s)
         # [9] alt_norm: Normalized Altitude AGL          [0, 2] (norm by 5.0m)
         # [10] d_ex: Optical Azimuth Rate                [-1, 1] (norm by 2.0 s^-1)
         # [11] d_ey: Optical Elevation Rate              [-1, 1] (norm by 2.0 s^-1)
         # [12] d_w: Bounding Box Expansion Rate          [-1, 1] (norm by 0.20 s^-1)
+        # [13] drone_pitch: Normalized Pitch Angle       [-1, 1] (norm by 45 deg = pi/4 rad)
+        # [14] drone_roll: Normalized Roll Angle         [-1, 1] (norm by 45 deg = pi/4 rad)
         # -------------------------------------------------------------
         self.observation_space = spaces.Box(
-            low=-np.inf, high=np.inf, shape=(13,), dtype=np.float32
+            low=-np.inf, high=np.inf, shape=(15,), dtype=np.float32
         )
 
         # Internal state tracking
@@ -157,6 +183,7 @@ class DronePursuitEnv(gym.Env):
         self.step_count = 0
         self.time_lost = 0.0
         self.last_action = np.zeros(4, dtype=np.float32)
+        self.prev_action_diff = np.zeros(4, dtype=np.float32)
         self.last_seen_ex = 0.0
         self.last_seen_ey = 0.0
         self.last_seen_w = 0.05
@@ -185,6 +212,7 @@ class DronePursuitEnv(gym.Env):
         self.lock_achieved = False
         self.milestone_1s_awarded = False
         self.milestone_2s_awarded = False
+        self.first_contact_awarded = False
 
         # Flight Dynamics & Actuator Slew-Rate Memory
         self.last_physical_cmd = np.zeros(4, dtype=np.float64)
@@ -192,43 +220,61 @@ class DronePursuitEnv(gym.Env):
     def _map_action_to_physical(self, action: np.ndarray) -> np.ndarray:
         """
         Maps normalized actions [-1, 1]^4 to physical velocity setpoints for FastPixhawkQuadSim,
-        applying aerospace slew-rate limiting (kinematic acceleration limits) matching the
-        physical quadrotor flight envelope to eliminate bang-bang control chatter.
+        strictly matching the physical limits and slew rates of KinematicVisualServoController.
+        Neutral stick a = [0, 0, 0, 0] commands station-keeping hover (0 m/s on all axes).
         """
         a = np.clip(action, -1.0, 1.0)
-        # a0: [-1, 1] -> [-5.0 m/s (active reverse/braking), +13.0 m/s (sprint pursuit)]
-        # Neutral stick (a0 = 0.0) commands 4.0 m/s, aligning closely with cruising/evasive target speed.
-        target_vx = 4.0 + a[0] * 9.0
 
-        # a1: [-1, 1] -> [-6.0 m/s (strafe left), +6.0 m/s (strafe right)]
-        target_vy = a[1] * 6.0
-
-        # a2: [-1, 1] -> [-4.0 m/s (max climb), +2.5 m/s (max descend)] (NED coordinates)
-        target_vz = -0.75 + a[2] * 3.25
-
-        # a3: [-1, 1] -> [-120 deg/s, +120 deg/s] yaw rate
-        target_yaw_deg = a[3] * 120.0
-
-        # Slew-Rate Limiting across all 4 flight axes (matched to Pixhawk quad envelope)
-        # Axis 0: Surge acceleration (6.5 m/s^2) and deceleration (5.0 m/s^2 for agile braking)
-        max_accel_x = 6.5 * self.dt
-        max_decel_x = 5.0 * self.dt
-        if target_vx < self.last_physical_cmd[0]:
-            cmd_vx = max(target_vx, self.last_physical_cmd[0] - max_decel_x)
+        # a0: Forward velocity setpoint [-1, 1]
+        # Neutral stick (a0 = 0) commands cruise formation velocity (3.5 m/s) matching target cruise
+        # Positive stick (a0 > 0) commands sprint pursuit up to +self.max_fwd_vel (+12.0 m/s)
+        # Negative stick (a0 < 0) commands deceleration down to -self.max_rev_vel (-0.5 m/s)
+        if a[0] >= 0:
+            target_vx = self.standoff_nominal + a[0] * (self.max_fwd_vel - self.standoff_nominal)
         else:
-            cmd_vx = min(target_vx, self.last_physical_cmd[0] + max_accel_x)
+            target_vx = self.standoff_nominal + a[0] * (self.standoff_nominal + self.max_rev_vel)
 
-        # Axis 1: Lateral sway acceleration (5.0 m/s^2)
-        max_accel_y = 5.0 * self.dt
-        cmd_vy = float(np.clip(target_vy, self.last_physical_cmd[1] - max_accel_y, self.last_physical_cmd[1] + max_accel_y))
+        # Forward collision proximity barrier: inhibit excess forward surge if dangerously close (distance < 2.2m)
+        if hasattr(self, "last_distance") and self.last_distance < 2.2:
+            max_safe_vx = float(max(0.0, (self.last_distance - 1.3) / 0.9 * self.standoff_nominal))
+            target_vx = min(target_vx, max_safe_vx)
 
-        # Axis 2: Vertical heave acceleration (3.0 m/s^2)
-        max_accel_z = 3.0 * self.dt
-        cmd_vz = float(np.clip(target_vz, self.last_physical_cmd[2] - max_accel_z, self.last_physical_cmd[2] + max_accel_z))
+        # a1: Lateral strafe setpoint [-1, 1] -> [-self.max_lat_vel, +self.max_lat_vel] (-2.5 to +2.5 m/s)
+        target_vy = a[1] * self.max_lat_vel
 
-        # Axis 3: Yaw rate angular acceleration (180 deg/s^2 -> 3.6 deg/s per 0.02s step)
-        max_accel_yaw = 180.0 * self.dt
-        cmd_yaw_deg = float(np.clip(target_yaw_deg, self.last_physical_cmd[3] - max_accel_yaw, self.last_physical_cmd[3] + max_accel_yaw))
+        # a2: Vertical velocity setpoint [-1, 1] (NED: negative is climb, positive is descend)
+        # Neutral stick (a2 = 0) commands altitude hold (0.0 m/s)
+        # Negative stick (a2 < 0) commands climb up to -self.max_climb_vel (-2.5 m/s)
+        # Positive stick (a2 > 0) commands descent up to +self.max_desc_vel (+1.5 m/s)
+        if a[2] <= 0:
+            target_vz = a[2] * self.max_climb_vel
+        else:
+            target_vz = a[2] * self.max_desc_vel
+
+        # Ground proximity safety governor: inhibit descent if near ground floor (altitude < 1.4m AGL)
+        current_alt_m = -self.sim.pos[2]
+        if current_alt_m < 1.4 and target_vz > 0.0:
+            target_vz = float(target_vz * max(0.0, (current_alt_m - 0.9) / 0.5))
+
+        # a3: Yaw rate setpoint [-1, 1] -> [-self.max_yaw_rate_deg, +self.max_yaw_rate_deg] (-90 to +90 deg/s)
+        target_yaw_deg = a[3] * self.max_yaw_rate_deg
+
+        # Slew-Rate Limiting across all 4 flight axes (matched identically to KinematicVisualServoController)
+        max_step_accel_x = self.max_accel_xy * self.dt
+        max_step_decel_x = self.max_decel_xy * self.dt
+        if target_vx < self.last_physical_cmd[0]:
+            cmd_vx = max(target_vx, self.last_physical_cmd[0] - max_step_decel_x)
+        else:
+            cmd_vx = min(target_vx, self.last_physical_cmd[0] + max_step_accel_x)
+
+        max_step_lat = self.max_accel_xy * self.dt
+        cmd_vy = float(np.clip(target_vy, self.last_physical_cmd[1] - max_step_lat, self.last_physical_cmd[1] + max_step_lat))
+
+        max_step_z = self.max_accel_z * self.dt
+        cmd_vz = float(np.clip(target_vz, self.last_physical_cmd[2] - max_step_z, self.last_physical_cmd[2] + max_step_z))
+
+        max_step_yaw = self.max_accel_yaw * self.dt
+        cmd_yaw_deg = float(np.clip(target_yaw_deg, self.last_physical_cmd[3] - max_step_yaw, self.last_physical_cmd[3] + max_step_yaw))
 
         phys_cmd = np.array([cmd_vx, cmd_vy, cmd_vz, cmd_yaw_deg], dtype=np.float64)
         self.last_physical_cmd = phys_cmd.copy()
@@ -240,8 +286,9 @@ class DronePursuitEnv(gym.Env):
         """
         rng = self.np_random
 
-        # Target Flight Profile Split: 30% Cruising, 45% Evasive, 25% Hyper-Evasive
-        profile_choice = rng.choice(["cruising", "evasive", "hyper_evasive"], p=[0.30, 0.45, 0.25])
+        # Target Flight Profile Split (configurable for hyper-evasive focus)
+        p_dist = self.profile_distribution if self.profile_distribution is not None else [0.10, 0.45, 0.45]
+        profile_choice = rng.choice(["cruising", "evasive", "hyper_evasive"], p=p_dist)
 
         # 70% Canonical Full Flights vs. 30% In Medias Res
         is_in_medias_res = rng.random() < self.in_medias_res_ratio
@@ -259,19 +306,12 @@ class DronePursuitEnv(gym.Env):
 
             chaser_pos = np.array([0.0, 0.0, -rng.uniform(2.5, 4.0)], dtype=np.float64)
             chaser_yaw = 0.0
-            # Realistic initial forward cruising speed matching target encounter (5.0 to 8.5 m/s)
-            chaser_vel = np.array([rng.uniform(5.0, 8.5), 0.0, 0.0], dtype=np.float64)
+            # Realistic initial forward cruising speed matching kinematic limit (3.0 to 4.5 m/s)
+            chaser_vel = np.array([rng.uniform(3.0, 4.5), 0.0, 0.0], dtype=np.float64)
 
-            # Encounter-adaptive spawn distance for 3.5m standoff:
-            # - Away encounters: 50% close spawn (4.0m - 6.5m), 50% sprint spawn (6.5m - 11.0m)
-            # - Inward / crossing encounters: (7.0m - 11.0m)
-            if encounter in ["tail_chase", "oblique_away"]:
-                if rng.random() < 0.50:
-                    spawn_dist_range = (4.0, 6.5)
-                else:
-                    spawn_dist_range = (6.5, 11.0)
-            else:
-                spawn_dist_range = (7.0, 11.0)
+            # Continuous spawn distance across the entire operational envelope (3.2m close basket to 12.0m sprint):
+            spawn_dist = float(rng.uniform(3.2, 12.0))
+            spawn_dist_range = (spawn_dist, spawn_dist)
 
             target_pos, dist, az, el = self.scenario_gen.sample_initial_target_pos(
                 chaser_pos=chaser_pos,
@@ -388,7 +428,7 @@ class DronePursuitEnv(gym.Env):
             else:  # blind_recovery
                 # Target just broke FOV boundary (out of sight), lost timer active
                 dist = rng.uniform(7.0, 12.0)
-                blind_az = rng.choice([-32.0, 32.0])  # Just beyond 30 deg half-HFOV
+                blind_az = rng.choice([-33.0, 33.0])  # Just beyond 31.0 deg half-HFOV
                 target_pos, _, _, _ = self.scenario_gen.sample_initial_target_pos(
                     chaser_pos=chaser_pos, chaser_yaw=chaser_yaw, rng=rng,
                     distance_range=(dist, dist),
@@ -423,7 +463,8 @@ class DronePursuitEnv(gym.Env):
                 c_vel = getattr(scen, "initial_chaser_vel", None)
                 if c_vel is None:
                     c, s = np.cos(c_yaw), np.sin(c_yaw)
-                    c_vel = np.array([c * 6.0, s * 6.0, 0.0], dtype=np.float64)
+                    cruise_v = min(4.0, self.max_fwd_vel)
+                    c_vel = np.array([c * cruise_v, s * cruise_v, 0.0], dtype=np.float64)
                 else:
                     c_vel = np.array(c_vel, dtype=np.float64)
 
@@ -439,23 +480,29 @@ class DronePursuitEnv(gym.Env):
                 }
                 seed_val = int(scen.seed)
             elif isinstance(scen, dict):
-                c_yaw = float(scen.get("chaser_yaw", 0.0))
-                c_vel = scen.get("chaser_vel", None)
+                c_yaw = float(scen.get("chaser_yaw", scen.get("initial_chaser_yaw", 0.0)))
+                c_vel = scen.get("chaser_vel", scen.get("initial_chaser_vel", None))
                 if c_vel is None:
                     c, s = np.cos(c_yaw), np.sin(c_yaw)
-                    c_vel = np.array([c * 6.0, s * 6.0, 0.0], dtype=np.float64)
+                    cruise_v = min(4.0, self.max_fwd_vel)
+                    c_vel = np.array([c * cruise_v, s * cruise_v, 0.0], dtype=np.float64)
                 else:
                     c_vel = np.array(c_vel, dtype=np.float64)
+
+                c_pos = scen.get("chaser_pos", scen.get("initial_chaser_pos", [0.0, 0.0, -2.5]))
+                t_pos = scen.get("target_pos", scen.get("initial_target_pos", [12.0, 0.0, -2.5]))
+                t_head = float(scen.get("target_heading", scen.get("initial_target_heading_rad", 0.0)))
+                time_lost_init = float(scen.get("initial_time_lost", 0.0))
 
                 cfg = {
                     "mode": scen.get("mode", "scenario"),
                     "profile": scen.get("profile", "evasive"),
-                    "chaser_pos": np.array(scen.get("chaser_pos", [0.0, 0.0, -2.5]), dtype=np.float64),
+                    "chaser_pos": np.array(c_pos, dtype=np.float64),
                     "chaser_yaw": c_yaw,
                     "chaser_vel": c_vel,
-                    "target_pos": np.array(scen.get("target_pos", [12.0, 0.0, -2.5]), dtype=np.float64),
-                    "target_heading": float(scen.get("target_heading", 0.0)),
-                    "initial_time_lost": float(scen.get("initial_time_lost", 0.0)),
+                    "target_pos": np.array(t_pos, dtype=np.float64),
+                    "target_heading": t_head,
+                    "initial_time_lost": time_lost_init,
                 }
                 seed_val = int(scen.get("seed", int(self.np_random.integers(0, 1_000_000))))
             else:
@@ -484,6 +531,7 @@ class DronePursuitEnv(gym.Env):
         self.step_count = 0
         self.time_lost = cfg["initial_time_lost"]
         self.last_action = np.zeros(4, dtype=np.float32)
+        self.prev_action_diff = np.zeros(4, dtype=np.float32)
 
         c_yaw, s_yaw = np.cos(cfg["chaser_yaw"]), np.sin(cfg["chaser_yaw"])
         v_fwd = c_yaw * cfg["chaser_vel"][0] + s_yaw * cfg["chaser_vel"][1]
@@ -495,14 +543,17 @@ class DronePursuitEnv(gym.Env):
         self.lock_achieved = False
         self.milestone_1s_awarded = False
         self.milestone_2s_awarded = False
+        self.first_contact_awarded = False
 
         # Project initial target state to camera sensor
         t_sim = 0.0
         target_pos_w, target_vel_w, _ = self.target_oracle.get_state(t_sim)
         ex, ey, in_view, dist, bw, bh = self.sim.project_to_camera(
-            target_pos_w, return_bbox=True, img_w=self.img_w, img_h=self.img_h
+            target_pos_w, return_bbox=True, img_w=self.img_w, img_h=self.img_h,
+            hfov_deg=self.hfov_deg, vfov_deg=self.vfov_deg
         )
         self.initial_distance = float(dist)
+        self.last_distance = float(dist)
 
         # Store last seen observation
         if in_view:
@@ -709,20 +760,26 @@ class DronePursuitEnv(gym.Env):
         norm_d_ey = float(np.clip(self.filtered_d_ey / 2.0, -1.0, 1.0))
         norm_d_w  = float(np.clip(self.filtered_d_w  / 0.20, -1.0, 1.0))
 
+        # Normalized drone attitude pitch and roll (clipped [-1, 1], normalized by 45 deg = pi/4 rad)
+        norm_pitch = float(np.clip(self.sim.pitch / (np.pi / 4.0), -1.0, 1.0))
+        norm_roll  = float(np.clip(self.sim.roll  / (np.pi / 4.0), -1.0, 1.0))
+
         obs = np.array([
             ex,
             ey,
             scale_err,
             w_norm,
             flag,
-            np.clip(vx_body / 18.0, -1.0, 1.0),
-            np.clip(vy_body / 6.0, -1.0, 1.0),
-            np.clip(vz_body / 4.0, -1.0, 1.0),
-            np.clip(self.sim.yaw_rate / self.sim.max_yaw_rate, -1.0, 1.0),
+            np.clip(vx_body / self.max_fwd_vel, -1.0, 1.0),
+            np.clip(vy_body / self.max_lat_vel, -1.0, 1.0),
+            np.clip(vz_body / self.max_climb_vel, -1.0, 1.0),
+            np.clip(self.sim.yaw_rate / np.deg2rad(self.max_yaw_rate_deg), -1.0, 1.0),
             alt_norm,
             norm_d_ex,
             norm_d_ey,
             norm_d_w,
+            norm_pitch,
+            norm_roll,
         ], dtype=np.float32)
 
         return obs
@@ -739,9 +796,13 @@ class DronePursuitEnv(gym.Env):
         target_pos_w, target_vel_w, _ = self.target_oracle.get_state(t_sim)
 
         # 3. Project to tilted camera sensor
-        raw_ex, raw_ey, raw_in_view, dist, raw_bw, raw_bh = self.sim.project_to_camera(
-            target_pos_w, return_bbox=True, img_w=self.img_w, img_h=self.img_h
+        raw_ex_unclipped, raw_ey_unclipped, raw_in_view, dist, raw_bw, raw_bh = self.sim.project_to_camera(
+            target_pos_w, return_bbox=True, return_unclipped=True, img_w=self.img_w, img_h=self.img_h,
+            hfov_deg=self.hfov_deg, vfov_deg=self.vfov_deg
         )
+        self.last_distance = float(dist)
+        raw_ex = float(np.clip(raw_ex_unclipped, -1.0, 1.0))
+        raw_ey = float(np.clip(raw_ey_unclipped, -1.0, 1.0))
 
         # Update target heading vector in horizontal plane
         target_speed_xy = float(np.linalg.norm(target_vel_w[:2]))
@@ -849,35 +910,56 @@ class DronePursuitEnv(gym.Env):
             and primary.time_since_update <= self.coasting_step_limit
         ) if self.use_empirical_perception else raw_in_view
 
+        # Engagement Basket Condition: 2.8m <= dist <= 4.2m AND visible in camera FOV AND active tracker lock
+        # Alignment quality modulates dwell accumulation rate rather than hard binary cutoff:
+        # Near center (|err| < 0.20): quality ~ 1.0 (accumulates dwell at full 1.0s/s)
+        # Moderate off-center (|err| ~ 0.50): quality ~ 0.5 (accumulates at 0.5s/s)
+        # Frame border (|err| > 0.70): quality = 0.05 (negligible accumulation)
         in_basket = (self.standoff_min <= dist <= self.standoff_max) and raw_in_view and has_tracker_lock
         r_milestone = 0.0
         r_sustain = 0.0
 
+        # Term 2: Smooth exponential early-arrival multiplier (rewards rapid closing sprint; never hard-zeros out)
+        time_decay_arrival = float(np.exp(-t_sim / 6.0))
+
+        # Term 2B: Immediate First-Contact Arrival Jackpot
+        # Only awarded when entering the basket with controlled relative closing speed (< 3.0 m/s)
+        # to prevent rewarding high-speed "bullet ramming" overshoots
+        r_first_contact = 0.0
+        if in_basket and not self.first_contact_awarded:
+            closing_speed = (self.prev_distance_error - dist_err) / self.dt
+            if closing_speed < 3.0:
+                self.first_contact_awarded = True
+                r_first_contact = 40.0 * time_decay_arrival
+
         if in_basket:
             self.cumulative_firing_window_s += self.dt
-            self.continuous_lock_dwell_s = min(self.dwell_time_required, self.continuous_lock_dwell_s + self.dt)
+            ang_err_cam = float(np.sqrt(raw_ex**2 + raw_ey**2))
+            alignment_quality = float(np.clip(1.0 - (ang_err_cam / 0.70)**2, 0.05, 1.0))
+            dwell_rate = alignment_quality
+            self.continuous_lock_dwell_s = min(self.dwell_time_required, self.continuous_lock_dwell_s + dwell_rate * self.dt)
 
-            # Milestone 1: 1.0s continuous lock (+25.0)
+            # Milestone 1: 1.0s continuous lock
             if self.continuous_lock_dwell_s >= 1.0 and not self.milestone_1s_awarded:
                 self.milestone_1s_awarded = True
-                r_milestone += 25.0
+                r_milestone += 15.0 + 20.0 * time_decay_arrival
 
-            # Milestone 2: 2.0s continuous lock (+50.0)
+            # Milestone 2: 2.0s continuous lock
             if self.continuous_lock_dwell_s >= 2.0 and not self.milestone_2s_awarded:
                 self.milestone_2s_awarded = True
-                r_milestone += 50.0
+                r_milestone += 25.0 + 35.0 * time_decay_arrival
 
-            # Goal: 3.0s continuous lock (+150.0 jackpot, plus ongoing sustain bonus)
+            # Goal: 3.0s continuous lock (interception jackpot)
             if self.continuous_lock_dwell_s >= self.dwell_time_required:
                 if not self.lock_achieved:
                     self.lock_achieved = True
                     self.time_to_first_lock = float(max(0.0, self.step_count * self.dt - self.dwell_time_required))
-                    r_milestone += 150.0
+                    r_milestone += 50.0 + 100.0 * time_decay_arrival
                 # Ongoing formation sustain reward: +5.0/s for holding lock through evasive maneuvers
                 r_sustain = 0.1
         else:
-            # Grace decay (leaky integrator)
-            self.continuous_lock_dwell_s = max(0.0, self.continuous_lock_dwell_s - 1.5 * self.dt)
+            # Grace decay (soft leaky integrator: decays only 0.5s per second outside basket to tolerate momentary visual dropouts)
+            self.continuous_lock_dwell_s = max(0.0, self.continuous_lock_dwell_s - 0.5 * self.dt)
             if self.continuous_lock_dwell_s < 1.0:
                 self.milestone_1s_awarded = False
             if self.continuous_lock_dwell_s < 2.0:
@@ -893,25 +975,25 @@ class DronePursuitEnv(gym.Env):
         if self.continuous_lock_dwell_s >= self.dwell_time_required:
             terminated = True
             termination_reason = "lock_dwell_achieved"
-            terminal_reward = 150.0
+            terminal_reward = 80.0 + 120.0 * time_decay_arrival
 
         # Physical Collision Breach (d < 1.2m) — True physical collision radius
         elif dist < self.collision_dist:
             terminated = True
             termination_reason = "collision"
-            terminal_reward = -50.0
+            terminal_reward = 0.0
 
         # Altitude Floor Breach (z > -1.0m in NED means altitude < 1.0m AGL)
         elif self.sim.pos[2] > -self.min_altitude_agl:
             terminated = True
             termination_reason = "ground_strike"
-            terminal_reward = -50.0
+            terminal_reward = 0.0
 
         # Target Lost Timeout (out of FOV for > 3.5s)
         elif self.time_lost > self.lost_target_timeout:
             terminated = True
             termination_reason = "lost_target_timeout"
-            terminal_reward = -80.0
+            terminal_reward = 0.0
 
         # Time Horizon Reached (25.0 seconds = 1250 steps)
         elif self.step_count >= self.max_steps:
@@ -919,85 +1001,469 @@ class DronePursuitEnv(gym.Env):
             termination_reason = "max_horizon"
 
         # -------------------------------------------------------------
-        # 6. Continuous Gamma Standoff Reward Shaping
+        # 6. Reward Shaping Architectures (Selected by self.reward_mode)
         # -------------------------------------------------------------
-        # A. Visual FOV Retention (Free kinematics — no artificial dead-center reticle constraint)
-        r_fov = 1.0 if raw_in_view else 0.0
+        r_lead_vec = 0.0
+        closing_speed = (self.prev_distance_error - dist_err) / self.dt
+        dwell_progress = min(1.0, self.continuous_lock_dwell_s / self.dwell_time_required)
 
-        # B. Continuous Shifted Gamma Standoff Potential Field
-        # Peaks at exactly 3.5m standoff, drops naturally to 0.0 at the 1.2m collision sphere,
-        # and has a smooth exponential tail providing a persistent inward gradient from 10m-15m.
-        if raw_in_view and dist > self.collision_dist:
-            x_col = dist - self.collision_dist
-            x_peak = self.standoff_nominal - self.collision_dist  # 3.5 - 1.2 = 2.3m
-            r_gamma = 6.0 * ((x_col / x_peak) ** 2.0) * float(np.exp(-(2.0 / x_peak) * (x_col - x_peak)))
-        else:
-            r_gamma = 0.0
+        if self.reward_mode == "legacy_gaussian":
+            # 1. Baseline: Unconditional living floor + narrow Gaussian (sigma=1.2m)
+            r_alive = 0.50
+            r_dist = 8.0 * float(np.exp(-0.5 * (dist_err / 1.2)**2)) if raw_in_view else 1.0 * float(np.exp(-0.5 * (dist_err / 3.0)**2))
+            r_progress = 2.5 * float(np.clip(closing_speed, 0.0, 5.0)) if dist > self.standoff_max else 0.0
+            r_basket_dwell = (6.0 + 8.0 * dwell_progress) if in_basket else 0.0
 
-        # Distance Closing Rate Progress toward 3.5m standoff (rewards aggressive closing speed)
+        elif self.reward_mode == "huber_loss":
+            # 2. Smooth Huber Potential Field: Quadratic in bucket, constant linear pull outside
+            r_alive = 0.50 if (raw_in_view and dist <= 6.0) else 0.0
+            delta = 1.0  # Huber transition radius (m)
+            dist_err_m = abs(dist - self.standoff_nominal)
+            if dist_err_m <= delta:
+                r_dist = 8.0 - 2.5 * (dist_err_m**2)
+            else:
+                r_dist = 8.0 - 2.5 * (delta**2) - 0.60 * (dist_err_m - delta)
+            r_progress = 3.5 * float(np.clip(closing_speed, 0.0, 5.0)) if closing_speed > 0 else 1.8 * float(np.clip(closing_speed, -5.0, 0.0))
+            r_basket_dwell = (8.0 + 10.0 * dwell_progress) if in_basket else 0.0
+
+        elif self.reward_mode == "lead_pursuit":
+            # 3. Lead-Pursuit Guidance: Dynamic vector alignment with target flight path
+            r_alive = 0.50 if (raw_in_view and dist <= 6.0) else 0.0
+            dist_err_m = abs(dist - self.standoff_nominal)
+            r_peak = 8.0 * float(np.exp(-0.5 * (dist_err_m / 1.6)**2))
+            r_tail = -0.45 * float(max(0.0, dist - self.standoff_max))
+            r_dist = (r_peak + r_tail) if raw_in_view else (1.0 * float(np.exp(-0.5 * (dist_err_m / 3.0)**2)) - 0.25 * float(max(0.0, dist - self.standoff_max)))
+            r_progress = 3.5 * float(np.clip(closing_speed, 0.0, 5.0)) if closing_speed > 0 else 2.0 * float(np.clip(closing_speed, -5.0, 0.0))
+            
+            v_c = self.sim.vel[:2]
+            v_t = target_vel_w[:2]
+            nc = float(np.linalg.norm(v_c))
+            nt = float(np.linalg.norm(v_t))
+            if nc > 1.0 and nt > 1.0 and raw_in_view:
+                r_lead_vec = 2.5 * float(max(0.0, np.dot(v_c, v_t) / (nc * nt)))
+            r_basket_dwell = (8.0 + 12.0 * dwell_progress) if in_basket else 0.0
+
+        elif self.reward_mode == "speed_adaptive":
+            # 4. Speed-Adaptive Standoff: Expands 3.5m -> 4.5m on burst maneuvers for aerodynamic safety
+            r_alive = 0.50 if (raw_in_view and dist <= 6.5) else 0.0
+            target_speed = float(np.linalg.norm(target_vel_w[:2]))
+            eff_standoff = self.standoff_nominal + 0.08 * float(max(0.0, target_speed - 4.0))
+            eff_err = abs(dist - eff_standoff)
+            r_dist = (8.0 * float(np.exp(-0.5 * (eff_err / 1.6)**2)) - 0.40 * float(max(0.0, dist - (eff_standoff + 1.0)))) if raw_in_view else (1.0 * float(np.exp(-0.5 * (eff_err / 3.0)**2)) - 0.20 * float(max(0.0, dist - (eff_standoff + 1.0))))
+            r_progress = (3.0 * float(np.clip(closing_speed, 0.0, 5.0)) if closing_speed > 0 else 1.5 * float(np.clip(closing_speed, -5.0, 0.0))) if dist > (eff_standoff + 1.0) else 0.0
+            r_basket_dwell = (8.0 + 10.0 * dwell_progress) if in_basket else 0.0
+
+        elif self.reward_mode == "closing_speed_bell":
+            # 5. Aggressive Closing Sprint: High differential progress reward
+            r_alive = 0.50 if (raw_in_view and dist <= 5.5) else 0.0
+            dist_err_m = abs(dist - self.standoff_nominal)
+            r_dist = (8.0 * float(np.exp(-0.5 * (dist_err_m / 1.6)**2)) - 0.50 * float(max(0.0, dist - self.standoff_max))) if raw_in_view else -0.30 * float(max(0.0, dist - self.standoff_max))
+            if dist > self.standoff_max:
+                r_progress = 4.5 * float(np.clip(closing_speed, 0.0, 6.0)) if closing_speed > 0 else 3.0 * float(np.clip(closing_speed, -6.0, 0.0))
+            else:
+                rel_v = abs(closing_speed)
+                r_progress = 2.0 * float(np.exp(-0.5 * (rel_v / 1.0)**2))  # Reward zero relative speed inside bucket
+            r_basket_dwell = (8.0 + 10.0 * dwell_progress) if in_basket else 0.0
+
+        elif self.reward_mode == "tight_centering":
+            # 6. High-Gain Crosshair Centering: Strict tracking on maneuvers
+            r_alive = 0.50 if (raw_in_view and dist <= 6.0) else 0.0
+            dist_err_m = abs(dist - self.standoff_nominal)
+            r_dist = (8.0 * float(np.exp(-0.5 * (dist_err_m / 1.6)**2)) - 0.40 * float(max(0.0, dist - self.standoff_max))) if raw_in_view else -0.20 * float(max(0.0, dist - self.standoff_max))
+            r_progress = 3.0 * float(np.clip(closing_speed, 0.0, 5.0)) if closing_speed > 0 else 1.5 * float(np.clip(closing_speed, -5.0, 0.0))
+            r_basket_dwell = (8.0 + 10.0 * dwell_progress) if in_basket else 0.0
+
+        elif self.reward_mode == "optical_expansion_lead":
+            # 7. Optical Bounding-Box Expansion Divergence Feedback
+            r_alive = 0.50 if (raw_in_view and dist <= 6.0) else 0.0
+            dist_err_m = abs(dist - self.standoff_nominal)
+            r_dist = (8.0 * float(np.exp(-0.5 * (dist_err_m / 1.6)**2)) - 0.40 * float(max(0.0, dist - self.standoff_max))) if raw_in_view else -0.20 * float(max(0.0, dist - self.standoff_max))
+            # Reward positive bounding-box expansion rate (closing in)
+            expansion_bonus = 3.0 * float(np.clip(self.filtered_d_w, 0.0, 0.15)) if dist > self.standoff_max else 0.0
+            r_progress = (3.0 * float(np.clip(closing_speed, 0.0, 5.0)) if closing_speed > 0 else 1.5 * float(np.clip(closing_speed, -5.0, 0.0))) + expansion_bonus
+            r_basket_dwell = (8.0 + 10.0 * dwell_progress) if in_basket else 0.0
+
+        elif self.reward_mode == "cumulative_dwell_jackpot":
+            # 8. Quadratic Dwell Acceleration: Massive reward multiplier for unbroken formation lock
+            r_alive = 0.50 if (raw_in_view and dist <= 6.0) else 0.0
+            dist_err_m = abs(dist - self.standoff_nominal)
+            r_dist = (8.0 * float(np.exp(-0.5 * (dist_err_m / 1.6)**2)) - 0.40 * float(max(0.0, dist - self.standoff_max))) if raw_in_view else -0.20 * float(max(0.0, dist - self.standoff_max))
+            r_progress = 3.0 * float(np.clip(closing_speed, 0.0, 5.0)) if closing_speed > 0 else 1.5 * float(np.clip(closing_speed, -5.0, 0.0))
+            # Non-linear quadratic dwell scaling: +6.0 base + up to +20.0 for 3s hold
+            r_basket_dwell = (6.0 + 20.0 * (dwell_progress**2)) if in_basket else 0.0
+
+        elif self.reward_mode == "terminal_bonus_steep":
+            # 9. Steep Linear Pull + Frequent High Milestone Rewards
+            r_alive = 0.50 if (raw_in_view and dist <= 5.5) else 0.0
+            dist_err_m = abs(dist - self.standoff_nominal)
+            r_dist = (8.0 * float(np.exp(-0.5 * (dist_err_m / 1.4)**2)) - 0.60 * float(max(0.0, dist - self.standoff_max))) if raw_in_view else -0.30 * float(max(0.0, dist - self.standoff_max))
+            r_progress = 4.0 * float(np.clip(closing_speed, 0.0, 5.0)) if closing_speed > 0 else 2.0 * float(np.clip(closing_speed, -5.0, 0.0))
+            r_basket_dwell = (10.0 + 15.0 * dwell_progress) if in_basket else 0.0
+
+        elif self.reward_mode == "unified_dogfight_optimal":
+            # 10. Full Synthesis: Huber potential + lead pursuit vector alignment + sprint closing + gated floor
+            r_alive = 0.50 if (raw_in_view and dist <= 6.0) else 0.0
+            delta = 1.0
+            dist_err_m = abs(dist - self.standoff_nominal)
+            if dist_err_m <= delta:
+                r_dist = 8.0 - 2.5 * (dist_err_m**2)
+            else:
+                r_dist = 8.0 - 2.5 * (delta**2) - 0.50 * (dist_err_m - delta)
+            if dist > self.standoff_max:
+                r_progress = 4.0 * float(np.clip(closing_speed, 0.0, 5.0)) if closing_speed > 0 else 2.0 * float(np.clip(closing_speed, -5.0, 0.0))
+            else:
+                r_progress = 2.0 * float(np.exp(-0.5 * (abs(closing_speed) / 1.0)**2))
+
+            v_c = self.sim.vel[:2]
+            v_t = target_vel_w[:2]
+            nc = float(np.linalg.norm(v_c))
+            nt = float(np.linalg.norm(v_t))
+            if nc > 1.0 and nt > 1.0 and raw_in_view:
+                r_lead_vec = 2.5 * float(max(0.0, np.dot(v_c, v_t) / (nc * nt)))
+            r_basket_dwell = (10.0 + 15.0 * dwell_progress) if in_basket else 0.0
+
+        elif self.reward_mode == "trail_brake_corner_governor":
+            # 1. Physics Centripetal Governor & Trail-Braking Incentive
+            r_alive = 0.50 if (raw_in_view and dist <= 6.0) else 0.0
+            dist_err_m = abs(dist - self.standoff_nominal)
+            r_dist = (8.0 * float(np.exp(-0.5 * (dist_err_m / 1.6)**2)) - 0.40 * float(max(0.0, dist - self.standoff_max))) if raw_in_view else -0.20 * float(max(0.0, dist - self.standoff_max))
+            
+            # Gated progress: only reward/penalize closing speed when aligned! If cornering (|ex| > 0.20), braking is NEVER penalized!
+            if abs(raw_ex) < 0.20:
+                r_progress = 3.5 * float(np.clip(closing_speed, 0.0, 5.0)) if closing_speed > 0 else 1.5 * float(np.clip(closing_speed, -5.0, 0.0))
+            else:
+                r_progress = 1.0 * float(np.clip(closing_speed, 0.0, 3.0))
+
+            # Active Trail-Brake Bonus: if off-center (|ex| > 0.25) or optical slip (|filtered_d_ex| > 0.35), reward commanded deceleration
+            v_fwd = float(self.sim.vel[0] * np.cos(self.sim.yaw) + self.sim.vel[1] * np.sin(self.sim.yaw))
+            if raw_in_view and (abs(raw_ex) > 0.25 or abs(self.filtered_d_ex) > 0.35):
+                p_skid = 3.0 * float((v_fwd / 12.0) * max(0.0, abs(raw_ex) - 0.15))
+                r_brake = 2.5 * float(max(0.0, -action[0])) if v_fwd > 4.5 else 0.0
+                r_progress = r_progress - p_skid + r_brake
+            
+            r_basket_dwell = (8.0 + 12.0 * dwell_progress) if in_basket else 0.0
+
+        elif self.reward_mode == "proportional_nav_apex_cutter":
+            # 2. Proportional Navigation Velocity Vector Alignment (Apex Cutting)
+            r_alive = 0.50 if (raw_in_view and dist <= 6.0) else 0.0
+            dist_err_m = abs(dist - self.standoff_nominal)
+            r_dist = (8.0 * float(np.exp(-0.5 * (dist_err_m / 1.6)**2)) - 0.40 * float(max(0.0, dist - self.standoff_max))) if raw_in_view else -0.20 * float(max(0.0, dist - self.standoff_max))
+            
+            # Lead pursuit velocity alignment
+            v_c = self.sim.vel[:2]
+            v_t = target_vel_w[:2]
+            nc = float(np.linalg.norm(v_c))
+            nt = float(np.linalg.norm(v_t))
+            if nc > 0.5 and nt > 0.5 and raw_in_view:
+                align = float(np.dot(v_c, v_t) / (nc * nt))
+                r_lead_vec = 4.0 * float(max(0.0, align))
+                if align < 0.70:
+                    r_lead_vec -= 2.0 * float(nc / 12.0) * (0.70 - align)
+            
+            if abs(raw_ex) < 0.20:
+                r_progress = 3.0 * float(np.clip(closing_speed, 0.0, 5.0)) if closing_speed > 0 else 1.0 * float(np.clip(closing_speed, -5.0, 0.0))
+            else:
+                r_progress = 0.0
+            r_basket_dwell = (8.0 + 12.0 * dwell_progress) if in_basket else 0.0
+
+        elif self.reward_mode == "retinal_slip_kinetic_barrier":
+            # 3. Retinal Slip Optical Governor (Raptor Attack Model)
+            r_alive = 0.50 if (raw_in_view and dist <= 6.0) else 0.0
+            dist_err_m = abs(dist - self.standoff_nominal)
+            r_dist = (8.0 * float(np.exp(-0.5 * (dist_err_m / 1.6)**2)) - 0.40 * float(max(0.0, dist - self.standoff_max))) if raw_in_view else -0.20 * float(max(0.0, dist - self.standoff_max))
+            
+            slip = float(np.hypot(self.filtered_d_ex, self.filtered_d_ey))
+            v_fwd = float(self.sim.vel[0] * np.cos(self.sim.yaw) + self.sim.vel[1] * np.sin(self.sim.yaw))
+            
+            if slip < 0.20:
+                r_progress = 4.0 * float(np.clip(closing_speed, 0.0, 6.0)) if closing_speed > 0 else 1.0 * float(np.clip(closing_speed, -5.0, 0.0))
+            else:
+                p_slip_kinetic = 3.5 * float((v_fwd / 12.0)**2 * min(2.0, slip / 0.5))
+                r_progress = -p_slip_kinetic
+            
+            r_basket_dwell = (8.0 + 12.0 * dwell_progress) if in_basket else 0.0
+
+        elif self.reward_mode == "curvature_adaptive_energy_matching":
+            # 4. Relative Velocity Vector Nulling at Standoff with Curvature Standoff Relaxation
+            r_alive = 0.50 if (raw_in_view and dist <= 6.0) else 0.0
+            
+            slip = float(abs(self.filtered_d_ex))
+            eff_standoff = self.standoff_nominal + 1.0 * float(np.clip(slip / 0.8, 0.0, 1.0))
+            eff_err = abs(dist - eff_standoff)
+            r_dist = (8.0 * float(np.exp(-0.5 * (eff_err / 1.6)**2)) - 0.40 * float(max(0.0, dist - (eff_standoff + 1.0)))) if raw_in_view else -0.20 * float(max(0.0, dist - (eff_standoff + 1.0)))
+            
+            rel_vel_norm = float(np.linalg.norm(self.sim.vel - target_vel_w))
+            if dist < 8.0 and raw_in_view:
+                r_vel_match = 3.0 * float(np.exp(-0.5 * (rel_vel_norm / 2.0)**2) / (1.0 + eff_err))
+            else:
+                r_vel_match = 0.0
+                
+            r_progress = (3.0 * float(np.clip(closing_speed, 0.0, 5.0)) if dist > 8.0 else 0.0) + r_vel_match
+            r_basket_dwell = (8.0 + 12.0 * dwell_progress) if in_basket else 0.0
+
+        elif self.reward_mode == "staged_curriculum_trail_brake":
+            # 5. Cornering Speed-Envelope Guidance
+            r_alive = 0.50 if (raw_in_view and dist <= 6.0) else 0.0
+            dist_err_m = abs(dist - self.standoff_nominal)
+            r_dist = (8.0 * float(np.exp(-0.5 * (dist_err_m / 1.6)**2)) - 0.40 * float(max(0.0, dist - self.standoff_max))) if raw_in_view else -0.20 * float(max(0.0, dist - self.standoff_max))
+            
+            v_optimal_corner = 4.0 + 8.0 * float(np.exp(-0.5 * (abs(raw_ex) / 0.25)**2 - 0.5 * (abs(self.filtered_d_ex) / 0.40)**2))
+            v_fwd = float(self.sim.vel[0] * np.cos(self.sim.yaw) + self.sim.vel[1] * np.sin(self.sim.yaw))
+            
+            r_envelope_match = 3.0 * float(np.exp(-0.5 * ((v_fwd - v_optimal_corner) / 2.0)**2)) if raw_in_view else 0.0
+            
+            if dist > self.standoff_max and abs(raw_ex) < 0.25:
+                r_progress = 2.5 * float(np.clip(closing_speed, 0.0, 5.0))
+            else:
+                r_progress = 0.0
+            r_progress += r_envelope_match
+            r_basket_dwell = (8.0 + 12.0 * dwell_progress) if in_basket else 0.0
+
+        elif self.reward_mode == "unified_apex_dogfight_v2":
+            # 6. Unified Synthesis: Huber potential + PN Vector Lead + Deceleration on Shearing + Quadratic Dwell Jackpot
+            r_alive = 0.50 if (raw_in_view and dist <= 6.0) else 0.0
+            delta = 1.0
+            dist_err_m = abs(dist - self.standoff_nominal)
+            if dist_err_m <= delta:
+                r_dist = 8.0 - 2.5 * (dist_err_m**2)
+            else:
+                r_dist = 8.0 - 2.5 * (delta**2) - 0.45 * (dist_err_m - delta)
+            
+            v_c = self.sim.vel[:2]
+            v_t = target_vel_w[:2]
+            nc = float(np.linalg.norm(v_c))
+            nt = float(np.linalg.norm(v_t))
+            if nc > 0.5 and nt > 0.5 and raw_in_view:
+                r_lead_vec = 3.0 * float(max(0.0, np.dot(v_c, v_t) / (nc * nt)))
+            
+            v_fwd = float(self.sim.vel[0] * np.cos(self.sim.yaw) + self.sim.vel[1] * np.sin(self.sim.yaw))
+            if abs(raw_ex) < 0.20 and abs(self.filtered_d_ex) < 0.30:
+                r_progress = 3.5 * float(np.clip(closing_speed, 0.0, 5.0)) if dist > self.standoff_max else 2.0 * float(np.exp(-0.5 * (abs(closing_speed) / 1.0)**2))
+            else:
+                r_brake = 2.0 * float(max(0.0, -action[0])) if v_fwd > 4.5 else 0.0
+                p_skid = 2.5 * float((v_fwd / 12.0) * max(0.0, abs(raw_ex) - 0.15))
+                r_progress = r_brake - p_skid
+                
+            r_basket_dwell = (6.0 + 18.0 * (dwell_progress**2)) if in_basket else 0.0
+
+        elif self.reward_mode == "pn_sprint_apex_v3":
+            # 1. Proportional Navigation Velocity Vector Alignment + Monotonic Closing Potential
+            r_alive = 0.50 if (raw_in_view and dist <= 6.0) else 0.0
+            dist_err_m = abs(dist - self.standoff_nominal)
+            r_dist = (8.0 * float(np.exp(-0.5 * (dist_err_m / 1.6)**2)) - 0.40 * float(max(0.0, dist - self.standoff_max))) if raw_in_view else -0.20 * float(max(0.0, dist - self.standoff_max))
+
+            v_c = self.sim.vel[:2]
+            v_t = target_vel_w[:2]
+            nc = float(np.linalg.norm(v_c))
+            nt = float(np.linalg.norm(v_t))
+            if nc > 0.5 and nt > 0.5 and raw_in_view:
+                align = float(np.dot(v_c, v_t) / (nc * nt))
+                r_lead_vec = 4.0 * float(max(0.0, align))
+                if align < 0.65:
+                    r_lead_vec -= 2.0 * float(nc / 12.0) * (0.65 - align)
+
+            # Monotonic distance closing potential when far
+            if dist > self.standoff_max:
+                r_progress = 4.0 * float(np.clip(closing_speed, -1.0, 6.0))
+            else:
+                r_progress = 1.0 * float(np.exp(-0.5 * (closing_speed / 1.0)**2)) if abs(raw_ex) < 0.20 else 0.0
+            r_basket_dwell = (12.0 + 16.0 * dwell_progress) if in_basket else 0.0
+
+        elif self.reward_mode == "centripetal_load_envelope":
+            # 2. Physics-Grounded Centripetal Acceleration & Safe Speed Envelope Matching
+            r_alive = 0.50 if (raw_in_view and dist <= 6.0) else 0.0
+            dist_err_m = abs(dist - self.standoff_nominal)
+            r_dist = (8.0 * float(np.exp(-0.5 * (dist_err_m / 1.6)**2)) - 0.40 * float(max(0.0, dist - self.standoff_max))) if raw_in_view else -0.20 * float(max(0.0, dist - self.standoff_max))
+
+            # Optical bearing rate demand -> required cornering velocity
+            omega_turn = float(max(0.08, 2.5 * abs(self.filtered_d_ex)))
+            v_safe = float(np.clip(5.5 / omega_turn, 3.2, 12.0))
+            v_fwd = float(self.sim.vel[0] * np.cos(self.sim.yaw) + self.sim.vel[1] * np.sin(self.sim.yaw))
+
+            r_envelope = 3.5 * float(np.exp(-0.5 * ((v_fwd - v_safe) / 2.0)**2)) if raw_in_view else 0.0
+            if dist > self.standoff_max:
+                r_progress = 3.5 * float(np.clip(closing_speed, 0.0, 5.0)) + r_envelope
+            else:
+                r_progress = r_envelope
+            r_basket_dwell = (10.0 + 15.0 * dwell_progress) if in_basket else 0.0
+
+        elif self.reward_mode == "retinal_slip_raptor_v3":
+            # 3. Biological Raptor Attack Model: Retinal Slip vs Forward Closing Drive
+            r_alive = 0.50 if (raw_in_view and dist <= 6.0) else 0.0
+            dist_err_m = abs(dist - self.standoff_nominal)
+            r_dist = (8.0 * float(np.exp(-0.5 * (dist_err_m / 1.6)**2)) - 0.40 * float(max(0.0, dist - self.standoff_max))) if raw_in_view else -0.20 * float(max(0.0, dist - self.standoff_max))
+
+            slip = float(np.hypot(self.filtered_d_ex, self.filtered_d_ey))
+            v_fwd = float(self.sim.vel[0] * np.cos(self.sim.yaw) + self.sim.vel[1] * np.sin(self.sim.yaw))
+
+            if slip < 0.22:
+                r_progress = 4.5 * float(np.clip(closing_speed, 0.0, 6.0)) if dist > self.standoff_max else 1.0
+            else:
+                p_slip_kinetic = 3.5 * float((v_fwd / 12.0)**2 * min(2.0, slip / 0.40))
+                r_progress = -p_slip_kinetic
+
+            v_c = self.sim.vel[:2]
+            v_t = target_vel_w[:2]
+            nc = float(np.linalg.norm(v_c))
+            nt = float(np.linalg.norm(v_t))
+            if nc > 0.5 and nt > 0.5 and raw_in_view:
+                r_lead_vec = 2.5 * float(max(0.0, np.dot(v_c, v_t) / (nc * nt)))
+            r_basket_dwell = (10.0 + 15.0 * dwell_progress) if in_basket else 0.0
+
+        elif self.reward_mode == "huber_standoff_dogfight":
+            # 4. Huber Standoff Potential Well + Closing Momentum + Velocity Matching
+            r_alive = 0.50 if (raw_in_view and dist <= 6.0) else 0.0
+            delta = 1.0
+            dist_err_m = abs(dist - self.standoff_nominal)
+            if dist_err_m <= delta:
+                r_dist = 8.0 - 2.5 * (dist_err_m**2)
+            else:
+                r_dist = 8.0 - 2.5 * (delta**2) - 0.40 * (dist_err_m - delta)
+
+            if dist > self.standoff_max:
+                r_progress = 3.5 * float(np.clip(closing_speed, 0.0, 5.0))
+            else:
+                r_progress = 0.0
+
+            # 3D relative velocity matching at standoff
+            if 2.5 <= dist <= 5.0 and raw_in_view:
+                rel_v = float(np.linalg.norm(self.sim.vel - target_vel_w))
+                r_vel_match = 3.0 * float(np.exp(-0.5 * (rel_v / 2.0)**2))
+                r_progress += r_vel_match
+
+            v_c = self.sim.vel[:2]
+            v_t = target_vel_w[:2]
+            nc = float(np.linalg.norm(v_c))
+            nt = float(np.linalg.norm(v_t))
+            if nc > 0.5 and nt > 0.5 and raw_in_view:
+                r_lead_vec = 2.5 * float(max(0.0, np.dot(v_c, v_t) / (nc * nt)))
+            r_basket_dwell = (8.0 + 20.0 * float(dwell_progress**1.5)) if in_basket else 0.0
+
+        elif self.reward_mode == "aerodynamic_sideslip_governor":
+            # 5. Aerodynamic Sideslip Governor with Dynamic Sprint Closing
+            r_alive = 0.50 if (raw_in_view and dist <= 6.0) else 0.0
+            dist_err_m = abs(dist - self.standoff_nominal)
+            r_dist = (8.0 * float(np.exp(-0.5 * (dist_err_m / 1.6)**2)) - 0.40 * float(max(0.0, dist - self.standoff_max))) if raw_in_view else -0.20 * float(max(0.0, dist - self.standoff_max))
+
+            c_yaw, s_yaw = np.cos(self.sim.yaw), np.sin(self.sim.yaw)
+            v_fwd = float(c_yaw * self.sim.vel[0] + s_yaw * self.sim.vel[1])
+            v_right = float(-s_yaw * self.sim.vel[0] + c_yaw * self.sim.vel[1])
+            sideslip_rad = float(np.arctan2(v_right, max(0.5, v_fwd)))
+
+            if abs(raw_ex) < 0.18 and abs(self.filtered_d_ex) < 0.25:
+                r_progress = 4.0 * float(np.clip(closing_speed, 0.0, 5.0)) if dist > self.standoff_max else 1.5
+            else:
+                r_brake = 2.5 * float(max(0.0, -action[0])) if v_fwd > 4.0 else 0.0
+                p_skid = 2.5 * float((v_fwd / 12.0) * (np.sin(sideslip_rad)**2 + max(0.0, abs(raw_ex) - 0.15)))
+                r_progress = r_brake - p_skid
+
+            v_c = self.sim.vel[:2]
+            v_t = target_vel_w[:2]
+            nc = float(np.linalg.norm(v_c))
+            nt = float(np.linalg.norm(v_t))
+            if nc > 0.5 and nt > 0.5 and raw_in_view:
+                r_lead_vec = 2.5 * float(max(0.0, np.dot(v_c, v_t) / (nc * nt)))
+            r_basket_dwell = (10.0 + 15.0 * dwell_progress) if in_basket else 0.0
+            # Default: "monotone_potential" (Linear-Exponential Hybrid)
+            r_alive = 0.50 if (raw_in_view and dist <= 6.0) else 0.0
+            dist_err_m = abs(dist - self.standoff_nominal)
+            if raw_in_view:
+                r_peak = 8.0 * float(np.exp(-0.5 * (dist_err_m / 1.6)**2))
+                r_tail = -0.40 * float(max(0.0, dist - self.standoff_max))
+                r_dist = r_peak + r_tail
+            else:
+                r_dist = 1.0 * float(np.exp(-0.5 * (dist_err_m / 3.0)**2)) - 0.20 * float(max(0.0, dist - self.standoff_max))
+            if dist > self.standoff_max:
+                r_progress = 3.0 * float(np.clip(closing_speed, 0.0, 5.0)) if closing_speed > 0 else 1.5 * float(np.clip(closing_speed, -5.0, 0.0))
+            else:
+                r_progress = 0.0
+            r_basket_dwell = (8.0 + 10.0 * dwell_progress) if in_basket else 0.0
+
+        # Continuous Field-of-View Retention & Centering Guidance
         if raw_in_view:
-            closing_rate = (self.prev_distance_error - dist_err) / self.dt
-            r_progress = 0.8 * float(np.clip(closing_rate, -2.0, 5.0))
+            ang_err = float(np.sqrt(raw_ex_unclipped**2 + raw_ey_unclipped**2))
+            r_fov_base = 2.0 / (1.0 + (ang_err / 0.45)**2)
+            dist_fov_scale = float(1.0 / (1.0 + max(0.0, dist - self.standoff_max) / 6.0))
+            r_fov = r_fov_base * dist_fov_scale
+
+            # Predictive Lead Tracking Bonus
+            yaw_rate_norm = float(abs(self.sim.yaw_rate) / np.deg2rad(self.max_yaw_rate_deg))
+            if ang_err <= 0.35 and yaw_rate_norm > 0.20:
+                r_lead = 1.0 * yaw_rate_norm
+            else:
+                r_lead = 0.0
         else:
-            r_progress = 0.0
+            r_fov = 0.0
+            r_lead = 0.0
 
-        # C. Out-of-FOV Sightline Recovery Incentive
-        r_recovery = 0.0 if raw_in_view else -0.20
+        # Directional re-acquisition guidance when sightline is lost
+        r_reacq = 0.0 if raw_in_view else 0.2 * float(np.sign(self.last_seen_ex) * action[3])
 
-        # D. Direct In-Basket Continuous Dwell Holding Reward:
-        # Awards +2.0/step (+100.0/s) continuously while inside the exact 2.8m - 4.2m benchmark basket.
-        r_basket_dwell = 2.0 if in_basket else 0.0
+        # Positive Reward Accumulator
+        r_positive = (
+            r_alive + r_fov + r_lead + r_lead_vec + r_dist + r_progress
+            + r_first_contact + r_basket_dwell + r_reacq + r_milestone + r_sustain
+        )
 
-        # E. Sprint Time Incentive:
-        # Actively penalizes every step spent outside the standoff basket (-7.5/s) to force rapid sprint
-        r_time = 0.0 if in_basket else -0.15
+        # -------------------------------------------------------------
+        # Multiplicative Quality Factors Q in [0.35, 1.0]
+        # (Sub-optimal behaviors scale down positive rewards rather than inflicting negative pain)
+        # -------------------------------------------------------------
+        # Q1. Visual Alignment Quality (soft frame border dampening)
+        if raw_in_view:
+            edge_dist = max(0.0, abs(raw_ex) - 0.60) + max(0.0, abs(raw_ey) - 0.60)
+            p_edge = float(edge_dist)
+            q_fov = float(np.clip(1.0 - 0.5 * edge_dist, 0.40, 1.0))
+        else:
+            p_edge = 0.0
+            q_fov = 0.25  # Meaningfully reduced reward when blind, but non-zero
 
-        # Pre-Braking / Velocity Damping: penalize excessive closing speed when approaching the basket
-        p_overspeed = 0.0
-        if dist < 4.8 and dist > 3.2:
-            rel_closing = float((self.prev_distance_error - dist_err) / self.dt)
-            if rel_closing > 1.0:
-                p_overspeed = 0.4 * float((rel_closing - 1.0) ** 2)
+        # Q2. Flight Smoothness & Jerk Quality
+        act_diff = action - self.last_action
+        act_jerk = act_diff - self.prev_action_diff
+        p_slew = 0.04 * float(np.sum(act_diff**2))
+        p_yaw_jerk = 0.20 * float(act_jerk[3]**2)
+        p_yaw_slew = 0.15 * float(act_diff[3]**2)
+        p_jerk = p_slew + p_yaw_jerk + p_yaw_slew
+        q_smooth = float(np.clip(1.0 - 0.20 * p_jerk, 0.40, 1.0))
+
+        self.prev_action_diff = act_diff.copy()
+        self.last_action = action.copy()
+
+        # Q3. Altitude Safety Quality (cushion below 1.6m AGL)
+        alt_agl = -self.sim.pos[2]
+        if alt_agl < 1.6:
+            q_alt = float(np.clip(1.0 - 0.35 * (1.6 - alt_agl)**2, 0.35, 1.0))
+        else:
+            q_alt = 1.0
+
+        # Q4. Deceleration & Optical Pitch Quality (allow up to -18° backward pitch during dynamic braking)
+        pitch_deg = float(np.rad2deg(self.sim.pitch))
+        if pitch_deg < -18.0:
+            q_pitch = float(np.clip(1.0 - 0.02 * (abs(pitch_deg) - 18.0)**2, 0.50, 1.0))
+        else:
+            q_pitch = 1.0
+
+        # Q5. Approach Glide-Slope Overspeed Quality (allow up to 5.0 m/s closing speed during high-speed sprint closing)
+        if self.standoff_nominal < dist <= 9.0:
+            closing_speed = (self.prev_distance_error - dist_err) / self.dt
+            max_allowed = max(2.5, float(np.sqrt(2.0 * 5.0 * (dist - self.standoff_nominal))))
+            if closing_speed > max_allowed:
+                excess_closing = closing_speed - max_allowed
+                q_speed = float(np.clip(1.0 - 0.10 * excess_closing, 0.60, 1.0))
+            else:
+                q_speed = 1.0
+        else:
+            q_speed = 1.0
+
+        # Control effort regularization (mild micro-trim)
+        p_effort = 0.02 * float(np.sum(action**2))
 
         self.prev_trail_error = d_trail
         self.prev_distance_error = dist_err
 
-        # F. Proximity & Altitude Soft Barriers (3.5m Standoff)
-        # Collision radius is 1.2m. The basket floor is 2.8m.
-        # - Tier 1 (2.0m <= dist < 2.8m): Soft under-standoff cushion prevents creeping inside 2.8m floor.
-        # - Tier 2 (dist < 2.0m): Steep quadratic repeller prevents physical collision (< 1.2m).
-        if dist < 2.0 and dist >= self.collision_dist:
-            p_proximity = 3.0 + 8.0 * ((2.0 - dist) / (2.0 - self.collision_dist)) ** 2
-        elif dist < 2.8 and dist >= 2.0:
-            p_proximity = 3.0 * ((2.8 - dist) / 0.8) ** 2
-        else:
-            p_proximity = 0.0
-
-        alt_agl = -self.sim.pos[2]
-        p_low_alt = 1.5 * max(0.0, self.safe_altitude_cushion - alt_agl)**2
-
-        # Downward sink-rate barrier: heavily penalize descending when below 2.5m AGL
-        # to eliminate ground-strike suicide dives during evasive encounters
-        p_sink = 0.0
-        if alt_agl < 2.5 and self.sim.vel[2] > 0.0:
-            p_sink = 2.0 * (2.5 - alt_agl) * (self.sim.vel[2] ** 2)
-
-        # G. Flight Dynamics Regularization
-        # 1. Action Slew / Jerk Penalty
-        action_diff_sq = float(np.sum((action - self.last_action)**2))
-        p_jerk = 0.02 * action_diff_sq
-        self.last_action = action.copy()
-
-        # 2. Symmetric Low-Gain Control Effort Regularization:
-        p_effort = 0.01 * float(action[0]**2) + 0.01 * float(action[2]**2) + 0.02 * float(action[1]**2 + action[3]**2)
-
-        # Step Reward Total
-        step_reward = (
-            r_fov + r_gamma + r_progress
-            + r_basket_dwell + r_recovery + r_milestone + r_time
-            - p_overspeed - p_proximity - p_low_alt - p_sink - p_jerk - p_effort
-            + terminal_reward
-        )
+        # Total Composite Step Reward (Guaranteed strictly non-negative for all non-terminal steps!)
+        step_reward = max(0.05, r_positive * q_fov * q_smooth * q_alt * q_pitch * q_speed - p_effort) + terminal_reward
 
         info = {
             "dist_m": float(dist),
@@ -1011,18 +1477,31 @@ class DronePursuitEnv(gym.Env):
             "cumulative_firing_window_s": float(self.cumulative_firing_window_s),
             "firing_window_pct": float(self.cumulative_firing_window_s / max(0.01, t_sim) * 100.0),
             "p_jerk": float(p_jerk),
+            "p_yaw_jerk": float(p_yaw_jerk),
+            "p_yaw_slew": float(p_yaw_slew),
             "p_effort": float(p_effort),
             "termination_reason": termination_reason,
             "r_fov": float(r_fov),
-            "r_gamma": float(r_gamma),
+            "r_center": 0.0,
+            "p_edge": float(p_edge),
+            "r_dist": float(r_dist),
+            "r_gamma": float(r_dist),
             "r_basket_dwell": float(r_basket_dwell),
-            "r_progress": float(r_progress),
-            "r_recovery": float(r_recovery),
+            "r_first_contact": float(r_first_contact),
+            "p_blind": 0.0 if raw_in_view else 1.0,
+            "p_pitch_blind": 1.0 - q_pitch,
+            "r_reacq": float(r_reacq),
             "r_milestone": float(r_milestone),
-            "r_time": float(r_time),
-            "p_proximity": float(p_proximity),
-            "p_low_alt": float(p_low_alt),
-            "p_sink": float(p_sink),
+            "p_proximity": 0.0,
+            "p_low_alt": 1.0 - q_alt,
+            "p_sink": 0.0,
+            "p_overspeed": 1.0 - q_speed,
+            "q_fov": float(q_fov),
+            "q_smooth": float(q_smooth),
+            "q_alt": float(q_alt),
+            "q_pitch": float(q_pitch),
+            "q_speed": float(q_speed),
+            "r_lead": float(r_lead),
         }
 
         return obs, float(step_reward), bool(terminated), bool(truncated), info

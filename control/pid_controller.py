@@ -53,11 +53,12 @@ class KinematicVisualServoController:
     def __init__(
         self,
         camera_uptilt_deg: float = 15.0,
-        hfov_deg: float = 60.0,
-        vfov_deg: float = 45.0,
-        desired_bbox_size: float = 63.0,     # Desired target bounding box size (pixels, 63px at 3.5m standoff)
+        hfov_deg: float = 62.0,
+        vfov_deg: float = 38.0,
+        desired_bbox_size: float = 110.0,    # Desired target bounding box width (pixels, 110px corresponds to w_norm=0.0859 on 1280x720)
         desired_standoff_dist: float = 3.5,  # Target standoff distance in meters (3.5m)
         use_bbox_size: bool = False,         # If False, regulates direct metric distance (3.5m)
+        scale_mode: str = "width",           # Scale definition: 'width' (w_bbox, matches PPO), 'max' (legacy max(w, h)), or 'height'
         deadband_dist: float = 0.35,         # Deadband cushion in meters (+/- 0.35m around standoff)
         # 3D/4D PID Gains: [Forward (X), Lateral (Y), Vertical (Z), Yaw (Psi)]
         kp: np.ndarray = None,
@@ -71,13 +72,13 @@ class KinematicVisualServoController:
         ki_z: float = None,
         kd_z: float = None,
         # Output Saturation Limits per axis: [Forward, Lateral, Vertical, Yaw]
-        min_limits: np.ndarray = None,       # Default: [-0.5 m/s fwd (gentle reverse cushion), -6.0 m/s lat, -4.0 m/s climb, -120 deg/s yaw]
-        max_limits: np.ndarray = None,       # Default: [15.0 m/s fwd, +6.0 m/s lat, +2.5 m/s desc, +120 deg/s yaw]
+        min_limits: np.ndarray = None,       # Default: [-0.5 m/s fwd (gentle reverse cushion), -2.5 m/s lat, -2.5 m/s climb, -90 deg/s yaw]
+        max_limits: np.ndarray = None,       # Default: [12.0 m/s fwd, +2.5 m/s lat, +1.5 m/s desc, +90 deg/s yaw]
         # Integrator Anti-Windup Clamping Bounds
         int_limits: np.ndarray = None,       # Forward and Lateral integrators are 0.0 (kinematic surge + PD sway)
         # Acceleration & Slew Rate Limits (Calibrated for ~2 kg quadrotor flight envelope)
-        max_accel: float = 6.5,              # m/s^2 forward acceleration (calibrated ~33.5 deg tilt ramp for 2 kg quad)
-        max_decel: float = 5.0,              # m/s^2 calibrated braking deceleration (matched identically to RL envelope)
+        max_accel: float = 6.0,              # m/s^2 forward acceleration (calibrated ~31.5 deg tilt ramp for 2 kg quad)
+        max_decel: float = 6.0,              # m/s^2 calibrated braking deceleration (matched identically to RL envelope)
         max_accel_z: float = 3.0,            # m/s^2 vertical climb/descent acceleration limit
         max_accel_yaw: float = 180.0,        # deg/s^2 yaw angular acceleration limit
         filter_tau: float = 0.06,            # Derivative low-pass filter time constant (seconds)
@@ -86,9 +87,9 @@ class KinematicVisualServoController:
         enable_lateral_strafe: bool = True,
         kp_lat: float = 2.5,                 # Lateral proportional gain (m/s per unit error_x)
         kd_lat: float = 0.35,                # Lateral derivative damping (counteracts roll-induced visual swings)
-        max_lat_vel: float = 6.0,            # Maximum lateral velocity in m/s (matched identically to RL envelope)
-        max_lat_accel: float = 5.0,          # Maximum lateral acceleration in m/s^2 for agile roll initiation
-        search_mode: str = "brake",          # 'brake' (immediate active station-keeping hover) or 'legacy_coast'
+        max_lat_vel: float = 2.5,            # Maximum lateral velocity in m/s (matched identically to RL envelope)
+        max_lat_accel: float = 4.0,          # Maximum lateral acceleration in m/s^2 for agile roll initiation
+        search_mode: str = "decay",          # 'decay' (smooth forward speed decay), 'brake' (immediate active hover), or 'legacy_coast'
         coast_mode: str = "decay",           # 'decay' (inhibit forward acceleration & smooth decay), 'brake' (immediate hover), or 'follow'
     ):
         self.camera_uptilt = np.deg2rad(camera_uptilt_deg)
@@ -97,6 +98,7 @@ class KinematicVisualServoController:
         self.desired_bbox_size = desired_bbox_size
         self.standoff_dist = desired_standoff_dist
         self.use_bbox_size = use_bbox_size
+        self.scale_mode = str(scale_mode).lower().strip()
         self.deadband_dist = float(deadband_dist)
         self.search_mode = str(search_mode).lower().strip()
         self.coast_mode = str(coast_mode).lower().strip()
@@ -107,7 +109,7 @@ class KinematicVisualServoController:
         lat_kp = float(kp_lat) if enable_lateral_strafe else 0.0
         lat_kd = float(kd_lat) if enable_lateral_strafe else 0.0
         # Axis 0 uses kinematic deceleration curve; integrator is 0.0 to prevent phantom windup.
-        default_kp = np.array([1.2, lat_kp, 5.0, 180.0], dtype=np.float64)
+        default_kp = np.array([1.2, lat_kp, 6.0, 180.0], dtype=np.float64)
         default_ki = np.array([0.0, 0.0, 0.5, 5.0], dtype=np.float64)
         default_kd = np.array([0.15, lat_kd, 1.0, 20.0], dtype=np.float64)
 
@@ -135,7 +137,7 @@ class KinematicVisualServoController:
         if kd_z is not None:   self.kd[2] = kd_z
 
         # Output Saturation Limits per axis: [Forward, Lateral, Vertical, Yaw]
-        yaw_limit = float(max_yawspeed_deg) if max_yawspeed_deg is not None else 120.0
+        yaw_limit = float(max_yawspeed_deg) if max_yawspeed_deg is not None else 90.0
         lat_limit = float(max_lat_vel)
 
         if min_limits is not None:
@@ -146,9 +148,9 @@ class KinematicVisualServoController:
                 vx_min = float(min_limits[0])
                 self.min_limits = np.array([vx_min, -lat_limit, min_limits[1], min_limits[2]], dtype=np.float64)
             else:
-                self.min_limits = np.array([-0.5, -lat_limit, -4.0, -yaw_limit], dtype=np.float64)
+                self.min_limits = np.array([-0.5, -lat_limit, -2.5, -yaw_limit], dtype=np.float64)
         else:
-            self.min_limits = np.array([-0.5, -lat_limit, -4.0, -yaw_limit], dtype=np.float64)
+            self.min_limits = np.array([-0.5, -lat_limit, -2.5, -yaw_limit], dtype=np.float64)
 
         if max_limits is not None:
             if len(max_limits) == 4:
@@ -156,9 +158,9 @@ class KinematicVisualServoController:
             elif len(max_limits) == 3:
                 self.max_limits = np.array([max_limits[0], lat_limit, max_limits[1], max_limits[2]], dtype=np.float64)
             else:
-                self.max_limits = np.array([15.0, lat_limit, 2.5, yaw_limit], dtype=np.float64)
+                self.max_limits = np.array([12.0, lat_limit, 1.5, yaw_limit], dtype=np.float64)
         else:
-            self.max_limits = np.array([15.0, lat_limit, 2.5, yaw_limit], dtype=np.float64)
+            self.max_limits = np.array([12.0, lat_limit, 1.5, yaw_limit], dtype=np.float64)
 
         if int_limits is not None:
             if len(int_limits) == 4:
@@ -181,6 +183,8 @@ class KinematicVisualServoController:
         self.prev_cmd = np.zeros(4, dtype=np.float64)
         self.prev_cmd_vx = 0.0
         self.prev_cmd_vy = 0.0
+        self.last_seen_ex = 0.0
+        self.last_seen_ey = 0.0
 
         # Vectorized internal state (shape: (4,))
         self.integral = np.zeros(4, dtype=np.float64)
@@ -196,6 +200,8 @@ class KinematicVisualServoController:
         self.prev_cmd = np.zeros(4, dtype=np.float64)
         self.prev_cmd_vx = 0.0
         self.prev_cmd_vy = 0.0
+        self.last_seen_ex = 0.0
+        self.last_seen_ey = 0.0
         self.initialized = False
         self.lost_time = 0.0
 
@@ -230,11 +236,19 @@ class KinematicVisualServoController:
         if status == "SEARCHING":
             self.lost_time += dt
             self.initialized = False  # Reset initialized state to eliminate derivative spike upon re-acquisition
-            if self.search_mode == "brake":
-                # Option A: Immediate Active Brake & Station-Keeping Hover
+            if self.search_mode == "decay":
+                # Option A: Smooth Forward Speed Decay & Station-Keeping Alignment
+                # Bleeds off forward momentum smoothly at 2.0 m/s^2 while zeroing lateral and yaw drift,
+                # preventing violent zero-velocity freezing during 1-frame visual dropouts.
+                self.integral.fill(0.0)
+                cmd_vx = max(0.0, self.prev_cmd_vx - 2.0 * dt)
+                self.prev_cmd_vx = cmd_vx
+                self.prev_cmd[0] = cmd_vx
+                self.prev_cmd[1] = 0.0
+                return np.array([cmd_vx, 0.0, 0.0, 0.0], dtype=np.float64)
+            elif self.search_mode == "brake":
+                # Option B: Immediate Active Brake & Station-Keeping Hover
                 # Arrests all forward, lateral, vertical, and angular momentum immediately.
-                # Outer slew-rate limiter smoothly ramps deceleration at max_accel_xy (4.0 m/s^2).
-                # Clears PID error integrator to eliminate windup overshoot upon re-acquisition.
                 self.integral.fill(0.0)
                 self.prev_error.fill(0.0)
                 self.filtered_deriv.fill(0.0)
@@ -271,6 +285,15 @@ class KinematicVisualServoController:
         err_x = float(telemetry.get("error_x", 0.0))
         err_y = float(telemetry.get("error_y", 0.0))
 
+        # Update last-seen memory when target is actively in view
+        if telemetry.get("in_view", True):
+            self.last_seen_ex = err_x
+            self.last_seen_ey = err_y
+        elif is_coasting and abs(err_x) < 1e-4 and abs(err_y) < 1e-4:
+            # Fall back to last seen optical errors during dropout
+            err_x = self.last_seen_ex
+            err_y = self.last_seen_ey
+
         # Non-finite (NaN / Inf) sanity barrier: abort and return safe zero-velocity holding command
         if not (np.isfinite(err_x) and np.isfinite(err_y) and np.isfinite(drone_pitch) and np.isfinite(drone_roll) and np.isfinite(dt)):
             return np.zeros(4, dtype=np.float64)
@@ -294,13 +317,28 @@ class KinematicVisualServoController:
                 # Direct normalized scale error [-1.0 (too close), +1.0 (far)] from track_pipeline.py
                 range_err = float(telemetry["error_range"])
             else:
-                current_sz = telemetry.get("target_size", 0.0)
-                if current_sz <= 0.0:
-                    bw = telemetry.get("bbox_w", 0.0)
-                    bh = telemetry.get("bbox_h", 0.0)
-                    current_sz = max(bw, bh)
+                if self.scale_mode == "width":
+                    current_sz = telemetry.get("bbox_w", None)
+                    if current_sz is None:
+                        if "bbox" in telemetry and len(telemetry["bbox"]) >= 4:
+                            current_sz = float(telemetry["bbox"][2] - telemetry["bbox"][0])
+                        else:
+                            current_sz = telemetry.get("target_size", 0.0)
+                elif self.scale_mode == "height":
+                    current_sz = telemetry.get("bbox_h", None)
+                    if current_sz is None:
+                        if "bbox" in telemetry and len(telemetry["bbox"]) >= 4:
+                            current_sz = float(telemetry["bbox"][3] - telemetry["bbox"][1])
+                        else:
+                            current_sz = telemetry.get("target_size", 0.0)
+                else:  # "max"
+                    current_sz = telemetry.get("target_size", 0.0)
+                    if current_sz <= 0.0:
+                        bw = telemetry.get("bbox_w", 0.0)
+                        bh = telemetry.get("bbox_h", 0.0)
+                        current_sz = max(bw, bh)
 
-                if current_sz > 0.0:
+                if current_sz is not None and current_sz > 0.0:
                     range_err = (self.desired_bbox_size - current_sz) / max(1.0, self.desired_bbox_size)
                 else:
                     range_err = 0.0
@@ -320,8 +358,12 @@ class KinematicVisualServoController:
         if not (np.isfinite(range_term) and np.isfinite(target_vx_ff) and np.isfinite(err_x_horizon) and np.isfinite(elevation_horizon) and np.isfinite(azimuth_horizon)):
             return np.zeros(4, dtype=np.float64)
 
-        # 3. 4D Error Vector: [Range Error, Lateral Error (norm), Elevation Horizon (rad), Azimuth Horizon (rad)]
-        error_vec = np.array([range_term, err_x_horizon, elevation_horizon, azimuth_horizon], dtype=np.float64)
+        # 3. 4D Error Vector: [Range Error, Lateral Error (norm), Optical Elevation (rad), Azimuth Horizon (rad)]
+        # For the vertical axis (Axis 2): use camera optical elevation error to center the target
+        # directly in the camera optical frame (err_y = 0), naturally establishing the ~0.9m
+        # altitude lead below the target to compensate for the +15 deg camera mount up-tilt.
+        elevation_optical = float(np.arctan2(err_y * self.half_vfov, 1.0))
+        error_vec = np.array([range_term, err_x_horizon, elevation_optical, azimuth_horizon], dtype=np.float64)
 
         # 4. Apply 4-DOF control update (Surge vx, Sway vy, Heave vz, Yaw yawspeed)
         return self.update(
@@ -414,7 +456,7 @@ class KinematicVisualServoController:
         # ----------------------------------------------------------------------
         raw_output = p_term + i_term + d_term
 
-        # Kinematic approach & recession curve on Axis 0 (Forward Speed) with deadband cushion
+        # Scale / Range Error Conversion to Metric Distance Signal (Axis 0)
         if self.use_bbox_size:
             scale_err = e[0]  # normalized scale error: (s* - s) / s*
             denom = max(0.05, 1.0 - scale_err) if scale_err < 1.0 else 0.05
@@ -425,39 +467,35 @@ class KinematicVisualServoController:
             dist_err = e[0]
             dist_signal = dist_err
 
-        # Deadband cushion to prevent hunting, chatter, and violent reversals around setpoint
-        if abs(dist_signal) <= self.deadband_dist:
-            v_kinematic = 0.0
-        elif dist_signal > self.deadband_dist:
+        # Pursuit Speed-Matching Guidance Law on Axis 0 (Forward Velocity):
+        # Rather than decelerating to 0 m/s relative to the ground (which treats the target as a stationary obstacle),
+        # match moving target cruise velocity and modulate forward throttle proportionally to distance error:
+        #   v_fwd = v_target_cruise + K_dist * dist_signal
+        nominal_cruise_speed = target_vx_ff if target_vx_ff > 0.5 else 3.5
+        kp_forward = 1.2  # Velocity modulation gain: ~1.2 m/s per meter of distance error
+
+        if dist_signal > self.deadband_dist:
             eff_err = dist_signal - self.deadband_dist
-            v_kinematic = min(self.max_limits[0], np.sqrt(2.0 * self.max_decel * eff_err))
+            v_kinematic = nominal_cruise_speed + kp_forward * eff_err
+        elif dist_signal < -self.deadband_dist:
+            eff_err = dist_signal + self.deadband_dist
+            v_kinematic = nominal_cruise_speed + kp_forward * eff_err
         else:
-            # Active gentle reverse cushion when target penetrates inside deadband
-            eff_err = abs(dist_signal) - self.deadband_dist
-            max_rev = abs(min(0.0, self.min_limits[0]))
-            if max_rev > 0.0:
-                v_kinematic = -min(max_rev, np.sqrt(2.0 * min(self.max_decel, 1.5) * eff_err))
-            else:
-                v_kinematic = 0.0
+            v_kinematic = nominal_cruise_speed
 
-        # Blend kinematic velocity with derivative damping and feedforward
-        raw_output[0] = v_kinematic + d_term[0] + target_vx_ff
+        raw_output[0] = np.clip(v_kinematic + d_term[0], self.min_limits[0], self.max_limits[0])
 
-        # Prevent reverse retreat when target is within deadband or further away
-        if dist_signal >= -self.deadband_dist:
-            raw_output[0] = max(0.0, raw_output[0])
-
-        # Centering damping: ease forward acceleration gently during sharp turns without killing pursuit momentum
+        # Centering damping: gently trim excess surge during sharp lateral maneuvers without killing pursuit momentum
         if raw_output[0] > 0.0:
-            centering_factor = max(0.65, 1.0 - horiz_err_norm * 0.35)
+            centering_factor = max(0.85, 1.0 - horiz_err_norm * 0.15)
             raw_output[0] *= centering_factor
 
         # COASTING behavior governance:
-        # Inhibit forward acceleration beyond decaying speed, and dampen lateral strafe
+        # Hold forward cruise velocity through short dropouts to preserve closing momentum
         if is_coasting and self.coast_mode == "decay":
-            decayed_vx = max(0.0, self.prev_cmd_vx - 1.5 * dt)
+            decayed_vx = max(3.5, self.prev_cmd_vx - 1.5 * dt)
             raw_output[0] = min(raw_output[0], decayed_vx)
-            raw_output[1] *= 0.5
+            raw_output[1] *= 0.75
 
         # ----------------------------------------------------------------------
         # 6. Slew-Rate Limiting Across All 4 Flight Axes
@@ -536,7 +574,7 @@ DroneVisualPIDController = KinematicVisualServoController
 def run_simulation_and_plot():
     """
     Simulates 20 seconds of autonomous closed-loop pursuit using KinematicVisualServoController.
-    Uses pure bounding-box pixel regulation (desired_bbox_size = 63 px, ~3.5m standoff).
+    Uses pure bounding-box width regulation (desired_bbox_size = 110.0 px, w_norm=0.0859 on 1280x720).
     """
     dt = 0.02
     total_time = 20.0
@@ -545,10 +583,11 @@ def run_simulation_and_plot():
     sim = FastPixhawkQuadSim(dt=dt)
     controller = KinematicVisualServoController(
         camera_uptilt_deg=15.0,
-        hfov_deg=60.0,
-        vfov_deg=45.0,
-        desired_bbox_size=63.0,  # 63px corresponds to ~3.5m standoff
+        hfov_deg=62.0,
+        vfov_deg=38.0,
+        desired_bbox_size=110.0,  # 110px width corresponds to w_norm=0.0859 on 1280x720
         desired_standoff_dist=3.5,
+        scale_mode="width",
     )
 
     sim.reset(initial_pos=[0.0, 0.0, 0.0], initial_yaw=0.0)
@@ -582,13 +621,14 @@ def run_simulation_and_plot():
         # 1. Project target onto camera sensor and formulate telemetry with bounding-box pixels
         telemetry = sim.get_camera_telemetry(
             target_world,
-            hfov_deg=60.0,
-            vfov_deg=45.0,
+            hfov_deg=62.0,
+            vfov_deg=38.0,
             target_w_m=0.35,
             target_h_m=0.20,
-            img_w=640,
-            img_h=480,
-            desired_target_size=63.0
+            img_w=1280,
+            img_h=720,
+            desired_target_size=110.0,
+            scale_mode="width"
         )
 
         # 2. Compute 3D Control Vector using bounding box pixel errors
@@ -638,7 +678,7 @@ def run_simulation_and_plot():
     # Sample intervals for FOV Wedges
     sample_indices = np.linspace(0, num_steps - 1, 9, dtype=int)
     fov_range = 8.0
-    half_hfov = np.deg2rad(60.0 / 2.0)
+    half_hfov = np.deg2rad(62.0 / 2.0)
 
     for idx in sample_indices:
         cx, cy = chaser_pos[idx, 0], chaser_pos[idx, 1]

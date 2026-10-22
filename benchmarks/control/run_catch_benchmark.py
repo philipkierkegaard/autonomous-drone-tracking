@@ -67,10 +67,11 @@ def run_scenario_evaluation(
     if controller_type == "pid":
         controller = KinematicVisualServoController(
             camera_uptilt_deg=15.0,
-            hfov_deg=60.0,
-            vfov_deg=45.0,
-            desired_bbox_size=32.33,
+            hfov_deg=62.0,
+            vfov_deg=38.0,
+            desired_bbox_size=110.0,
             desired_standoff_dist=desired_standoff,
+            scale_mode="width",
             use_bbox_size=False,
             enable_lateral_strafe=True,
             kp_lat=2.5,
@@ -109,13 +110,13 @@ def run_scenario_evaluation(
 
         telem = sim.get_camera_telemetry(
             p_target,
-            hfov_deg=60.0,
-            vfov_deg=45.0,
+            hfov_deg=62.0,
+            vfov_deg=38.0,
             target_w_m=0.35,
             target_h_m=0.20,
-            img_w=640,
-            img_h=480,
-            desired_target_size=32.33
+            img_w=1280,
+            img_h=720,
+            desired_target_size=110.0
         )
         dist = telem["distance"]
         in_view = telem["in_view"]

@@ -177,31 +177,33 @@ class FastPixhawkQuadSim:
     def project_to_camera(
         self,
         target_pos_world,
-        hfov_deg: float = 60.0,
-        vfov_deg: float = 45.0,
+        hfov_deg: float = 62.0,
+        vfov_deg: float = 38.0,
         target_w_m: float = 0.35,
         target_h_m: float = 0.20,
-        img_w: int = 640,
-        img_h: int = 480,
-        return_bbox: bool = False
+        img_w: int = 1280,
+        img_h: int = 720,
+        return_bbox: bool = False,
+        return_unclipped: bool = False
     ):
         """
         Projects a 3D target in world NED coordinates onto the drone's tilted camera sensor.
         
         Args:
             target_pos_world: [x, y, z] target coordinates in world NED (meters)
-            hfov_deg: Horizontal field of view in degrees (default: 60.0)
-            vfov_deg: Vertical field of view in degrees (default: 45.0)
+            hfov_deg: Horizontal field of view in degrees (default: 62.0)
+            vfov_deg: Vertical field of view in degrees (default: 38.0)
             target_w_m: Target physical wingspan/width in meters (default: 0.35m)
             target_h_m: Target physical height in meters (default: 0.20m)
-            img_w: Camera sensor resolution width in pixels (default: 640)
-            img_h: Camera sensor resolution height in pixels (default: 480)
+            img_w: Camera sensor resolution width in pixels (default: 1280)
+            img_h: Camera sensor resolution height in pixels (default: 720)
             return_bbox: If True, returns (err_x, err_y, in_view, dist, bbox_w, bbox_h)
                          If False, returns (err_x, err_y, in_view, dist) for backward compatibility
+            return_unclipped: If True, returns unclipped err_x and err_y without [-1, 1] clipping
         
         Returns:
-            error_x: [-1.0 (left), +1.0 (right)]
-            error_y: [-1.0 (up), +1.0 (down)]
+            error_x: [-1.0 (left), +1.0 (right)] (or unclipped if return_unclipped=True)
+            error_y: [-1.0 (up), +1.0 (down)] (or unclipped if return_unclipped=True)
             in_view: bool
             distance: float (meters)
             bbox_w: float (pixels, only if return_bbox=True)
@@ -239,6 +241,8 @@ class FastPixhawkQuadSim:
 
         if z_cam <= 0.1:
             sign_x = 1.0 if x_cam >= 0.0 else -1.0
+            if return_unclipped:
+                return float(sign_x * 5.0), 0.0, False, float(dist), 0.0, 0.0
             if return_bbox:
                 return sign_x, 0.0, False, float(dist), 0.0, 0.0
             return sign_x, 0.0, False, float(dist)  # Behind camera: steer towards direction of target
@@ -262,6 +266,8 @@ class FastPixhawkQuadSim:
             bbox_w = 0.0
             bbox_h = 0.0
 
+        if return_unclipped:
+            return float(err_x), float(err_y), in_view, float(dist), float(bbox_w), float(bbox_h)
         if return_bbox:
             return float(np.clip(err_x, -1.0, 1.0)), float(np.clip(err_y, -1.0, 1.0)), in_view, float(dist), float(bbox_w), float(bbox_h)
         return float(np.clip(err_x, -1.0, 1.0)), float(np.clip(err_y, -1.0, 1.0)), in_view, float(dist)
@@ -269,17 +275,21 @@ class FastPixhawkQuadSim:
     def get_camera_telemetry(
         self,
         target_pos_world,
-        hfov_deg: float = 60.0,
-        vfov_deg: float = 45.0,
+        hfov_deg: float = 62.0,
+        vfov_deg: float = 38.0,
         target_w_m: float = 0.35,
         target_h_m: float = 0.20,
-        img_w: int = 640,
-        img_h: int = 480,
-        desired_target_size: float = 35.0
+        img_w: int = 1280,
+        img_h: int = 720,
+        desired_target_size: float = 110.0,
+        scale_mode: str = "width"
     ) -> dict:
         """
         Synthesizes visual servoing flight telemetry matching the exact schema of track_pipeline.py.
-        Provides normalized errors, bounding box pixel dimensions, and range error.
+        Provides normalized errors, bounding box pixel dimensions, normalized width, and range error.
+        
+        Args:
+            scale_mode: "width" (standardized w_bbox regulation), "max" (max(w, h)), or "height"
         """
         err_x, err_y, in_view, dist, bw, bh = self.project_to_camera(
             target_pos_world,
@@ -291,7 +301,12 @@ class FastPixhawkQuadSim:
             img_h=img_h,
             return_bbox=True
         )
-        current_sz = max(bw, bh)
+        if scale_mode == "width":
+            current_sz = bw
+        elif scale_mode == "height":
+            current_sz = bh
+        else:
+            current_sz = max(bw, bh)
         range_err = (desired_target_size - current_sz) / max(1.0, desired_target_size)
 
         # Bounding box coordinates on sensor [x1, y1, x2, y2]
@@ -302,6 +317,8 @@ class FastPixhawkQuadSim:
         x2 = min(float(img_w), cx + bw / 2.0)
         y2 = min(float(img_h), cy + bh / 2.0)
 
+        w_norm = float(bw / img_w) if img_w > 0 else 0.0
+
         return {
             "status": "LOCKED" if in_view else "COASTING",
             "error_x": err_x,
@@ -311,6 +328,8 @@ class FastPixhawkQuadSim:
             "desired_size": float(desired_target_size),
             "bbox_w": float(bw),
             "bbox_h": float(bh),
+            "w_norm": w_norm,
+            "scale_mode": scale_mode,
             "bbox": [float(x1), float(y1), float(x2), float(y2)],
             "distance": float(dist),  # Ground-truth metric distance for benchmarking logs
             "in_view": in_view,

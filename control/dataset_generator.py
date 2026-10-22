@@ -7,7 +7,7 @@ Generates standardized, deterministic, and diverse multi-angle encounter scenari
 for both classical controller benchmarking and future predictive / learned (RL/MPC) training.
 
 Guarantees:
-1. FOV Inception: 100% of targets initialize within the camera frustum (HFOV 60°, VFOV 45°, +15° uptilt).
+1. FOV Inception: 100% of targets initialize within the camera frustum (HFOV 62°, VFOV 38°, +15° uptilt).
 2. Diverse Encounter Geometries:
    - Tail-Chase (0° ± 30°): Target fleeing ahead
    - Crossing Left / Right (90° / 270° ± 25°): Target crossing perpendicular to LOS
@@ -123,8 +123,8 @@ class PursuitDatasetGenerator:
     def __init__(
         self,
         camera_uptilt_deg: float = 15.0,
-        hfov_deg: float = 60.0,
-        vfov_deg: float = 45.0,
+        hfov_deg: float = 62.0,
+        vfov_deg: float = 38.0,
         fov_margin_deg: float = 5.0,
         min_distance_m: float = 5.0,
         max_distance_m: float = 10.0,
@@ -137,8 +137,8 @@ class PursuitDatasetGenerator:
         self.fov_margin_deg = fov_margin_deg
 
         # Safe FOV bounds within camera sensor
-        self.max_az_deg = (hfov_deg / 2.0) - fov_margin_deg    # e.g., 25.0 deg
-        self.max_el_deg = (vfov_deg / 2.0) - fov_margin_deg    # e.g., 17.5 deg
+        self.max_az_deg = (hfov_deg / 2.0) - fov_margin_deg    # e.g., 26.0 deg
+        self.max_el_deg = (vfov_deg / 2.0) - fov_margin_deg    # e.g., 14.0 deg
 
         self.min_dist = min_distance_m
         self.max_dist = max_distance_m

@@ -36,8 +36,8 @@ def render_empirical_fpv(
     profile: str = "evasive",
     env_mode: str = "nominal",
     seed: int = 42,
-    img_w: int = 640,
-    img_h: int = 480,
+    img_w: int = 1280,
+    img_h: int = 720,
     fps: int = 30,
 ):
     print(f"\n{'='*75}")
@@ -78,9 +78,9 @@ def render_empirical_fpv(
 
     controller = KinematicVisualServoController(
         camera_uptilt_deg=15.0,
-        hfov_deg=60.0,
-        vfov_deg=45.0,
-        desired_bbox_size=32.33,
+        hfov_deg=62.0,
+        vfov_deg=38.0,
+        desired_bbox_size=62.13,  # Target bbox at 6.0m standoff on 1280x720
         desired_standoff_dist=6.0,
         use_bbox_size=False,
         enable_lateral_strafe=True,
@@ -452,7 +452,7 @@ def draw_composite_frame(
         (24, 34), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (0, 210, 210), 1, cv2.LINE_AA
     )
     cv2.putText(
-        fpv_img, f"OPTICAL ENVELOPE: 60° HFOV x 45° VFOV | TILT: +15° | TIME: {t:04.1f}s",
+        fpv_img, f"OPTICAL ENVELOPE: 62° HFOV x 38° VFOV | TILT: +15° | TIME: {t:04.1f}s",
         (24, 52), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (160, 180, 200), 1, cv2.LINE_AA
     )
 
@@ -506,8 +506,8 @@ def draw_composite_frame(
         cv2.circle(radar_img, (rcx, rcy), r_px, col, thick, cv2.LINE_AA)
         cv2.putText(radar_img, f"{r_m}m", (rcx + 4, rcy - r_px + 12), cv2.FONT_HERSHEY_SIMPLEX, 0.32, (70, 85, 100), 1, cv2.LINE_AA)
 
-    # FOV Cone (60° HFOV radiating from chaser)
-    half_fov = np.deg2rad(30.0)
+    # FOV Cone (62° HFOV radiating from chaser)
+    half_fov = np.deg2rad(31.0)
     cone_len = 14.0 * r_scale
     cone_l = (int(rcx - cone_len * np.sin(half_fov)), int(rcy - cone_len * np.cos(half_fov)))
     cone_r = (int(rcx + cone_len * np.sin(half_fov)), int(rcy - cone_len * np.cos(half_fov)))

@@ -1,0 +1,102 @@
+{
+  "01_monotone_potential": {
+    "mean_fov": 7.782857142857142,
+    "min_dist": 2.846055275132745,
+    "mean_dist": 49.56217767843342,
+    "catch_dwell": 0.05428571428571428,
+    "collisions": 0,
+    "model_path": "/Users/philipkierkegaard/Development/autonomous-drone-tracking/control/weights/sweep_01_monotone_potential/best_model/best_model.zip",
+    "reward_mode": "monotone_potential",
+    "notes": "Linear-Exponential potential eliminating distance deadzones"
+  },
+  "02_huber_loss": {
+    "mean_fov": 9.76,
+    "min_dist": 3.0815626489078296,
+    "mean_dist": 101.94481893305259,
+    "catch_dwell": 0.025714285714285714,
+    "collisions": 0,
+    "model_path": "/Users/philipkierkegaard/Development/autonomous-drone-tracking/control/weights/sweep_02_huber_loss/best_model/best_model.zip",
+    "reward_mode": "huber_loss",
+    "notes": "Smooth Huber potential field with constant linear pull outside"
+  },
+  "03_lead_pursuit": {
+    "mean_fov": 22.845714285714287,
+    "min_dist": 2.5667634186448085,
+    "mean_dist": 34.4010103123561,
+    "catch_dwell": 0.05428571428571429,
+    "collisions": 0,
+    "model_path": "/Users/philipkierkegaard/Development/autonomous-drone-tracking/control/weights/sweep_03_lead_pursuit/best_model/best_model.zip",
+    "reward_mode": "lead_pursuit",
+    "notes": "Proportional navigation velocity vector alignment (apex cutting)"
+  },
+  "04_speed_adaptive": {
+    "mean_fov": 2.9257142857142853,
+    "min_dist": 2.548225733466087,
+    "mean_dist": 51.771561452033744,
+    "catch_dwell": 0.04285714285714286,
+    "collisions": 0,
+    "model_path": "/Users/philipkierkegaard/Development/autonomous-drone-tracking/control/weights/sweep_04_speed_adaptive/best_model/best_model.zip",
+    "reward_mode": "speed_adaptive",
+    "notes": "Dynamic speed-dependent formation standoff (3.5m - 4.5m)"
+  },
+  "05_closing_speed_bell": {
+    "mean_fov": 18.60571428571429,
+    "min_dist": 2.3619537097435224,
+    "mean_dist": 40.75314647916771,
+    "catch_dwell": 0.0,
+    "collisions": 0,
+    "model_path": "/Users/philipkierkegaard/Development/autonomous-drone-tracking/control/weights/sweep_05_closing_speed_bell/best_model/best_model.zip",
+    "reward_mode": "closing_speed_bell",
+    "notes": "Differential closing sprint with relative velocity matching"
+  },
+  "06_tight_centering": {
+    "mean_fov": 17.46285714285714,
+    "min_dist": 3.3057936093678983,
+    "mean_dist": 60.977091277932196,
+    "catch_dwell": 0.0,
+    "collisions": 0,
+    "model_path": "/Users/philipkierkegaard/Development/autonomous-drone-tracking/control/weights/sweep_06_tight_centering/best_model/best_model.zip",
+    "reward_mode": "tight_centering",
+    "notes": "High-gain optical crosshair centering with steep border penalties"
+  },
+  "07_optical_expansion_lead": {
+    "mean_fov": 30.959999999999997,
+    "min_dist": 2.187008205237199,
+    "mean_dist": 41.041780622254024,
+    "catch_dwell": 0.02,
+    "collisions": 0,
+    "model_path": "/Users/philipkierkegaard/Development/autonomous-drone-tracking/control/weights/sweep_07_optical_expansion_lead/best_model/best_model.zip",
+    "reward_mode": "optical_expansion_lead",
+    "notes": "Optical bounding-box expansion rate divergence feedback"
+  },
+  "08_cumulative_dwell_jackpot": {
+    "mean_fov": 5.257142857142857,
+    "min_dist": 2.876371497317345,
+    "mean_dist": 50.054270725974625,
+    "catch_dwell": 0.048571428571428564,
+    "collisions": 0,
+    "model_path": "/Users/philipkierkegaard/Development/autonomous-drone-tracking/control/weights/sweep_08_cumulative_dwell_jackpot/best_model/best_model.zip",
+    "reward_mode": "cumulative_dwell_jackpot",
+    "notes": "Quadratic dwell acceleration rewarding unbroken formation hold"
+  },
+  "09_terminal_bonus_steep": {
+    "mean_fov": 9.862857142857141,
+    "min_dist": 2.8703842939382422,
+    "mean_dist": 49.725451354769824,
+    "catch_dwell": 0.04,
+    "collisions": 0,
+    "model_path": "/Users/philipkierkegaard/Development/autonomous-drone-tracking/control/weights/sweep_09_terminal_bonus_steep/best_model/best_model.zip",
+    "reward_mode": "terminal_bonus_steep",
+    "notes": "Steep linear pull with high milestone rewards every 0.5s in basket"
+  },
+  "10_unified_dogfight_optimal": {
+    "mean_fov": 13.028571428571428,
+    "min_dist": 3.018293803956942,
+    "mean_dist": 52.13281067811186,
+    "catch_dwell": 0.0,
+    "collisions": 0,
+    "model_path": "/Users/philipkierkegaard/Development/autonomous-drone-tracking/control/weights/sweep_10_unified_dogfight_optimal/best_model/best_model.zip",
+    "reward_mode": "unified_dogfight_optimal",
+    "notes": "Unified synthesis of Huber potential, lead pursuit, and sprint closing"
+  }
+}

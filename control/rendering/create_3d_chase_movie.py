@@ -236,20 +236,20 @@ def render_3d_movie_frames(
         # 2. On-Board Camera FPV Viewfinder
         # ----------------------------------------------------------------------
         ax_cam = fig.add_subplot(gs[0, 1:], facecolor="#04060a")
-        ax_cam.set_xlim(0, 640)
-        ax_cam.set_ylim(480, 0)
+        ax_cam.set_xlim(0, 1280)
+        ax_cam.set_ylim(720, 0)
         ax_cam.set_xticks([])
         ax_cam.set_yticks([])
 
-        horiz_y_center = 240.0 + (np.tan(cam_pitch) / np.tan(np.deg2rad(22.5))) * 240.0
+        horiz_y_center = 360.0 + (np.tan(cam_pitch) / np.tan(np.deg2rad(19.0))) * 360.0
         tan_roll = np.tan(-roll)
-        ax_cam.plot([0, 640], [horiz_y_center - 320.0 * tan_roll, horiz_y_center + 320.0 * tan_roll],
+        ax_cam.plot([0, 1280], [horiz_y_center - 640.0 * tan_roll, horiz_y_center + 640.0 * tan_roll],
                     color="#1e90ff", linestyle="--", lw=1.2, alpha=0.6)
 
-        # Crosshairs & 35px circle
-        ax_cam.plot([300, 340], [240, 240], color="#00d2d3", lw=1.2, alpha=0.8)
-        ax_cam.plot([320, 320], [220, 260], color="#00d2d3", lw=1.2, alpha=0.8)
-        ax_cam.add_patch(Circle((320, 240), 35.0 / 2.0, fill=False, edgecolor="#00d2d3", linestyle=":", lw=1.0, alpha=0.7))
+        # Crosshairs & 110.0px circle
+        ax_cam.plot([600, 680], [360, 360], color="#00d2d3", lw=1.2, alpha=0.8)
+        ax_cam.plot([640, 640], [320, 400], color="#00d2d3", lw=1.2, alpha=0.8)
+        ax_cam.add_patch(Circle((640, 360), 110.0 / 2.0, fill=False, edgecolor="#00d2d3", linestyle=":", lw=1.0, alpha=0.7))
 
         # Ground-Truth 3D Target Projection (Dashed Light Green)
         if gt_box is not None:
@@ -320,13 +320,13 @@ def render_3d_movie_frames(
         else:
             status_badge = "SEARCHING"
             trk_color = "#ff4757"
-            ax_cam.text(320, 240, "TARGET OUT OF FOV\n[ COASTING / SEARCH ]", color="#ff4757", fontsize=10, fontweight="bold",
+            ax_cam.text(640, 360, "TARGET OUT OF FOV\n[ COASTING / SEARCH ]", color="#ff4757", fontsize=10, fontweight="bold",
                         ha="center", va="center", bbox=dict(boxstyle="round,pad=0.4", facecolor="#240a0e", edgecolor="#ff4757", alpha=0.85))
 
-        ax_cam.text(12, 24, "FPV SENSOR: 1080p60 GLOBAL SHUTTER (+15° MOUNT)", color="#00d2d3", fontsize=8, family="monospace")
-        ax_cam.text(628, 24, status_badge, color=trk_color, fontsize=8.5, fontweight="bold", ha="right",
+        ax_cam.text(12, 24, "FPV SENSOR: 720p30 (62° HFOV x 38° VFOV | +15° MOUNT)", color="#00d2d3", fontsize=8, family="monospace")
+        ax_cam.text(1268, 24, status_badge, color=trk_color, fontsize=8.5, fontweight="bold", ha="right",
                     bbox=dict(boxstyle="round,pad=0.2", facecolor="#10141d", edgecolor=trk_color))
-        ax_cam.set_title(f"ON-BOARD FPV SENSOR (640x480) | TIME: {t_curr:04.1f}s", color="#dfe4ea", fontsize=9, fontweight="bold")
+        ax_cam.set_title(f"ON-BOARD FPV SENSOR (1280x720) | TIME: {t_curr:04.1f}s", color="#dfe4ea", fontsize=9, fontweight="bold")
 
         # ----------------------------------------------------------------------
         # 3. Autopilot Telemetry & Flight HUD

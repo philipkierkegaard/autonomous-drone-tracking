@@ -211,7 +211,7 @@ def simulate_pursuit(
     sim.reset(initial_pos=p0, initial_yaw=initial_chaser_yaw)
 
     if use_empirical_perception:
-        sensor = SyntheticYOLOSensor(img_w=640, img_h=480, env_mode=env_perception_mode, seed=seed)
+        sensor = SyntheticYOLOSensor(img_w=1280, img_h=720, env_mode=env_perception_mode, seed=seed)
         tracker = DroneTracker(dt=dt, max_lost_frames=int(round(3.5 / dt)), min_hits_to_confirm=2)
     else:
         sensor = None
@@ -225,14 +225,14 @@ def simulate_pursuit(
                     default_p = PROJECT_ROOT / "control" / "weights" / "recurrent_ppo" / "recurrent_ppo_drone_final.zip"
                 model_path = default_p
             if RecurrentVisualServoController is not None:
-                controller = RecurrentVisualServoController(model_path=model_path)
+                controller = RecurrentVisualServoController(model_path=model_path, img_w=1280, img_h=720, hfov_deg=62.0, vfov_deg=38.0, w_nominal=0.0859)
             else:
                 raise ImportError("RecurrentVisualServoController could not be imported.")
         else:
             controller = KinematicVisualServoController(
                 camera_uptilt_deg=15.0,
-                hfov_deg=60.0,
-                vfov_deg=45.0,
+                hfov_deg=62.0,
+                vfov_deg=38.0,
                 desired_bbox_size=desired_bbox_px,
                 desired_standoff_dist=desired_standoff,
                 use_bbox_size=False,
@@ -287,11 +287,11 @@ def simulate_pursuit(
 
         # 1. Perspective projection of 3D target
         raw_ex, raw_ey, raw_in_view, dist, raw_bw, raw_bh = sim.project_to_camera(
-            p_target, return_bbox=True, img_w=640, img_h=480
+            p_target, return_bbox=True, img_w=1280, img_h=720, hfov_deg=62.0, vfov_deg=38.0
         )
 
-        gt_cx = (raw_ex + 1.0) * 320.0
-        gt_cy = (raw_ey + 1.0) * 240.0
+        gt_cx = (raw_ex + 1.0) * 640.0
+        gt_cy = (raw_ey + 1.0) * 360.0
         gt_box = np.array([
             gt_cx - raw_bw / 2.0,
             gt_cy - raw_bh / 2.0,
@@ -307,8 +307,8 @@ def simulate_pursuit(
                 time_since_camera -= camera_dt
                 norm_cx = (raw_ex + 1.0) / 2.0
                 norm_cy = (raw_ey + 1.0) / 2.0
-                norm_w = raw_bw / 640.0
-                norm_h = raw_bh / 480.0
+                norm_w = raw_bw / 1280.0
+                norm_h = raw_bh / 720.0
 
                 det_bbox, conf, fps_boxes = sensor.step(
                     norm_cx, norm_cy, norm_w, norm_h, in_fov=raw_in_view
@@ -404,12 +404,12 @@ def simulate_pursuit(
             # Legacy direct telemetry
             telem = sim.get_camera_telemetry(
                 p_target,
-                hfov_deg=60.0,
-                vfov_deg=45.0,
+                hfov_deg=62.0,
+                vfov_deg=38.0,
                 target_w_m=0.35,
                 target_h_m=0.20,
-                img_w=640,
-                img_h=480,
+                img_w=1280,
+                img_h=720,
                 desired_target_size=desired_bbox_px
             )
             telem["gt_bbox"] = gt_box
@@ -608,7 +608,7 @@ def render_movie_frames(
     ax_vel = fig.add_subplot(gs[2, 2], facecolor="#10141d")
 
     # Constant geometry
-    half_hfov = np.deg2rad(60.0 / 2.0)
+    half_hfov = np.deg2rad(62.0 / 2.0)
     fov_range = 14.0
 
     # Global trajectory bounds for camera auto-framing
@@ -734,28 +734,28 @@ def render_movie_frames(
         ax_arena.legend(loc="upper left", facecolor="#10141d", edgecolor="#2c3444", fontsize=8, labelcolor="#dfe4ea")
 
         # ----------------------------------------------------------------------
-        # B. On-Board Camera FPV Viewfinder (Simulated 640x480 Sensor)
+        # B. On-Board Camera FPV Viewfinder (Simulated 1280x720 Sensor)
         # ----------------------------------------------------------------------
         ax_cam.clear()
         ax_cam.set_facecolor("#04060a")
-        ax_cam.set_xlim(0, 640)
-        ax_cam.set_ylim(480, 0)  # Image coordinates: top is 0, bottom is 480
+        ax_cam.set_xlim(0, 1280)
+        ax_cam.set_ylim(720, 0)  # Image coordinates: top is 0, bottom is 720
         ax_cam.set_xticks([])
         ax_cam.set_yticks([])
 
         # Artificial Horizon Line (Tilted by roll, shifted by camera pitch)
-        horiz_y_center = 240.0 + (np.tan(cam_pitch) / np.tan(np.deg2rad(22.5))) * 240.0
+        horiz_y_center = 360.0 + (np.tan(cam_pitch) / np.tan(np.deg2rad(19.0))) * 360.0
         tan_roll = np.tan(-roll)
-        x_left, x_right = 0.0, 640.0
-        y_left = horiz_y_center - (320.0) * tan_roll
-        y_right = horiz_y_center + (320.0) * tan_roll
+        x_left, x_right = 0.0, 1280.0
+        y_left = horiz_y_center - (640.0) * tan_roll
+        y_right = horiz_y_center + (640.0) * tan_roll
         ax_cam.plot([x_left, x_right], [y_left, y_right], color="#1e90ff", linestyle="--", linewidth=1.2, alpha=0.6)
 
         # Center Aiming Crosshairs (Optical Center)
-        ax_cam.plot([300, 340], [240, 240], color="#00d2d3", lw=1.2, alpha=0.8)
-        ax_cam.plot([320, 320], [220, 260], color="#00d2d3", lw=1.2, alpha=0.8)
-        # 35px desired standoff circle
-        ax_cam.add_patch(Circle((320, 240), 35.0 / 2.0, fill=False, edgecolor="#00d2d3", linestyle=":", lw=1.0, alpha=0.7))
+        ax_cam.plot([600, 680], [360, 360], color="#00d2d3", lw=1.2, alpha=0.8)
+        ax_cam.plot([640, 640], [320, 400], color="#00d2d3", lw=1.2, alpha=0.8)
+        # Desired standoff circle
+        ax_cam.add_patch(Circle((640, 360), 110.0 / 2.0, fill=False, edgecolor="#00d2d3", linestyle=":", lw=1.0, alpha=0.7))
 
         # Target Bounding Box Rendering (GT 3D + Raw YOLO + Kalman Track)
         # 1. Ground-Truth 3D Target Projection (Dashed Light Green)

@@ -19,8 +19,8 @@ def unproject_camera_to_horizon(
     drone_pitch: float,
     drone_roll: float,
     camera_uptilt_rad: float = np.deg2rad(15.0),
-    half_hfov: float = np.tan(np.deg2rad(30.0)),
-    half_vfov: float = np.tan(np.deg2rad(22.5)),
+    half_hfov: float = np.tan(np.deg2rad(31.0)),
+    half_vfov: float = np.tan(np.deg2rad(19.0)),
 ) -> Tuple[float, float, float, float]:
     """
     3D Ray Back-Projection (Full SO(3) Attitude Decoupling).
@@ -38,8 +38,8 @@ def unproject_camera_to_horizon(
         drone_pitch: Drone pitch angle in radians (+ is nose-down)
         drone_roll: Drone roll angle in radians (+ is right-wing-down)
         camera_uptilt_rad: Mechanical mount pitch angle in radians (default: +15 deg)
-        half_hfov: tan(HFOV / 2) (default: tan(30 deg))
-        half_vfov: tan(VFOV / 2) (default: tan(22.5 deg))
+        half_hfov: tan(HFOV / 2) (default: tan(31.0 deg) for 62 deg HFOV)
+        half_vfov: tan(VFOV / 2) (default: tan(19.0 deg) for 38 deg VFOV)
         
     Returns:
         err_x_horizon: Normalized [-1.0, 1.0] azimuth error in horizon plane
@@ -101,11 +101,11 @@ def compute_ego_motion_compensation(
     vz_body: float = 0.0,
     dt: float = 1.0 / 30.0,
     estimated_distance_m: float = 6.0,
-    img_width: float = 640.0,
-    img_height: float = 480.0,
+    img_width: float = 1280.0,
+    img_height: float = 720.0,
     camera_uptilt_rad: float = np.deg2rad(15.0),
-    half_hfov: float = np.tan(np.deg2rad(30.0)),
-    half_vfov: float = np.tan(np.deg2rad(22.5)),
+    half_hfov: float = np.tan(np.deg2rad(31.0)),
+    half_vfov: float = np.tan(np.deg2rad(19.0)),
 ) -> Tuple[float, float, float, float]:
     """
     Computes image-plane shift [delta_cx, delta_cy, delta_w, delta_h] in pixels

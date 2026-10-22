@@ -406,7 +406,8 @@ class DroneTrackingPipeline:
         min_hits_to_confirm: int = 2,
         enable_dynamic_zoom: bool = True,
         max_zoom: float = 2.5,
-        desired_target_size: float = 140.0,
+        desired_target_size: float = 110.0,
+        scale_mode: str = "width",
         view_mode: str = "zoom_pov",
         q_pos: float = 1.0,
         q_vel: float = 18.0,
@@ -418,7 +419,7 @@ class DroneTrackingPipeline:
         q_cov: Optional[np.ndarray] = None,
         r_cov: Optional[np.ndarray] = None,
         enable_kalman: bool = True,
-        imgsz: int = 768,
+        imgsz: Optional[int] = None,
         device: Optional[str] = None,
         enable_ego_ablation: bool = False
     ):
@@ -442,6 +443,7 @@ class DroneTrackingPipeline:
         self.enable_dynamic_zoom = enable_dynamic_zoom if self.enable_kalman else False
         self.max_zoom = max_zoom
         self.desired_target_size = desired_target_size  # Target reference pixel size on screen
+        self.scale_mode = scale_mode
         self.view_mode = view_mode  # "zoom_pov" (True Zoom POV) or "wide_pip" (Wide Angle + PiP)
         self.current_zoom = 1.0
         self.target_zoom = 1.0
@@ -466,8 +468,34 @@ class DroneTrackingPipeline:
                     weights_path = alt
                     break
 
-        print(f"[INIT] Loading YOLOv8 drone detector: {weights_path} (imgsz={self.imgsz}, device={self.device})")
         self.model = YOLO(str(weights_path))
+
+        # Auto-detect imgsz if None, or adapt to fixed TensorRT engine size
+        if self.imgsz is None:
+            m_imgsz = None
+            if hasattr(self.model, "overrides") and self.model.overrides.get("imgsz"):
+                m_imgsz = self.model.overrides.get("imgsz")
+            elif hasattr(self.model, "model") and hasattr(self.model.model, "args") and self.model.model.args.get("imgsz"):
+                m_imgsz = self.model.model.args.get("imgsz")
+
+            if m_imgsz is not None:
+                self.imgsz = int(m_imgsz if isinstance(m_imgsz, (int, float)) else m_imgsz[0])
+            elif "768" in str(weights_path):
+                self.imgsz = 768
+            elif "640" in str(weights_path) or "v3" in str(weights_path) or "v1" in str(weights_path):
+                self.imgsz = 640
+            else:
+                self.imgsz = 768
+        else:
+            # If an explicit imgsz was provided, check if model is an engine with fixed dimension
+            if hasattr(self.model, "overrides") and self.model.overrides.get("imgsz"):
+                m_imgsz = self.model.overrides.get("imgsz")
+                target_m = int(m_imgsz if isinstance(m_imgsz, (int, float)) else m_imgsz[0])
+                if str(weights_path).endswith(".engine") and target_m != self.imgsz:
+                    print(f"[WARN] Overriding requested imgsz={self.imgsz} to match fixed TensorRT engine size {target_m}")
+                    self.imgsz = target_m
+
+        print(f"[INIT] Loading YOLOv8 drone detector: {weights_path} (imgsz={self.imgsz}, device={self.device})")
 
         if self.enable_kalman:
             print(f"[INIT] Initializing Kalman Multi-Track Manager (max_lost={max_lost_frames} frames, Q_pos={q_pos}, Q_vel={q_vel}, R_pos={r_pos})...")
@@ -841,7 +869,12 @@ class DroneTrackingPipeline:
             tcy = (bbox[1] + bbox[3]) / 2.0
             bw = max(1.0, bbox[2] - bbox[0])
             bh = max(1.0, bbox[3] - bbox[1])
-            current_sz = max(bw, bh)
+            if self.scale_mode == "width":
+                current_sz = bw
+            elif self.scale_mode == "height":
+                current_sz = bh
+            else:
+                current_sz = max(bw, bh)
 
             # Normalized error relative to true optical camera center (invariant to zoom!)
             err_x = (tcx - img_center[0]) / (w / 2.0)
@@ -860,8 +893,13 @@ class DroneTrackingPipeline:
                 "error_range": float(np.clip(range_err, -1.0, 1.0)),
                 "target_size": float(current_sz),
                 "desired_size": float(self.desired_target_size),
+                "bbox_w": float(bw),
+                "bbox_h": float(bh),
+                "w_norm": float(bw / w) if w > 0 else 0.0,
+                "scale_mode": self.scale_mode,
                 "velocity_x": vx,
                 "velocity_y": vy,
+                "time_coasting": int(primary_track.get("time_coasting", 0)),
                 "area_ratio": float(area_ratio),
                 "timestamp": float(t_start),
                 "frame_idx": int(self.frame_idx)
@@ -871,6 +909,7 @@ class DroneTrackingPipeline:
         telemetry["frame_idx"] = int(self.frame_idx)
         telemetry["comp_velocity_mag"] = float(np.hypot(telemetry.get("velocity_x", 0.0), telemetry.get("velocity_y", 0.0)))
         telemetry["raw_yolo_detections_count"] = len(detections)
+        telemetry["raw_detections"] = [[float(b) for b in d] for d in detections]
         if len(detections) > 0:
             best_det = detections[0]
             telemetry["raw_yolo_center"] = (float((best_det[0] + best_det[2]) / 2.0), float((best_det[1] + best_det[3]) / 2.0))

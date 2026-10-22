@@ -60,9 +60,10 @@ def run_benchmark(
         sig = inspect.signature(KinematicVisualServoController.__init__)
         ctrl_kwargs = {
             "camera_uptilt_deg": 0.0,
-            "hfov_deg": 82.0,
-            "vfov_deg": 52.0,
-            "desired_bbox_size": 63.0,
+            "hfov_deg": 62.0,
+            "vfov_deg": 38.0,
+            "desired_bbox_size": 110.0,
+            "scale_mode": "width",
         }
         if "desired_standoff_dist" in sig.parameters:
             ctrl_kwargs["desired_standoff_dist"] = 3.5
@@ -95,7 +96,7 @@ def run_benchmark(
 
             if pred_path.exists():
                 try:
-                    pred_controller = RecurrentVisualServoController(model_path=str(pred_path))
+                    pred_controller = RecurrentVisualServoController(model_path=str(pred_path), w_nominal=0.0859)
                     print(f"[INIT] Learned Predictive Controller initialized: {pred_path.name}")
                 except Exception as e:
                     print(f"[WARN] Failed to load predictive model ({e}). Skipping predictive benchmark.")
@@ -109,7 +110,7 @@ def run_benchmark(
         conf_threshold=0.25,
         iou_threshold=0.45,
         max_lost_frames=15,
-        desired_target_size=63.0,
+        desired_target_size=110.0,
         enable_dynamic_zoom=enable_zoom
     )
 

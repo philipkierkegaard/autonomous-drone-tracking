@@ -37,7 +37,7 @@ PROFILES = {
         turn_rate_std=0.20,
         climb_rate_std=0.25,
         max_accel=2.2,
-        altitude_bounds=(-1.0, -5.0),
+        altitude_bounds=(-2.0, -5.0),
         waypoint_interval=3.0,
     ),
     "evasive": FlightProfile(
@@ -46,8 +46,7 @@ PROFILES = {
         turn_rate_std=0.45,
         climb_rate_std=0.50,
         max_accel=3.5,
-
-        altitude_bounds=(-0.5, -6.5),
+        altitude_bounds=(-1.8, -5.5),
         waypoint_interval=2.0,
     ),
     "aerobatic": FlightProfile(
@@ -56,7 +55,7 @@ PROFILES = {
         turn_rate_std=0.75,
         climb_rate_std=0.80,
         max_accel=7.0,
-        altitude_bounds=(-0.5, -8.0),
+        altitude_bounds=(-1.8, -6.5),
         waypoint_interval=1.5,
     ),
     "hyper_evasive": FlightProfile(
@@ -65,7 +64,7 @@ PROFILES = {
         turn_rate_std=0.95,
         climb_rate_std=1.10,
         max_accel=7.5,
-        altitude_bounds=(-0.5, -10.0),
+        altitude_bounds=(-1.8, -6.5),
         waypoint_interval=2.2,
     ),
     "sprint_break": FlightProfile(
@@ -74,7 +73,7 @@ PROFILES = {
         turn_rate_std=1.20,
         climb_rate_std=1.40,
         max_accel=8.0,
-        altitude_bounds=(-0.5, -12.0),
+        altitude_bounds=(-1.8, -7.0),
         waypoint_interval=1.0,
     ),
     "high_speed_transit": FlightProfile(

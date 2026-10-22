@@ -272,6 +272,7 @@ def profile_pipeline(
     telemetry_mode: str = "flight-log",
     flight_log: str = "logs/flight_logs/00000080.BIN",
     enable_zoom: bool = False,
+    imgsz: Optional[int] = None,
     output_dir: str = "outputs/benchmarks"
 ) -> Dict[str, Any]:
     print("=" * 84)
@@ -306,8 +307,9 @@ def profile_pipeline(
         conf_threshold=0.25,
         iou_threshold=0.45,
         max_lost_frames=15,
-        desired_target_size=63.0,
-        enable_dynamic_zoom=enable_zoom
+        desired_target_size=110.0,
+        enable_dynamic_zoom=enable_zoom,
+        imgsz=imgsz
     )
     device = pipeline.device
 
@@ -317,9 +319,10 @@ def profile_pipeline(
     if controller_type in ["ibvs", "both"]:
         ibvs_controller = KinematicVisualServoController(
             camera_uptilt_deg=0.0,
-            hfov_deg=82.0,
-            vfov_deg=52.0,
-            desired_bbox_size=63.0,
+            hfov_deg=62.0,
+            vfov_deg=38.0,
+            desired_bbox_size=110.0,
+            scale_mode="width",
         )
         print("[INIT] Kinematic Visual Servo Controller (IBVS) initialized.")
 
@@ -331,7 +334,7 @@ def profile_pipeline(
             zip_model = REPO_ROOT / "control" / "weights" / "recurrent_ppo_smooth_30_09" / "best_model" / "best_model.zip"
             model_file = Path(predictive_weights) if predictive_weights else (pt_model if pt_model.exists() else zip_model)
             if model_file.exists():
-                pred_controller = RecurrentVisualServoController(model_path=str(model_file))
+                pred_controller = RecurrentVisualServoController(model_path=str(model_file), w_nominal=0.0859)
                 print(f"[INIT] Recurrent Predictive PPO Controller loaded: {model_file.name}")
             else:
                 print(f"[WARN] Predictive weights not found at: {model_file}")
@@ -627,6 +630,8 @@ def main():
                         help="Path to physical ArduPilot .BIN flight log")
     parser.add_argument("--enable-zoom", action="store_true", default=False,
                         help="Enable dynamic digital foveal zoom tracking")
+    parser.add_argument("--imgsz", type=int, default=None,
+                        help="Inference image resolution (default: auto-detected from model/engine, e.g. 640 or 768)")
     parser.add_argument("--outdir", type=str, default="outputs/benchmarks",
                         help="Directory to save benchmark reports")
 
@@ -658,6 +663,7 @@ def main():
         telemetry_mode=args.telemetry_mode,
         flight_log=args.flight_log,
         enable_zoom=args.enable_zoom,
+        imgsz=args.imgsz,
         output_dir=args.outdir
     )
 

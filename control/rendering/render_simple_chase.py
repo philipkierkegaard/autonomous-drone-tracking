@@ -36,6 +36,7 @@ except Exception:
     RecurrentVisualServoController = None
 
 ARTIFACT_DIRS = [
+    Path("/Users/philipkierkegaard/.gemini/antigravity-ide/brain/5967d853-7a7e-4cdd-8792-4a77e6d704a2"),
     Path("/Users/philipkierkegaard/.gemini/antigravity-ide/brain/53eb0b3e-b75c-4830-a9d4-c69e644ccb6a"),
 ]
 
@@ -120,41 +121,40 @@ def render_simple_chase_video(
     print(f"      Controller: {ctrl_label}")
     sim = FastPixhawkQuadSim(
         dt=dt_sim,
-        max_vel_xy=18.0,
-        max_accel_xy=6.5,
-        max_vel_up=4.0,
-        max_vel_down=2.5
+        max_vel_xy=12.0,
+        max_accel_xy=6.0,
+        max_vel_up=2.5,
+        max_vel_down=1.5
     )
 
     if is_rl:
         if model_path is None:
-            default_p = PROJECT_ROOT / "control" / "weights" / "recurrent_ppo_gen5_calibrated" / "best_model" / "best_model.zip"
+            default_p = PROJECT_ROOT / "control" / "weights" / "recurrent_ppo_v5_clean_accum" / "best_model" / "best_model.zip"
             if not default_p.exists():
-                default_p = PROJECT_ROOT / "control" / "weights" / "recurrent_ppo_continuous_potential" / "best_model" / "best_model.zip"
-            if not default_p.exists():
-                default_p = PROJECT_ROOT / "control" / "weights" / "recurrent_ppo_tail_chase_finetune" / "best_model" / "best_model.zip"
+                default_p = PROJECT_ROOT / "control" / "weights" / "recurrent_ppo_scratch" / "best_model" / "best_model.zip"
             model_path = default_p
         if RecurrentVisualServoController is not None:
-            controller = RecurrentVisualServoController(model_path=str(model_path), w_nominal=0.0505)
+            controller = RecurrentVisualServoController(model_path=str(model_path), w_nominal=0.0859)
         else:
             raise ImportError("RecurrentVisualServoController could not be imported.")
     else:
         controller = KinematicVisualServoController(
             camera_uptilt_deg=15.0,
-            hfov_deg=60.0,
-            vfov_deg=45.0,
-            desired_bbox_size=32.33,
-            desired_standoff_dist=6.0,
-            use_bbox_size=False,
+            hfov_deg=62.0,
+            vfov_deg=38.0,
+            desired_bbox_size=110.0,
+            desired_standoff_dist=3.5,
+            scale_mode="width",
+            use_bbox_size=True,
             enable_lateral_strafe=True,
             kp_lat=2.5,
             kd_lat=0.35,
-            max_lat_vel=6.0,
-            max_lat_accel=5.0,
-            max_accel=6.5,
-            max_decel=5.0,
-            min_limits=np.array([-5.0, -6.0, -4.0, -120.0]),
-            max_limits=np.array([15.0,  6.0,  2.5,  120.0]),
+            max_lat_vel=2.5,
+            max_lat_accel=4.0,
+            max_accel=6.0,
+            max_decel=6.0,
+            min_limits=np.array([-0.5, -2.5, -2.5, -90.0]),
+            max_limits=np.array([ 6.5,  2.5,  1.5,  90.0]),
         )
 
     # Initial positions
@@ -166,7 +166,11 @@ def render_simple_chase_video(
         seed=seed
     )
     c_init = [0.0, 0.0, -2.5] if chaser_init_pos is None else chaser_init_pos
-    sim.reset(initial_pos=np.array(c_init, dtype=np.float64), initial_yaw=chaser_init_yaw)
+    c_yaw = float(chaser_init_yaw)
+    c_vel = np.array([np.cos(c_yaw) * 4.0, np.sin(c_yaw) * 4.0, 0.0], dtype=np.float64)
+    sim.reset(initial_pos=np.array(c_init, dtype=np.float64), initial_yaw=c_yaw, initial_vel=c_vel)
+    if is_rl and controller is not None:
+        controller.prev_cmd = np.array([4.0, 0.0, 0.0, 0.0], dtype=np.float64)
 
     # Pre-simulate entire flight trajectory for maximum speed and auto-scaling
     print("[SIM] Simulating flight dynamics & continuous catch dwell tracking...")
@@ -192,22 +196,22 @@ def render_simple_chase_video(
 
         telemetry = sim.get_camera_telemetry(
             target_world,
-            hfov_deg=60.0,
-            vfov_deg=45.0,
+            hfov_deg=62.0,
+            vfov_deg=38.0,
             target_w_m=0.35,
             target_h_m=0.20,
-            img_w=640,
-            img_h=480,
-            desired_target_size=32.33
+            img_w=1280,
+            img_h=720,
+            desired_target_size=110.0
         )
 
-        in_basket = bool((5.0 <= telemetry["distance"] <= 7.0) and telemetry["in_view"])
+        in_basket = bool((2.5 <= telemetry["distance"] <= 4.5) and telemetry["in_view"])
         if in_basket:
             dwell_counter += dt_sim
             if dwell_counter >= 3.0 and catch_t is None:
                 catch_t = t - 3.0
         else:
-            dwell_counter = 0.0
+            dwell_counter = max(0.0, dwell_counter - 0.5 * dt_sim)
         dwell_all.append(dwell_counter)
         in_basket_all.append(in_basket)
         catch_t_all.append(catch_t)
@@ -351,7 +355,7 @@ def render_simple_chase_video(
         # Visual Sightline (connecting line)
         if in_b_now:
             line_color = "#2ca02c"
-            line_lbl = "Standoff Basket [5–7m]"
+            line_lbl = "Standoff Basket [2.5–4.5m]"
             line_w = 2.2
         elif telem["in_view"]:
             line_color = "#1f77b4" if is_rl else "#3182bd"
@@ -432,14 +436,14 @@ def render_simple_chase_video(
             f"\n"
             f"STANDOFF INTERCEPTION (CATCH)\n"
             f"─────────────────────────────\n"
-            f"Target Distance:  {current_dist:5.2f} m  (Basket: 5–7 m)\n"
+            f"Target Distance:  {current_dist:5.2f} m  (Basket: 2.5–4.5 m)\n"
             f"Inside Basket:    {'YES (IN RANGE)' if in_b_now else 'NO'}\n"
             f"3.0s Lock Dwell:  {dwell_now:5.2f} / 3.00 s\n"
             f"Catch Lock:       {catch_status_str}\n"
             f"\n"
             f"VISUAL SERVOING ERRORS\n"
             f"─────────────────────────────\n"
-            f"Bounding Box:     {target_size:5.1f} px (Goal: 32 px)\n"
+            f"Bounding Box:     {target_size:5.1f} px (Goal: 55 px)\n"
             f"Azimuth Err (ex): {err_x:+5.2f}  [-1, +1]\n"
             f"Elevation Err(ey):{err_y:+5.2f}  [-1, +1]\n"
             f"\n"
@@ -539,43 +543,45 @@ def render_dual_chase_video(
     print(f"           Profile: {profile.upper()} | Encounter: {encounter_label} | Seed: {seed}")
 
     c_init = [0.0, 0.0, -2.5] if chaser_init_pos is None else chaser_init_pos
+    c_yaw = float(chaser_init_yaw)
+    c_vel = np.array([np.cos(c_yaw) * 4.0, np.sin(c_yaw) * 4.0, 0.0], dtype=np.float64)
 
-    sim_pid = FastPixhawkQuadSim(dt=dt_sim, max_vel_xy=18.0, max_accel_xy=6.5, max_vel_up=4.0, max_vel_down=2.5)
-    sim_pid.reset(initial_pos=np.array(c_init, dtype=np.float64), initial_yaw=chaser_init_yaw)
+    sim_pid = FastPixhawkQuadSim(dt=dt_sim, max_vel_xy=12.0, max_accel_xy=6.0, max_vel_up=2.5, max_vel_down=1.5)
+    sim_pid.reset(initial_pos=np.array(c_init, dtype=np.float64), initial_yaw=c_yaw, initial_vel=c_vel)
 
-    sim_rl = FastPixhawkQuadSim(dt=dt_sim, max_vel_xy=18.0, max_accel_xy=6.5, max_vel_up=4.0, max_vel_down=2.5)
-    sim_rl.reset(initial_pos=np.array(c_init, dtype=np.float64), initial_yaw=chaser_init_yaw)
+    sim_rl = FastPixhawkQuadSim(dt=dt_sim, max_vel_xy=12.0, max_accel_xy=6.0, max_vel_up=2.5, max_vel_down=1.5)
+    sim_rl.reset(initial_pos=np.array(c_init, dtype=np.float64), initial_yaw=c_yaw, initial_vel=c_vel)
 
     # 1. Classical PID Controller
     ctrl_pid = KinematicVisualServoController(
         camera_uptilt_deg=15.0,
-        hfov_deg=60.0,
-        vfov_deg=45.0,
-        desired_bbox_size=32.33,
-        desired_standoff_dist=6.0,
-        use_bbox_size=False,
+        hfov_deg=62.0,
+        vfov_deg=38.0,
+        desired_bbox_size=110.0,
+        desired_standoff_dist=3.5,
+        scale_mode="width",
+        use_bbox_size=True,
         enable_lateral_strafe=True,
         kp_lat=2.5,
         kd_lat=0.35,
-        max_lat_vel=6.0,
-        max_lat_accel=5.0,
-        max_accel=6.5,
-        max_decel=5.0,
-        min_limits=np.array([-5.0, -6.0, -4.0, -120.0]),
-        max_limits=np.array([15.0,  6.0,  2.5,  120.0]),
+        max_lat_vel=2.5,
+        max_lat_accel=4.0,
+        max_accel=6.0,
+        max_decel=6.0,
+        min_limits=np.array([-0.5, -2.5, -2.5, -90.0]),
+        max_limits=np.array([ 6.5,  2.5,  1.5,  90.0]),
     )
 
     # 2. Learned Recurrent PPO Controller
     if model_path is None:
-        default_p = PROJECT_ROOT / "control" / "weights" / "recurrent_ppo_gen5_calibrated" / "best_model" / "best_model.zip"
+        default_p = PROJECT_ROOT / "control" / "weights" / "recurrent_ppo_v5_clean_accum" / "best_model" / "best_model.zip"
         if not default_p.exists():
-            default_p = PROJECT_ROOT / "control" / "weights" / "recurrent_ppo_continuous_potential" / "best_model" / "best_model.zip"
-        if not default_p.exists():
-            default_p = PROJECT_ROOT / "control" / "weights" / "recurrent_ppo_tail_chase_finetune" / "best_model" / "best_model.zip"
+            default_p = PROJECT_ROOT / "control" / "weights" / "recurrent_ppo_scratch" / "best_model" / "best_model.zip"
         model_path = default_p
 
     if RecurrentVisualServoController is not None:
-        ctrl_rl = RecurrentVisualServoController(model_path=str(model_path), w_nominal=0.0505)
+        ctrl_rl = RecurrentVisualServoController(model_path=str(model_path), w_nominal=0.0859)
+        ctrl_rl.prev_cmd = np.array([4.0, 0.0, 0.0, 0.0], dtype=np.float64)
     else:
         raise ImportError("RecurrentVisualServoController could not be imported.")
 
@@ -625,21 +631,21 @@ def render_dual_chase_video(
         tgt_world = target_oracle.get_position(t)
 
         # PID step
-        telem_p = sim_pid.get_camera_telemetry(tgt_world, target_w_m=0.35, target_h_m=0.20, img_w=640, img_h=480, desired_target_size=32.33)
+        telem_p = sim_pid.get_camera_telemetry(tgt_world, target_w_m=0.35, target_h_m=0.20, img_w=1280, img_h=720, desired_target_size=110.0)
         cmd_p = ctrl_pid.compute_cmd(telem_p, drone_pitch=sim_pid.pitch, drone_roll=sim_pid.roll, dt=dt_sim)
         sim_pid.step(cmd_p)
 
-        in_b_p = bool((5.0 <= telem_p["distance"] <= 7.0) and telem_p["in_view"])
+        in_b_p = bool((2.5 <= telem_p["distance"] <= 4.5) and telem_p["in_view"])
         if in_b_p:
             dwell_counter_p += dt_sim
             if dwell_counter_p >= 3.0 and catch_t_p is None:
                 catch_t_p = t - 3.0
         else:
-            dwell_counter_p = 0.0
+            dwell_counter_p = max(0.0, dwell_counter_p - 0.5 * dt_sim)
         dwell_all_p.append(dwell_counter_p)
 
         # RL step
-        telem_r = sim_rl.get_camera_telemetry(tgt_world, target_w_m=0.35, target_h_m=0.20, img_w=640, img_h=480, desired_target_size=32.33)
+        telem_r = sim_rl.get_camera_telemetry(tgt_world, target_w_m=0.35, target_h_m=0.20, img_w=1280, img_h=720, desired_target_size=110.0)
         c, s = np.cos(sim_rl.yaw), np.sin(sim_rl.yaw)
         vx_b = c * sim_rl.vel[0] + s * sim_rl.vel[1]
         vy_b = -s * sim_rl.vel[0] + c * sim_rl.vel[1]
@@ -655,13 +661,13 @@ def render_dual_chase_video(
         )
         sim_rl.step(cmd_r)
 
-        in_b_r = bool((5.0 <= telem_r["distance"] <= 7.0) and telem_r["in_view"])
+        in_b_r = bool((2.5 <= telem_r["distance"] <= 4.5) and telem_r["in_view"])
         if in_b_r:
             dwell_counter_r += dt_sim
             if dwell_counter_r >= 3.0 and catch_t_r is None:
                 catch_t_r = t - 3.0
         else:
-            dwell_counter_r = 0.0
+            dwell_counter_r = max(0.0, dwell_counter_r - 0.5 * dt_sim)
         dwell_all_r.append(dwell_counter_r)
 
         times.append(t)
@@ -778,8 +784,8 @@ def render_dual_chase_video(
 
         d_p = np.linalg.norm(tgt_p - p_pos)
         d_r = np.linalg.norm(tgt_p - r_pos)
-        in_b_p = (5.0 <= d_p <= 7.0) and p_tel["in_view"]
-        in_b_r = (5.0 <= d_r <= 7.0) and r_tel["in_view"]
+        in_b_p = (2.5 <= d_p <= 4.5) and p_tel["in_view"]
+        in_b_r = (2.5 <= d_r <= 4.5) and r_tel["in_view"]
 
         # Sightlines
         color_p = "#2ca02c" if in_b_p else ("#1f77b4" if p_tel["in_view"] else "#d95f02")
@@ -852,7 +858,7 @@ def render_dual_chase_video(
             f"─────────────────────────────────────\n"
             f"In Camera FOV:    {'YES' if p_tel['in_view'] else 'NO':<10}   {'YES' if r_tel['in_view'] else 'NO':<10}\n"
             f"Distance:         {d_p:5.2f} m       {d_r:5.2f} m\n"
-            f"In Basket (5-7m): {'YES' if in_b_p else 'NO':<10}   {'YES' if in_b_r else 'NO':<10}\n"
+            f"In Basket(2.5-4.5m):{'YES' if in_b_p else 'NO':<10}   {'YES' if in_b_r else 'NO':<10}\n"
             f"3.0s Lock Dwell:  {dwell_p:4.2f} / 3.0s    {dwell_r:4.2f} / 3.0s\n"
             f"Catch Lock:       {status_p:<10}   {status_r:<10}\n"
             f"\n"
@@ -992,33 +998,33 @@ def compute_shared_bounds(
     for ctype in ["pid", "rl"]:
         sim = FastPixhawkQuadSim(
             dt=dt_sim,
-            max_vel_xy=18.0,
-            max_accel_xy=6.5,
-            max_vel_up=4.0,
-            max_vel_down=2.5
+            max_vel_xy=12.0,
+            max_accel_xy=6.0,
+            max_vel_up=2.5,
+            max_vel_down=1.5
         )
         sim.reset(initial_pos=np.array(c_init, dtype=np.float64), initial_yaw=chaser_init_yaw)
 
         if ctype == "pid":
             ctrl = KinematicVisualServoController(
-                camera_uptilt_deg=15.0, hfov_deg=60.0, vfov_deg=45.0, desired_standoff_dist=6.0,
-                enable_lateral_strafe=True, kp_lat=2.5, kd_lat=0.35, max_lat_vel=6.0, max_lat_accel=5.0, max_accel=6.5, max_decel=5.0,
-                min_limits=np.array([-5.0, -6.0, -4.0, -120.0]), max_limits=np.array([15.0, 6.0, 2.5, 120.0])
+                camera_uptilt_deg=15.0, hfov_deg=62.0, vfov_deg=38.0, desired_standoff_dist=3.5,
+                enable_lateral_strafe=True, kp_lat=2.5, kd_lat=0.35, max_lat_vel=2.5, max_lat_accel=4.0, max_accel=6.0, max_decel=6.0,
+                min_limits=np.array([-0.5, -2.5, -2.5, -90.0]), max_limits=np.array([6.5, 2.5, 1.5, 90.0])
             )
         else:
             if model_path is None:
-                default_p = PROJECT_ROOT / "control" / "weights" / "recurrent_ppo_gen5_calibrated" / "best_model" / "best_model.zip"
+                default_p = PROJECT_ROOT / "control" / "weights" / "recurrent_ppo_v5_clean_accum" / "best_model" / "best_model.zip"
                 if not default_p.exists():
-                    default_p = PROJECT_ROOT / "control" / "weights" / "recurrent_ppo_continuous_potential" / "best_model" / "best_model.zip"
+                    default_p = PROJECT_ROOT / "control" / "weights" / "recurrent_ppo_scratch" / "best_model" / "best_model.zip"
                 model_path = default_p
-            ctrl = RecurrentVisualServoController(model_path=str(model_path), w_nominal=0.0505)
+            ctrl = RecurrentVisualServoController(model_path=str(model_path), w_nominal=0.0859)
 
         for step in range(total_sim_steps):
             t = step * dt_sim
             tgt = target_oracle.get_position(t)
             all_e.append(tgt[1])
             all_n.append(tgt[0])
-            telem = sim.get_camera_telemetry(tgt, target_w_m=0.35, target_h_m=0.20, img_w=640, img_h=480, desired_target_size=32.33)
+            telem = sim.get_camera_telemetry(tgt, target_w_m=0.35, target_h_m=0.20, img_w=1280, img_h=720, desired_target_size=110.0)
             if ctype == "pid":
                 cmd = ctrl.compute_cmd(telem, drone_pitch=sim.pitch, drone_roll=sim.roll, dt=dt_sim)
             else:
@@ -1075,22 +1081,27 @@ if __name__ == "__main__":
     scenario_id_clean = None
 
     if args.scenario:
-        suite_path = PROJECT_ROOT / "outputs" / "benchmarks" / "datasets" / "benchmark_suite_v1.json"
-        if suite_path.exists():
-            import json
-            with open(suite_path) as f:
-                suite = json.load(f)
-            scenarios = suite.get("scenarios", [])
-            match = None
-            if args.scenario.isdigit():
-                idx = int(args.scenario)
-                if 0 <= idx < len(scenarios):
-                    match = scenarios[idx]
-            else:
-                for sc in scenarios:
-                    if sc["scenario_id"] == args.scenario or sc["scenario_id"].startswith(args.scenario) or args.scenario in sc["scenario_id"]:
-                        match = sc
-                        break
+        scenarios = []
+        for s_file in [
+            PROJECT_ROOT / "outputs" / "benchmarks" / "datasets" / "validation_suite_30.json",
+            PROJECT_ROOT / "outputs" / "benchmarks" / "datasets" / "benchmark_suite_v1.json",
+        ]:
+            if s_file.exists():
+                import json
+                with open(s_file) as f:
+                    s_data = json.load(f)
+                scenarios.extend(s_data if isinstance(s_data, list) else s_data.get("scenarios", []))
+
+        match = None
+        if args.scenario.isdigit():
+            idx = int(args.scenario)
+            if 0 <= idx < len(scenarios):
+                match = scenarios[idx]
+        else:
+            for sc in scenarios:
+                if sc["scenario_id"] == args.scenario or sc["scenario_id"].startswith(args.scenario) or args.scenario in sc["scenario_id"]:
+                    match = sc
+                    break
             if match is not None:
                 print(f"[SCENARIO] Loaded benchmark scenario: {match['scenario_id']}")
                 scenario_id_clean = match["scenario_id"]

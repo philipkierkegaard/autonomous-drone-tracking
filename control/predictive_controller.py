@@ -89,32 +89,44 @@ class RecurrentVisualServoController:
     def __init__(
         self,
         model_path: Optional[Union[str, Path]] = None,
-        img_w: int = 640,
-        img_h: int = 480,
-        hfov_deg: float = 60.0,
-        vfov_deg: float = 45.0,
+        img_w: int = 1280,
+        img_h: int = 720,
+        hfov_deg: float = 62.0,
+        vfov_deg: float = 38.0,
         camera_uptilt_deg: float = 15.0,
-        max_vel_xy: float = 18.0,
-        max_vel_down: float = 2.5,
-        max_vel_up: float = 4.0,
-        max_yaw_rate: float = 120.0,
+        max_vel_xy: float = 12.0,
+        max_rev_vel: float = 0.5,
+        max_lat_vel: float = 2.5,
+        max_vel_down: float = 1.5,
+        max_vel_up: float = 2.5,
+        max_yaw_rate: float = 90.0,
+        max_accel_xy: float = 6.0,
+        max_decel_xy: float = 6.0,
+        max_accel_z: float = 3.0,
+        max_accel_yaw: float = 180.0,
         deterministic: bool = True,
-        w_nominal: float = 0.0866,
+        w_nominal: float = 0.0859,
     ):
         self.img_w = img_w
         self.img_h = img_h
         self.camera_uptilt = float(np.deg2rad(camera_uptilt_deg))
         self.half_hfov = float(np.tan(np.deg2rad(hfov_deg / 2.0)))
         self.half_vfov = float(np.tan(np.deg2rad(vfov_deg / 2.0)))
-        self.w_nominal = w_nominal  # Target bbox width fraction at 3.5m standoff (~55.4 pixels on 640x480)
-        self.max_vel_xy = max_vel_xy
+        self.w_nominal = w_nominal  # Target bbox width fraction at 3.5m standoff (110.0 pixels on 1280x720)
+        self.max_fwd_vel = max_vel_xy
+        self.max_rev_vel = max_rev_vel
+        self.max_lat_vel = max_lat_vel
         self.max_vel_down = max_vel_down
         self.max_vel_up = max_vel_up
         self.max_yaw_rate = max_yaw_rate
+        self.max_accel_xy = max_accel_xy
+        self.max_decel_xy = max_decel_xy
+        self.max_accel_z = max_accel_z
+        self.max_accel_yaw = max_accel_yaw
         self.deterministic = deterministic
 
         self.model = None
-        self.obs_dim = 10
+        self.obs_dim = 15
         self.hidden_state = None
         self.episode_start = np.array([True], dtype=bool)
 
@@ -163,6 +175,18 @@ class RecurrentVisualServoController:
             print(f"[RECURRENT_CONTROLLER] Loading standalone PyTorch actor from: {standalone_weights}")
             try:
                 state_dict = torch.load(str(standalone_weights), map_location="cpu")
+                # Support both StandaloneRecurrentPolicy and SB3 actor state dicts
+                if "lstm_actor.weight_ih_l0" in state_dict:
+                    state_dict = {
+                        "lstm.weight_ih_l0": state_dict["lstm_actor.weight_ih_l0"],
+                        "lstm.weight_hh_l0": state_dict["lstm_actor.weight_hh_l0"],
+                        "lstm.bias_ih_l0": state_dict["lstm_actor.bias_ih_l0"],
+                        "lstm.bias_hh_l0": state_dict["lstm_actor.bias_hh_l0"],
+                        "mlp.0.weight": state_dict["mlp_extractor.policy_net.0.weight"],
+                        "mlp.0.bias": state_dict["mlp_extractor.policy_net.0.bias"],
+                        "action_net.weight": state_dict["action_net.weight"],
+                        "action_net.bias": state_dict["action_net.bias"],
+                    }
                 if "lstm.weight_ih_l0" in state_dict:
                     obs_dim = state_dict["lstm.weight_ih_l0"].shape[1]
                     hidden_dim = state_dict["lstm.weight_ih_l0"].shape[0] // 4
@@ -361,8 +385,8 @@ class RecurrentVisualServoController:
             scale_err,
             w_norm,
             flag,
-            float(np.clip(v_body[0] / self.max_vel_xy, -1.0, 1.0)),
-            float(np.clip(v_body[1] / 6.0, -1.0, 1.0)),
+            float(np.clip(v_body[0] / self.max_fwd_vel, -1.0, 1.0)),
+            float(np.clip(v_body[1] / self.max_lat_vel, -1.0, 1.0)),
             float(np.clip(v_body[2] / self.max_vel_up, -1.0, 1.0)),
             float(np.clip(yaw_rate_val / np.deg2rad(self.max_yaw_rate), -1.0, 1.0)),
             alt_norm,
@@ -373,6 +397,11 @@ class RecurrentVisualServoController:
             norm_d_ey = float(np.clip(self.filtered_d_ey / 2.0, -1.0, 1.0))
             norm_d_w  = float(np.clip(self.filtered_d_w  / 0.20, -1.0, 1.0))
             base_obs.extend([norm_d_ex, norm_d_ey, norm_d_w])
+
+        if self.obs_dim >= 15:
+            norm_pitch = float(np.clip(drone_pitch / (np.pi / 4.0), -1.0, 1.0))
+            norm_roll  = float(np.clip(drone_roll  / (np.pi / 4.0), -1.0, 1.0))
+            base_obs.extend([norm_pitch, norm_roll])
 
         obs = np.array(base_obs, dtype=np.float32)
 
@@ -390,28 +419,50 @@ class RecurrentVisualServoController:
         self.episode_start = np.array([False], dtype=bool)
 
         # Unpack continuous action [-1, 1]^4 into physical velocity setpoints
+        # Strictly matching the physical limits and cruise-centered mapping of environment.py
         a = np.clip(action, -1.0, 1.0)
-        target_vx = float(4.0 + a[0] * 9.0)         # [-5.0 m/s, 13.0 m/s]
-        target_vy = float(a[1] * 6.0)                # [-6.0 m/s, +6.0 m/s]
-        target_vz = float(-0.75 + a[2] * 3.25)       # [-4.0 m/s, +2.5 m/s]
-        target_yaw = float(a[3] * self.max_yaw_rate) # [-120 deg/s, +120 deg/s]
-
-        # Physical Slew-Rate Limiting across all 4 flight axes (matched to Pixhawk quad envelope)
-        max_accel_x = 6.5 * dt
-        max_decel_x = 5.0 * dt
-        if target_vx < self.prev_cmd[0]:
-            cmd_vx = max(target_vx, self.prev_cmd[0] - max_decel_x)
+        standoff_nom = 3.5
+        if a[0] >= 0:
+            target_vx = float(standoff_nom + a[0] * (self.max_fwd_vel - standoff_nom))
         else:
-            cmd_vx = min(target_vx, self.prev_cmd[0] + max_accel_x)
+            target_vx = float(standoff_nom + a[0] * (standoff_nom + self.max_rev_vel))
 
-        max_accel_y = 5.0 * dt
-        cmd_vy = float(np.clip(target_vy, self.prev_cmd[1] - max_accel_y, self.prev_cmd[1] + max_accel_y))
+        # Forward collision proximity barrier: inhibit excess surge if dangerously close (distance < 2.2m)
+        dist = telemetry.get("distance", None)
+        if dist is not None and dist < 2.2:
+            max_safe_vx = float(max(0.0, (dist - 1.3) / 0.9 * standoff_nom))
+            target_vx = min(target_vx, max_safe_vx)
 
-        max_accel_z = 3.0 * dt
-        cmd_vz = float(np.clip(target_vz, self.prev_cmd[2] - max_accel_z, self.prev_cmd[2] + max_accel_z))
+        target_vy = float(a[1] * self.max_lat_vel)
 
-        max_accel_yaw = 180.0 * dt
-        cmd_yaw = float(np.clip(target_yaw, self.prev_cmd[3] - max_accel_yaw, self.prev_cmd[3] + max_accel_yaw))
+        # a2 in NED: negative is climb, positive is descend
+        if a[2] <= 0:
+            target_vz = float(a[2] * self.max_vel_up)
+        else:
+            target_vz = float(a[2] * self.max_vel_down)
+
+        # Ground proximity safety barrier: inhibit descent when below 1.4m AGL
+        if current_alt_m is not None and current_alt_m < 1.4 and target_vz > 0.0:
+            target_vz = float(target_vz * max(0.0, (current_alt_m - 0.9) / 0.5))
+
+        target_yaw = float(a[3] * self.max_yaw_rate)
+
+        # Physical Slew-Rate Limiting across all 4 flight axes (matched identically to KinematicVisualServoController)
+        max_step_accel_x = self.max_accel_xy * dt
+        max_step_decel_x = self.max_decel_xy * dt
+        if target_vx < self.prev_cmd[0]:
+            cmd_vx = max(target_vx, self.prev_cmd[0] - max_step_decel_x)
+        else:
+            cmd_vx = min(target_vx, self.prev_cmd[0] + max_step_accel_x)
+
+        max_step_lat = self.max_accel_xy * dt
+        cmd_vy = float(np.clip(target_vy, self.prev_cmd[1] - max_step_lat, self.prev_cmd[1] + max_step_lat))
+
+        max_step_z = self.max_accel_z * dt
+        cmd_vz = float(np.clip(target_vz, self.prev_cmd[2] - max_step_z, self.prev_cmd[2] + max_step_z))
+
+        max_step_yaw = self.max_accel_yaw * dt
+        cmd_yaw = float(np.clip(target_yaw, self.prev_cmd[3] - max_step_yaw, self.prev_cmd[3] + max_step_yaw))
 
         cmd = np.array([cmd_vx, cmd_vy, cmd_vz, cmd_yaw], dtype=np.float64)
         self.prev_cmd = cmd.copy()

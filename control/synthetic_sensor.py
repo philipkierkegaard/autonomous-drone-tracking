@@ -32,8 +32,8 @@ class SyntheticYOLOSensor:
     def __init__(
         self,
         profile_path: Optional[Union[str, Path]] = None,
-        img_w: int = 640,
-        img_h: int = 480,
+        img_w: int = 1280,
+        img_h: int = 720,
         env_mode: str = "nominal",  # "nominal" (clean sky), "cluttered" (tree canopy), "average", "none"
         seed: Optional[int] = None
     ):
@@ -120,13 +120,13 @@ class SyntheticYOLOSensor:
     def _get_scale_bin(self, scale_norm: float) -> str:
         """Classifies target scale max(w_norm, h_norm) into empirical bins."""
         if scale_norm < 0.035:
-            return "tiny"      # < 22 px on 640px sensor
+            return "tiny"      # < 45 px on 1280px sensor (< 22 px on 640px)
         elif scale_norm < 0.070:
-            return "small"     # 22 - 45 px
+            return "small"     # 45 - 90 px on 1280px sensor
         elif scale_norm < 0.120:
-            return "medium"    # 45 - 77 px
+            return "medium"    # 90 - 154 px on 1280px sensor
         else:
-            return "large"     # > 77 px
+            return "large"     # > 154 px on 1280px sensor
 
     def step(
         self,

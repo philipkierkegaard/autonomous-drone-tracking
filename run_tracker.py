@@ -259,6 +259,7 @@ class AutonomousTrackerNode:
             "hfov_deg": args.hfov,
             "vfov_deg": args.vfov,
             "desired_bbox_size": args.target_size,
+            "scale_mode": getattr(args, "scale_mode", "width"),
             "min_limits": np.array([-abs(max_rev), -args.max_climb, -args.max_yawspeed]),
             "max_limits": np.array([args.max_speed, args.max_desc, args.max_yawspeed]),
             "use_bbox_size": True,
@@ -1651,8 +1652,12 @@ def parse_args() -> argparse.Namespace:
         help="YOLO detection confidence threshold (default: 0.25 for high recall with Kalman filtering)."
     )
     parser.add_argument(
-        "--target-size", type=float, default=63.0,
-        help="Desired bounding box size in pixels on camera frame (default: 63 px for ~3.5m standoff)."
+        "--target-size", type=float, default=110.0,
+        help="Desired bounding box size in pixels on camera frame (default: 110 px for ~3.5m standoff, w_norm=0.0859 on 1280x720)."
+    )
+    parser.add_argument(
+        "--scale-mode", type=str, default="width", choices=["width", "max", "height"],
+        help="Target bounding box scale metric: 'width' (standardized normalized width w_bbox/W_image), 'max', or 'height' (default: width)."
     )
     parser.add_argument(
         "--standoff-dist", type=float, default=3.5,
@@ -1797,12 +1802,12 @@ def parse_args() -> argparse.Namespace:
         help="Mechanical camera mount up-tilt angle in degrees."
     )
     parser.add_argument(
-        "--hfov", type=float, default=60.0,
-        help="Horizontal field of view in degrees."
+        "--hfov", type=float, default=62.0,
+        help="Horizontal field of view in degrees (default: 62.0)."
     )
     parser.add_argument(
-        "--vfov", type=float, default=45.0,
-        help="Vertical field of view in degrees."
+        "--vfov", type=float, default=38.0,
+        help="Vertical field of view in degrees (default: 38.0)."
     )
     parser.add_argument(
         "--search-mode", type=str, default="brake", choices=["brake", "legacy_coast"],

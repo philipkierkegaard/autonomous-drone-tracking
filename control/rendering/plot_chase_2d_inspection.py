@@ -92,7 +92,7 @@ def generate_chase_2d_plot(
     
     # Draw Periodic Sightlines & FOV Camera Cones
     sample_steps = np.linspace(0, len(times) - 1, 10, dtype=int)
-    half_hfov = np.deg2rad(60.0 / 2.0)
+    half_hfov = np.deg2rad(62.0 / 2.0)
     fov_range = 15.0
     
     for idx in sample_steps:
