@@ -1,0 +1,277 @@
+{
+  "timestamp": "2026-10-24 14:50:41",
+  "benchmark_name": "zero_leakage_video_split_evaluation",
+  "dataset_summary": {
+    "test": {
+      "video_source": "pede-flyver-drone + ingen_drone negatives",
+      "images": 161,
+      "drones": 122,
+      "backgrounds": 39,
+      "resolution": "1280x720"
+    },
+    "valid": {
+      "video_source": "drone_vs_trees_2 + ingen_drone negatives",
+      "images": 43,
+      "drones": 19,
+      "backgrounds": 24,
+      "resolution": "1280x720"
+    },
+    "train": {
+      "video_source": "nougat-kun-drone, flight_raw_20261002, drone_vs_trees_1, in_front_of_house, ingen_drone",
+      "images": 313,
+      "drones": 241,
+      "backgrounds": 72,
+      "resolution": "1280x720"
+    }
+  },
+  "models": {
+    "base_hybrid_nwd": {
+      "weights_file": "yolov8n_drone_768_hybrid_nwd_c51_best.pt",
+      "description": "YOLOv8n trained on Anti-UAV & Det-Fly (768px Hybrid NWD-CIoU, zero-shot on custom data)"
+    },
+    "finetuned_video_split": {
+      "weights_file": "yolov8n_nougat_pede_768_video_split_best.pt",
+      "description": "YOLOv8n fine-tuned from Hybrid NWD on clean video-split training sequences (768px, Hybrid NWD)"
+    }
+  },
+  "standard_validation_metrics": {
+    "held_out_test_split": {
+      "base_hybrid_nwd": {
+        "map50": 47.27,
+        "map50_95": 29.74,
+        "precision": 78.43,
+        "recall": 35.76
+      },
+      "finetuned_video_split": {
+        "map50": 85.33,
+        "map50_95": 53.05,
+        "precision": 90.72,
+        "recall": 72.14
+      }
+    },
+    "valid_split": {
+      "base_hybrid_nwd": {
+        "map50": 81.81,
+        "map50_95": 49.96,
+        "precision": 92.18,
+        "recall": 68.42
+      },
+      "finetuned_video_split": {
+        "map50": 84.78,
+        "map50_95": 55.53,
+        "precision": 87.26,
+        "recall": 68.42
+      }
+    }
+  },
+  "granular_held_out_test_evaluation": {
+    "base_hybrid_nwd": {
+      "conf_0.15": {
+        "conf_threshold": 0.15,
+        "total_gt": 122,
+        "total_matched": 54,
+        "total_fp": 50,
+        "recall_pct": 44.26,
+        "precision_pct": 51.92,
+        "f1_score": 0.478,
+        "bg_images": 39,
+        "bg_images_with_fp": 7,
+        "bg_fp_rate_pct": 17.95,
+        "mean_cle_px": 2.87,
+        "median_cle_px": 2.39,
+        "mean_iou": 0.81,
+        "scale_breakdown": {
+          "tiny": {
+            "gt": 0,
+            "matched": 0,
+            "recall_pct": 0.0
+          },
+          "small": {
+            "gt": 35,
+            "matched": 8,
+            "recall_pct": 22.86
+          },
+          "medium": {
+            "gt": 87,
+            "matched": 46,
+            "recall_pct": 52.87
+          }
+        },
+        "mean_inference_ms": 11.82,
+        "fps": 84.6
+      },
+      "conf_0.25": {
+        "conf_threshold": 0.25,
+        "total_gt": 122,
+        "total_matched": 48,
+        "total_fp": 29,
+        "recall_pct": 39.34,
+        "precision_pct": 62.34,
+        "f1_score": 0.482,
+        "bg_images": 39,
+        "bg_images_with_fp": 2,
+        "bg_fp_rate_pct": 5.13,
+        "mean_cle_px": 2.86,
+        "median_cle_px": 2.41,
+        "mean_iou": 0.815,
+        "scale_breakdown": {
+          "tiny": {
+            "gt": 0,
+            "matched": 0,
+            "recall_pct": 0.0
+          },
+          "small": {
+            "gt": 35,
+            "matched": 7,
+            "recall_pct": 20.0
+          },
+          "medium": {
+            "gt": 87,
+            "matched": 41,
+            "recall_pct": 47.13
+          }
+        },
+        "mean_inference_ms": 9.17,
+        "fps": 109.1
+      },
+      "conf_0.50": {
+        "conf_threshold": 0.5,
+        "total_gt": 122,
+        "total_matched": 39,
+        "total_fp": 2,
+        "recall_pct": 31.97,
+        "precision_pct": 95.12,
+        "f1_score": 0.479,
+        "bg_images": 39,
+        "bg_images_with_fp": 1,
+        "bg_fp_rate_pct": 2.56,
+        "mean_cle_px": 2.61,
+        "median_cle_px": 2.37,
+        "mean_iou": 0.833,
+        "scale_breakdown": {
+          "tiny": {
+            "gt": 0,
+            "matched": 0,
+            "recall_pct": 0.0
+          },
+          "small": {
+            "gt": 35,
+            "matched": 4,
+            "recall_pct": 11.43
+          },
+          "medium": {
+            "gt": 87,
+            "matched": 35,
+            "recall_pct": 40.23
+          }
+        },
+        "mean_inference_ms": 9.13,
+        "fps": 109.6
+      }
+    },
+    "finetuned_video_split": {
+      "conf_0.15": {
+        "conf_threshold": 0.15,
+        "total_gt": 122,
+        "total_matched": 93,
+        "total_fp": 13,
+        "recall_pct": 76.23,
+        "precision_pct": 87.74,
+        "f1_score": 0.816,
+        "bg_images": 39,
+        "bg_images_with_fp": 4,
+        "bg_fp_rate_pct": 10.26,
+        "mean_cle_px": 2.5,
+        "median_cle_px": 1.88,
+        "mean_iou": 0.809,
+        "scale_breakdown": {
+          "tiny": {
+            "gt": 0,
+            "matched": 0,
+            "recall_pct": 0.0
+          },
+          "small": {
+            "gt": 35,
+            "matched": 24,
+            "recall_pct": 68.57
+          },
+          "medium": {
+            "gt": 87,
+            "matched": 69,
+            "recall_pct": 79.31
+          }
+        },
+        "mean_inference_ms": 9.81,
+        "fps": 101.9
+      },
+      "conf_0.25": {
+        "conf_threshold": 0.25,
+        "total_gt": 122,
+        "total_matched": 86,
+        "total_fp": 6,
+        "recall_pct": 70.49,
+        "precision_pct": 93.48,
+        "f1_score": 0.804,
+        "bg_images": 39,
+        "bg_images_with_fp": 3,
+        "bg_fp_rate_pct": 7.69,
+        "mean_cle_px": 2.47,
+        "median_cle_px": 1.83,
+        "mean_iou": 0.813,
+        "scale_breakdown": {
+          "tiny": {
+            "gt": 0,
+            "matched": 0,
+            "recall_pct": 0.0
+          },
+          "small": {
+            "gt": 35,
+            "matched": 21,
+            "recall_pct": 60.0
+          },
+          "medium": {
+            "gt": 87,
+            "matched": 65,
+            "recall_pct": 74.71
+          }
+        },
+        "mean_inference_ms": 9.75,
+        "fps": 102.5
+      },
+      "conf_0.50": {
+        "conf_threshold": 0.5,
+        "total_gt": 122,
+        "total_matched": 67,
+        "total_fp": 1,
+        "recall_pct": 54.92,
+        "precision_pct": 98.53,
+        "f1_score": 0.705,
+        "bg_images": 39,
+        "bg_images_with_fp": 1,
+        "bg_fp_rate_pct": 2.56,
+        "mean_cle_px": 2.39,
+        "median_cle_px": 1.78,
+        "mean_iou": 0.821,
+        "scale_breakdown": {
+          "tiny": {
+            "gt": 0,
+            "matched": 0,
+            "recall_pct": 0.0
+          },
+          "small": {
+            "gt": 35,
+            "matched": 12,
+            "recall_pct": 34.29
+          },
+          "medium": {
+            "gt": 87,
+            "matched": 55,
+            "recall_pct": 63.22
+          }
+        },
+        "mean_inference_ms": 9.36,
+        "fps": 106.9
+      }
+    }
+  }
+}

@@ -1,0 +1,274 @@
+{
+  "timestamp": "2026-10-24 14:24:32",
+  "dataset_name": "nougat-og-pede-flyver-drone",
+  "dataset_summary": {
+    "test": {
+      "images": 51,
+      "drones": 39,
+      "backgrounds": 12,
+      "resolution": "1280x720"
+    },
+    "valid": {
+      "images": 105,
+      "drones": 77,
+      "backgrounds": 28,
+      "resolution": "1280x720"
+    },
+    "train": {
+      "images": 361,
+      "drones": 266,
+      "backgrounds": 95,
+      "resolution": "1280x720"
+    }
+  },
+  "models": {
+    "hybrid_nwd": {
+      "weights_file": "yolov8n_drone_768_hybrid_nwd_c51_best.pt",
+      "description": "YOLOv8n trained on Anti-UAV & Det-Fly with 768px Hybrid NWD-CIoU loss"
+    },
+    "nougat_pede": {
+      "weights_file": "yolov8n_nougat_pede_768_best.pt",
+      "description": "YOLOv8n fine-tuned directly on user custom drone data (768px)"
+    }
+  },
+  "standard_validation_metrics": {
+    "test_split": {
+      "hybrid_nwd": {
+        "map50": 56.16,
+        "map50_95": 37.23,
+        "precision": 58.13,
+        "recall": 56.98
+      },
+      "nougat_pede": {
+        "map50": 96.74,
+        "map50_95": 63.2,
+        "precision": 99.66,
+        "recall": 94.87
+      }
+    },
+    "valid_split": {
+      "hybrid_nwd": {
+        "map50": 40.63,
+        "map50_95": 24.65,
+        "precision": 59.96,
+        "recall": 37.66
+      },
+      "nougat_pede": {
+        "map50": 94.63,
+        "map50_95": 59.48,
+        "precision": 98.43,
+        "recall": 88.31
+      }
+    }
+  },
+  "granular_test_evaluation": {
+    "hybrid_nwd": {
+      "conf_0.15": {
+        "conf_threshold": 0.15,
+        "total_gt": 39,
+        "total_matched": 25,
+        "total_fp": 13,
+        "recall_pct": 64.1,
+        "precision_pct": 65.79,
+        "f1_score": 0.649,
+        "bg_images": 12,
+        "bg_images_with_fp": 1,
+        "bg_fp_rate_pct": 8.33,
+        "mean_cle_px": 3.29,
+        "median_cle_px": 1.81,
+        "mean_iou": 0.809,
+        "scale_breakdown": {
+          "tiny": {
+            "gt": 0,
+            "matched": 0,
+            "recall_pct": 0.0
+          },
+          "small": {
+            "gt": 13,
+            "matched": 7,
+            "recall_pct": 53.85
+          },
+          "medium": {
+            "gt": 26,
+            "matched": 18,
+            "recall_pct": 69.23
+          }
+        },
+        "mean_inference_ms": 13.37,
+        "fps": 74.8
+      },
+      "conf_0.25": {
+        "conf_threshold": 0.25,
+        "total_gt": 39,
+        "total_matched": 23,
+        "total_fp": 9,
+        "recall_pct": 58.97,
+        "precision_pct": 71.88,
+        "f1_score": 0.648,
+        "bg_images": 12,
+        "bg_images_with_fp": 1,
+        "bg_fp_rate_pct": 8.33,
+        "mean_cle_px": 3.39,
+        "median_cle_px": 1.69,
+        "mean_iou": 0.805,
+        "scale_breakdown": {
+          "tiny": {
+            "gt": 0,
+            "matched": 0,
+            "recall_pct": 0.0
+          },
+          "small": {
+            "gt": 13,
+            "matched": 7,
+            "recall_pct": 53.85
+          },
+          "medium": {
+            "gt": 26,
+            "matched": 16,
+            "recall_pct": 61.54
+          }
+        },
+        "mean_inference_ms": 9.26,
+        "fps": 108.0
+      },
+      "conf_0.50": {
+        "conf_threshold": 0.5,
+        "total_gt": 39,
+        "total_matched": 15,
+        "total_fp": 1,
+        "recall_pct": 38.46,
+        "precision_pct": 93.75,
+        "f1_score": 0.545,
+        "bg_images": 12,
+        "bg_images_with_fp": 0,
+        "bg_fp_rate_pct": 0.0,
+        "mean_cle_px": 3.36,
+        "median_cle_px": 1.69,
+        "mean_iou": 0.811,
+        "scale_breakdown": {
+          "tiny": {
+            "gt": 0,
+            "matched": 0,
+            "recall_pct": 0.0
+          },
+          "small": {
+            "gt": 13,
+            "matched": 5,
+            "recall_pct": 38.46
+          },
+          "medium": {
+            "gt": 26,
+            "matched": 10,
+            "recall_pct": 38.46
+          }
+        },
+        "mean_inference_ms": 8.65,
+        "fps": 115.6
+      }
+    },
+    "nougat_pede": {
+      "conf_0.15": {
+        "conf_threshold": 0.15,
+        "total_gt": 39,
+        "total_matched": 37,
+        "total_fp": 11,
+        "recall_pct": 94.87,
+        "precision_pct": 77.08,
+        "f1_score": 0.851,
+        "bg_images": 12,
+        "bg_images_with_fp": 2,
+        "bg_fp_rate_pct": 16.67,
+        "mean_cle_px": 2.11,
+        "median_cle_px": 1.85,
+        "mean_iou": 0.823,
+        "scale_breakdown": {
+          "tiny": {
+            "gt": 0,
+            "matched": 0,
+            "recall_pct": 0.0
+          },
+          "small": {
+            "gt": 13,
+            "matched": 13,
+            "recall_pct": 100.0
+          },
+          "medium": {
+            "gt": 26,
+            "matched": 24,
+            "recall_pct": 92.31
+          }
+        },
+        "mean_inference_ms": 10.37,
+        "fps": 96.5
+      },
+      "conf_0.25": {
+        "conf_threshold": 0.25,
+        "total_gt": 39,
+        "total_matched": 37,
+        "total_fp": 5,
+        "recall_pct": 94.87,
+        "precision_pct": 88.1,
+        "f1_score": 0.914,
+        "bg_images": 12,
+        "bg_images_with_fp": 2,
+        "bg_fp_rate_pct": 16.67,
+        "mean_cle_px": 2.11,
+        "median_cle_px": 1.85,
+        "mean_iou": 0.823,
+        "scale_breakdown": {
+          "tiny": {
+            "gt": 0,
+            "matched": 0,
+            "recall_pct": 0.0
+          },
+          "small": {
+            "gt": 13,
+            "matched": 13,
+            "recall_pct": 100.0
+          },
+          "medium": {
+            "gt": 26,
+            "matched": 24,
+            "recall_pct": 92.31
+          }
+        },
+        "mean_inference_ms": 9.4,
+        "fps": 106.3
+      },
+      "conf_0.50": {
+        "conf_threshold": 0.5,
+        "total_gt": 39,
+        "total_matched": 37,
+        "total_fp": 1,
+        "recall_pct": 94.87,
+        "precision_pct": 97.37,
+        "f1_score": 0.961,
+        "bg_images": 12,
+        "bg_images_with_fp": 0,
+        "bg_fp_rate_pct": 0.0,
+        "mean_cle_px": 2.11,
+        "median_cle_px": 1.85,
+        "mean_iou": 0.823,
+        "scale_breakdown": {
+          "tiny": {
+            "gt": 0,
+            "matched": 0,
+            "recall_pct": 0.0
+          },
+          "small": {
+            "gt": 13,
+            "matched": 13,
+            "recall_pct": 100.0
+          },
+          "medium": {
+            "gt": 26,
+            "matched": 24,
+            "recall_pct": 92.31
+          }
+        },
+        "mean_inference_ms": 10.05,
+        "fps": 99.5
+      }
+    }
+  }
+}

@@ -1,0 +1,170 @@
+{
+  "YOLOv8n v3 Baseline": {
+    "model": "yolov8n_v3_best.pt",
+    "imgsz": 640,
+    "elapsed_s": 58.13,
+    "fps": 138.5,
+    "total_frames": 8052,
+    "empty_frames": 245,
+    "categories": {
+      "coco_small_768_area": {
+        "total_gt": 7614,
+        "detected_iou25": 6009,
+        "recall_iou25": 78.92,
+        "detected_iou50": 5335,
+        "recall_iou50": 70.07
+      },
+      "small_768_dim": {
+        "total_gt": 6743,
+        "detected_iou25": 5167,
+        "recall_iou25": 76.63,
+        "detected_iou50": 4579,
+        "recall_iou50": 67.91
+      },
+      "tiny_hist_sub27": {
+        "total_gt": 5705,
+        "detected_iou25": 4231,
+        "recall_iou25": 74.16,
+        "detected_iou50": 3807,
+        "recall_iou50": 66.73
+      },
+      "native_small_dim": {
+        "total_gt": 7507,
+        "detected_iou25": 5907,
+        "recall_iou25": 78.69,
+        "detected_iou50": 5234,
+        "recall_iou50": 69.72
+      },
+      "native_small_area": {
+        "total_gt": 7728,
+        "detected_iou25": 6120,
+        "recall_iou25": 79.19,
+        "detected_iou50": 5446,
+        "recall_iou50": 70.47
+      },
+      "all": {
+        "total_gt": 7807,
+        "detected_iou25": 6198,
+        "recall_iou25": 79.39,
+        "detected_iou50": 5524,
+        "recall_iou50": 70.76
+      }
+    },
+    "precision_iou25": 91.48,
+    "precision_iou50": 81.52,
+    "total_predictions": 6776,
+    "fp_per_frame": 0.0717
+  },
+  "YOLOv8n 768 CIoU": {
+    "model": "yolov8n_drone_768_ciou_best.pt",
+    "imgsz": 768,
+    "elapsed_s": 80.58,
+    "fps": 99.9,
+    "total_frames": 8052,
+    "empty_frames": 245,
+    "categories": {
+      "coco_small_768_area": {
+        "total_gt": 7614,
+        "detected_iou25": 6196,
+        "recall_iou25": 81.38,
+        "detected_iou50": 5613,
+        "recall_iou50": 73.72
+      },
+      "small_768_dim": {
+        "total_gt": 6743,
+        "detected_iou25": 5356,
+        "recall_iou25": 79.43,
+        "detected_iou50": 4804,
+        "recall_iou50": 71.24
+      },
+      "tiny_hist_sub27": {
+        "total_gt": 5705,
+        "detected_iou25": 4417,
+        "recall_iou25": 77.42,
+        "detected_iou50": 3960,
+        "recall_iou50": 69.41
+      },
+      "native_small_dim": {
+        "total_gt": 6743,
+        "detected_iou25": 5356,
+        "recall_iou25": 79.43,
+        "detected_iou50": 4804,
+        "recall_iou50": 71.24
+      },
+      "native_small_area": {
+        "total_gt": 7614,
+        "detected_iou25": 6196,
+        "recall_iou25": 81.38,
+        "detected_iou50": 5613,
+        "recall_iou50": 73.72
+      },
+      "all": {
+        "total_gt": 7807,
+        "detected_iou25": 6386,
+        "recall_iou25": 81.8,
+        "detected_iou50": 5802,
+        "recall_iou50": 74.32
+      }
+    },
+    "precision_iou25": 82.51,
+    "precision_iou50": 74.96,
+    "total_predictions": 7740,
+    "fp_per_frame": 0.1682
+  },
+  "YOLOv8n 768 Hybrid NWD-CIoU": {
+    "model": "yolov8n_drone_768_hybrid_nwd_c51_best.pt",
+    "imgsz": 768,
+    "elapsed_s": 85.22,
+    "fps": 94.5,
+    "total_frames": 8052,
+    "empty_frames": 245,
+    "categories": {
+      "coco_small_768_area": {
+        "total_gt": 7614,
+        "detected_iou25": 6287,
+        "recall_iou25": 82.57,
+        "detected_iou50": 5652,
+        "recall_iou50": 74.23
+      },
+      "small_768_dim": {
+        "total_gt": 6743,
+        "detected_iou25": 5448,
+        "recall_iou25": 80.79,
+        "detected_iou50": 4866,
+        "recall_iou50": 72.16
+      },
+      "tiny_hist_sub27": {
+        "total_gt": 5705,
+        "detected_iou25": 4501,
+        "recall_iou25": 78.9,
+        "detected_iou50": 4041,
+        "recall_iou50": 70.83
+      },
+      "native_small_dim": {
+        "total_gt": 6743,
+        "detected_iou25": 5448,
+        "recall_iou25": 80.79,
+        "detected_iou50": 4866,
+        "recall_iou50": 72.16
+      },
+      "native_small_area": {
+        "total_gt": 7614,
+        "detected_iou25": 6287,
+        "recall_iou25": 82.57,
+        "detected_iou50": 5652,
+        "recall_iou50": 74.23
+      },
+      "all": {
+        "total_gt": 7807,
+        "detected_iou25": 6475,
+        "recall_iou25": 82.94,
+        "detected_iou50": 5840,
+        "recall_iou50": 74.8
+      }
+    },
+    "precision_iou25": 97.22,
+    "precision_iou50": 87.65,
+    "total_predictions": 6663,
+    "fp_per_frame": 0.023
+  }
+}

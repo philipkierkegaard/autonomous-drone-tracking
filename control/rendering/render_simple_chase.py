@@ -9,6 +9,7 @@ Includes a clean side panel displaying real-time flight telemetry.
 """
 
 import sys
+import json
 import shutil
 import argparse
 import subprocess
@@ -107,12 +108,43 @@ def render_simple_chase_video(
         elif "continuous_potential" in model_str:
             ctrl_label = "Learned Recurrent PPO (Gen 4 Continuous)"
             ctrl_short = "Gen 4 RL"
+        elif "cloned_expert" in model_str:
+            ctrl_label = "Cloned Expert Policy (Behavioral Cloning)"
+            ctrl_short = "Cloned Expert"
         else:
             ctrl_label = "Learned Recurrent PPO (RL)"
             ctrl_short = "RL"
     else:
-        ctrl_label = "Classical Visual Servoing (PID)"
-        ctrl_short = "PID"
+        # Load tuned gains if available or specified
+        kp_fwd = 1.2
+        cent_damp = 0.15
+        kp_lat = 2.5
+        kd_lat = 0.35
+        kp_yaw = 180.0
+        kd_yaw = 20.0
+        is_tuned = False
+        default_tuned = PROJECT_ROOT / "control" / "weights" / "tuned_pid_gains.json"
+        if default_tuned.exists():
+            try:
+                with open(default_tuned, "r", encoding="utf-8") as f:
+                    g_data = json.load(f)
+                params = g_data.get("tuned_parameters", g_data)
+                kp_fwd = float(params.get("kp_forward", kp_fwd))
+                cent_damp = float(params.get("centering_damping", cent_damp))
+                kp_lat = float(params.get("kp_lat", kp_lat))
+                kd_lat = float(params.get("kd_lat", kd_lat))
+                kp_yaw = float(params.get("kp_yaw", kp_yaw))
+                kd_yaw = float(params.get("kd_yaw", kd_yaw))
+                is_tuned = True
+            except Exception as e:
+                print(f"[WARN] Failed to load tuned PID gains: {e}")
+
+        if is_tuned:
+            ctrl_label = "Tuned Kinematic Visual Servoing (Tuned PID)"
+            ctrl_short = "Tuned PID"
+        else:
+            ctrl_label = "Classical Visual Servoing (PID)"
+            ctrl_short = "PID"
     
     init_pos, init_heading, encounter_label = get_encounter_init(encounter, target_init_pos, target_init_heading_deg)
 
@@ -121,10 +153,10 @@ def render_simple_chase_video(
     print(f"      Controller: {ctrl_label}")
     sim = FastPixhawkQuadSim(
         dt=dt_sim,
-        max_vel_xy=12.0,
+        max_vel_xy=15.0,
         max_accel_xy=6.0,
-        max_vel_up=2.5,
-        max_vel_down=1.5
+        max_vel_up=3.0,
+        max_vel_down=2.0
     )
 
     if is_rl:
@@ -147,14 +179,18 @@ def render_simple_chase_video(
             scale_mode="width",
             use_bbox_size=True,
             enable_lateral_strafe=True,
-            kp_lat=2.5,
-            kd_lat=0.35,
-            max_lat_vel=2.5,
-            max_lat_accel=4.0,
+            kp_forward=kp_fwd,
+            centering_damping=cent_damp,
+            kp_lat=kp_lat,
+            kd_lat=kd_lat,
+            kp_yaw=kp_yaw,
+            kd_yaw=kd_yaw,
+            max_lat_vel=4.0,
+            max_lat_accel=5.0,
             max_accel=6.0,
             max_decel=6.0,
-            min_limits=np.array([-0.5, -2.5, -2.5, -90.0]),
-            max_limits=np.array([ 6.5,  2.5,  1.5,  90.0]),
+            min_limits=np.array([-0.5, -4.0, -3.0, -120.0]),
+            max_limits=np.array([15.0,  4.0,  2.0,  120.0]),
         )
 
     # Initial positions
@@ -546,13 +582,39 @@ def render_dual_chase_video(
     c_yaw = float(chaser_init_yaw)
     c_vel = np.array([np.cos(c_yaw) * 4.0, np.sin(c_yaw) * 4.0, 0.0], dtype=np.float64)
 
-    sim_pid = FastPixhawkQuadSim(dt=dt_sim, max_vel_xy=12.0, max_accel_xy=6.0, max_vel_up=2.5, max_vel_down=1.5)
+    sim_pid = FastPixhawkQuadSim(dt=dt_sim, max_vel_xy=15.0, max_accel_xy=6.0, max_vel_up=3.0, max_vel_down=2.0)
     sim_pid.reset(initial_pos=np.array(c_init, dtype=np.float64), initial_yaw=c_yaw, initial_vel=c_vel)
 
-    sim_rl = FastPixhawkQuadSim(dt=dt_sim, max_vel_xy=12.0, max_accel_xy=6.0, max_vel_up=2.5, max_vel_down=1.5)
+    sim_rl = FastPixhawkQuadSim(dt=dt_sim, max_vel_xy=15.0, max_accel_xy=6.0, max_vel_up=3.0, max_vel_down=2.0)
     sim_rl.reset(initial_pos=np.array(c_init, dtype=np.float64), initial_yaw=c_yaw, initial_vel=c_vel)
 
-    # 1. Classical PID Controller
+    # 1. Classical / Tuned PID Controller
+    kp_fwd = 1.2
+    cent_damp = 0.15
+    kp_lat = 2.5
+    kd_lat = 0.35
+    kp_yaw = 180.0
+    kd_yaw = 20.0
+    pid_label = "Classical PID"
+    pid_short = "PID"
+
+    default_tuned = PROJECT_ROOT / "control" / "weights" / "tuned_pid_gains.json"
+    if default_tuned.exists():
+        try:
+            with open(default_tuned, "r", encoding="utf-8") as f:
+                g_data = json.load(f)
+            params = g_data.get("tuned_parameters", g_data)
+            kp_fwd = float(params.get("kp_forward", kp_fwd))
+            cent_damp = float(params.get("centering_damping", cent_damp))
+            kp_lat = float(params.get("kp_lat", kp_lat))
+            kd_lat = float(params.get("kd_lat", kd_lat))
+            kp_yaw = float(params.get("kp_yaw", kp_yaw))
+            kd_yaw = float(params.get("kd_yaw", kd_yaw))
+            pid_label = "Tuned Kinematic PID"
+            pid_short = "Tuned PID"
+        except Exception:
+            pass
+
     ctrl_pid = KinematicVisualServoController(
         camera_uptilt_deg=15.0,
         hfov_deg=62.0,
@@ -562,14 +624,18 @@ def render_dual_chase_video(
         scale_mode="width",
         use_bbox_size=True,
         enable_lateral_strafe=True,
-        kp_lat=2.5,
-        kd_lat=0.35,
-        max_lat_vel=2.5,
-        max_lat_accel=4.0,
+        kp_forward=kp_fwd,
+        centering_damping=cent_damp,
+        kp_lat=kp_lat,
+        kd_lat=kd_lat,
+        kp_yaw=kp_yaw,
+        kd_yaw=kd_yaw,
+        max_lat_vel=4.0,
+        max_lat_accel=5.0,
         max_accel=6.0,
         max_decel=6.0,
-        min_limits=np.array([-0.5, -2.5, -2.5, -90.0]),
-        max_limits=np.array([ 6.5,  2.5,  1.5,  90.0]),
+        min_limits=np.array([-0.5, -4.0, -3.0, -120.0]),
+        max_limits=np.array([15.0,  4.0,  2.0,  120.0]),
     )
 
     # 2. Learned Recurrent PPO Controller
@@ -599,6 +665,9 @@ def render_dual_chase_video(
     elif "continuous_potential" in model_str:
         rl_label = "Learned Gen 4 RL Chaser"
         rl_short = "Gen 4 RL"
+    elif "cloned_expert" in model_str:
+        rl_label = "Cloned Expert Policy (Behavioral Cloning)"
+        rl_short = "Cloned Expert"
     else:
         rl_label = "Learned RL Chaser"
         rl_short = "RL"
@@ -813,14 +882,14 @@ def render_dual_chase_video(
         catch_done_p = (catch_t_p is not None and t_now >= catch_t_p + 3.0)
         if catch_done_r:
             ax_map.text(
-                0.98, 0.04, f"★ RL 3.0s LOCKED (t={catch_t_r+3.0:.2f}s)",
+                0.98, 0.04, f"★ {rl_short} 3.0s LOCKED (t={catch_t_r+3.0:.2f}s)",
                 transform=ax_map.transAxes, fontsize=8.8, fontweight="bold",
                 color="#1b7837", ha="right", va="bottom",
                 bbox=dict(boxstyle="round,pad=0.3", facecolor="#e8f5e9", edgecolor="#2ca02c", linewidth=1.4)
             )
         if catch_done_p:
             ax_map.text(
-                0.98, 0.11, f"★ PID 3.0s LOCKED (t={catch_t_p+3.0:.2f}s)",
+                0.98, 0.11, f"★ Kinematic PID 3.0s LOCKED (t={catch_t_p+3.0:.2f}s)",
                 transform=ax_map.transAxes, fontsize=8.8, fontweight="bold",
                 color="#08519c", ha="right", va="bottom",
                 bbox=dict(boxstyle="round,pad=0.3", facecolor="#eff3ff", edgecolor="#3182bd", linewidth=1.4)
@@ -998,18 +1067,18 @@ def compute_shared_bounds(
     for ctype in ["pid", "rl"]:
         sim = FastPixhawkQuadSim(
             dt=dt_sim,
-            max_vel_xy=12.0,
+            max_vel_xy=15.0,
             max_accel_xy=6.0,
-            max_vel_up=2.5,
-            max_vel_down=1.5
+            max_vel_up=3.0,
+            max_vel_down=2.0
         )
         sim.reset(initial_pos=np.array(c_init, dtype=np.float64), initial_yaw=chaser_init_yaw)
 
         if ctype == "pid":
             ctrl = KinematicVisualServoController(
                 camera_uptilt_deg=15.0, hfov_deg=62.0, vfov_deg=38.0, desired_standoff_dist=3.5,
-                enable_lateral_strafe=True, kp_lat=2.5, kd_lat=0.35, max_lat_vel=2.5, max_lat_accel=4.0, max_accel=6.0, max_decel=6.0,
-                min_limits=np.array([-0.5, -2.5, -2.5, -90.0]), max_limits=np.array([6.5, 2.5, 1.5, 90.0])
+                enable_lateral_strafe=True, kp_lat=2.5, kd_lat=0.35, max_lat_vel=4.0, max_lat_accel=5.0, max_accel=6.0, max_decel=6.0,
+                min_limits=np.array([-0.5, -4.0, -3.0, -120.0]), max_limits=np.array([14.0, 4.0, 2.0, 120.0])
             )
         else:
             if model_path is None:
@@ -1176,7 +1245,7 @@ if __name__ == "__main__":
             )
 
         elif args.controller == "dual":
-            dual_mp4 = out_dir / f"{base_prefix}_dual_overlay.mp4"
+            dual_mp4 = Path(args.out) if args.out else (out_dir / f"{base_prefix}_dual_overlay.mp4")
             dual_gif = dual_mp4.with_suffix(".gif") if args.gif else None
             render_dual_chase_video(
                 output_path=dual_mp4, duration=args.duration, fps=args.fps, profile=args.profile,

@@ -53,7 +53,7 @@ def collect_expert_demonstrations(
     trajectories = []
     
     profiles = ["evasive", "hyper_evasive", "cruising", "sprint_break", "aerobatic"]
-    profile_weights = [0.35, 0.30, 0.20, 0.10, 0.05]
+    profile_weights = [0.35, 0.35, 0.15, 0.10, 0.05]
     
     rng = np.random.default_rng(seed_offset)
     
@@ -61,25 +61,51 @@ def collect_expert_demonstrations(
         prof = rng.choice(profiles, p=profile_weights)
         ep_seed = seed_offset + ep
         
-        # Geometry sampling: Diverse initial positions and velocities
+        # Geometry sampling: Diverse initial positions, altitudes, and headings
+        chaser_alt = float(rng.uniform(-4.5, -2.5))  # 2.5m to 4.5m AGL (NED coordinate)
+        # Altitude delta between target and chaser: ±1.2m (ensuring target stays > 1.8m AGL)
+        delta_alt = float(rng.uniform(-1.2, 1.2))
+        target_alt = float(np.clip(chaser_alt + delta_alt, -6.5, -1.8))
+        
         init_dist = float(rng.uniform(5.0, 16.0))
         init_lat = float(rng.uniform(-4.5, 4.5))
-        init_alt = float(rng.uniform(-4.5, -2.0))
         init_heading = float(rng.uniform(-0.8, 0.8))
+        init_chaser_vel = float(rng.uniform(2.5, 5.0))
+        init_yaw = float(rng.uniform(-0.45, 0.45))
         
-        # Encounter types: Tail chase, crossing left/right, angled oblique
+        # Encounter types:
+        # 1. Close Basket & Dwell (20%): Spawns within/near 2.8-4.8m basket for fine speed-matching & dwell demos
+        # 2. Crossing Right (20%): Spawns on left flank, cuts East (+90 deg) across FOV
+        # 3. Crossing Left (20%): Spawns on right flank, cuts West (-90 deg) across FOV
+        # 4. Oblique / Head-On Break (15%): Angled breakaway forcing aggressive yaw correction
+        # 5. Tail Chase Sprint (25%): Deep forward chase (7-16m) demanding high-speed catch
         encounter_roll = rng.random()
-        if encounter_roll < 0.25:
+        if encounter_roll < 0.20:
+            # Close basket dwell encounter
+            close_dist = float(rng.uniform(2.8, 4.8))
+            close_lat = float(rng.uniform(-1.5, 1.5))
+            target_pos = [close_dist, close_lat, target_alt]
+            target_heading = float(rng.uniform(-0.35, 0.35))
+            init_chaser_vel = float(rng.uniform(3.5, 4.5))  # Match target cruising speed
+        elif encounter_roll < 0.40:
             # Crossing right
-            target_pos = [init_dist, -5.0, init_alt]
-            target_heading = float(np.pi / 2.0)
-        elif encounter_roll < 0.50:
+            flank_lat = float(rng.uniform(-6.0, -3.5))
+            target_pos = [init_dist, flank_lat, target_alt]
+            target_heading = float(np.pi / 2.0 + rng.uniform(-0.25, 0.25))
+        elif encounter_roll < 0.60:
             # Crossing left
-            target_pos = [init_dist, 5.0, init_alt]
-            target_heading = float(-np.pi / 2.0)
+            flank_lat = float(rng.uniform(3.5, 6.0))
+            target_pos = [init_dist, flank_lat, target_alt]
+            target_heading = float(-np.pi / 2.0 + rng.uniform(-0.25, 0.25))
+        elif encounter_roll < 0.75:
+            # Oblique break
+            sign = float(rng.choice([-1.0, 1.0]))
+            target_pos = [init_dist, init_lat, target_alt]
+            target_heading = float(sign * (np.pi / 3.0) + rng.uniform(-0.2, 0.2))
         else:
-            # Tail chase / oblique
-            target_pos = [init_dist, init_lat, init_alt]
+            # Tail chase sprint
+            sprint_dist = float(rng.uniform(7.0, 16.0))
+            target_pos = [sprint_dist, init_lat, target_alt]
             target_heading = init_heading
             
         target = StochasticTargetTrajectory(
@@ -91,11 +117,10 @@ def collect_expert_demonstrations(
         )
         
         sim = FastPixhawkQuadSim(dt=dt)
-        init_chaser_vel = float(rng.uniform(2.5, 5.0))
         sim.reset(
-            initial_pos=np.array([0.0, 0.0, init_alt]),
-            initial_yaw=0.0,
-            initial_vel=np.array([init_chaser_vel, 0.0, 0.0])
+            initial_pos=np.array([0.0, 0.0, chaser_alt]),
+            initial_yaw=init_yaw,
+            initial_vel=np.array([np.cos(init_yaw) * init_chaser_vel, np.sin(init_yaw) * init_chaser_vel, 0.0])
         )
         
         ctrl = KinematicVisualServoController(
@@ -109,12 +134,12 @@ def collect_expert_demonstrations(
             enable_lateral_strafe=True,
             kp_lat=2.5,
             kd_lat=0.35,
-            max_lat_vel=2.5,
-            max_lat_accel=4.0,
+            max_lat_vel=4.0,
+            max_lat_accel=5.0,
             max_accel=6.0,
             max_decel=6.0,
-            min_limits=np.array([-0.5, -2.5, -2.5, -90.0]),
-            max_limits=np.array([6.5, 2.5, 1.5, 90.0])
+            min_limits=np.array([-0.5, -4.0, -3.0, -120.0]),
+            max_limits=np.array([14.0, 4.0, 2.0, 120.0])
         )
         ctrl.prev_cmd = np.array([init_chaser_vel, 0.0, 0.0, 0.0])
         
@@ -146,13 +171,16 @@ def collect_expert_demonstrations(
             is_dropped = (rng.random() < dropout_prob)
             if is_dropped or not in_view_real:
                 telem_ctrl = dict(telem)
-                telem_ctrl["status"] = "SEARCHING"
+                telem_ctrl["status"] = "COASTING"
                 telem_ctrl["in_view"] = False
             else:
                 telem_ctrl = telem
                 
             cmd = ctrl.compute_cmd(telem_ctrl, drone_pitch=sim.pitch, drone_roll=sim.roll, dt=dt)
             sim.step(cmd)
+            # DAgger-style recovery perturbation: nudges heading so PID demonstrates corrective turns
+            if step > 20 and rng.random() < 0.025:
+                sim.yaw += float(rng.uniform(-0.25, 0.25))
             
             # Observation formulation (matched identically to 15D environment.py)
             in_view_flag = 1.0 if (in_view_real and not is_dropped) else 0.0
@@ -205,10 +233,10 @@ def collect_expert_demonstrations(
                 scale_err,
                 w_norm,
                 in_view_flag,
-                np.clip(vx_b / 12.0, -1.0, 1.0),
-                np.clip(vy_b / 2.5, -1.0, 1.0),
-                np.clip(vz_b / 2.5, -1.0, 1.0),
-                np.clip(sim.yaw_rate / np.deg2rad(90.0), -1.0, 1.0),
+                np.clip(vx_b / 15.0, -1.0, 1.0),
+                np.clip(vy_b / 4.0, -1.0, 1.0),
+                np.clip(vz_b / 3.0, -1.0, 1.0),
+                np.clip(sim.yaw_rate / np.deg2rad(120.0), -1.0, 1.0),
                 alt_norm,
                 np.clip(filt_dex / 2.0, -1.0, 1.0),
                 np.clip(filt_dey / 2.0, -1.0, 1.0),
@@ -219,13 +247,13 @@ def collect_expert_demonstrations(
             
             # Inverse Action Mapping matching environment.py
             if cmd[0] >= 3.5:
-                a0 = (cmd[0] - 3.5) / (12.0 - 3.5)
+                a0 = (cmd[0] - 3.5) / (15.0 - 3.5)
             else:
                 a0 = (cmd[0] - 3.5) / (3.5 + 0.5)
             a0 = float(np.clip(a0, -1.0, 1.0))
-            a1 = float(np.clip(cmd[1] / 2.5, -1.0, 1.0))
-            a2 = float(np.clip(cmd[2] / 1.5 if cmd[2] >= 0 else cmd[2] / 2.5, -1.0, 1.0))
-            a3 = float(np.clip(cmd[3] / 90.0, -1.0, 1.0))
+            a1 = float(np.clip(cmd[1] / 4.0, -1.0, 1.0))
+            a2 = float(np.clip(cmd[2] / 2.0 if cmd[2] >= 0 else cmd[2] / 3.0, -1.0, 1.0))
+            a3 = float(np.clip(cmd[3] / 120.0, -1.0, 1.0))
             
             act_4d = np.array([a0, a1, a2, a3], dtype=np.float32)
             
@@ -233,8 +261,10 @@ def collect_expert_demonstrations(
             ep_acts.append(act_4d)
             
         trajectories.append((np.array(ep_obs, dtype=np.float32), np.array(ep_acts, dtype=np.float32)))
+        if (ep + 1) % 100 == 0 or (ep + 1) == num_episodes:
+            print(f"  [COLLECT] {ep + 1}/{num_episodes} demonstration episodes recorded ({len(trajectories) * total_steps:,} transitions)...")
         
-    print(f"[EXPERT] Successfully collected {len(trajectories)} trajectories ({len(trajectories) * total_steps} total transitions).")
+    print(f"[EXPERT] Successfully collected {len(trajectories)} trajectories ({len(trajectories) * total_steps:,} total transitions).")
     return trajectories
 
 
@@ -330,9 +360,9 @@ def evaluate_policy(
 
 
 def train_behavioral_cloning(
-    num_episodes: int = 120,
-    epochs: int = 35,
-    batch_size: int = 16,
+    num_episodes: int = 1000,
+    epochs: int = 40,
+    batch_size: int = 32,
     learning_rate: float = 1e-3,
     output_dir: Union[str, Path] = "control/weights/cloned_expert_v1",
 ) -> StandaloneRecurrentPolicy:
@@ -355,7 +385,7 @@ def train_behavioral_cloning(
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-4)
     criterion = nn.HuberLoss(delta=0.1)  # Huber loss provides smooth, outlier-resistant gradients
     
-    print(f"\n[TRAIN] Beginning supervised LSTM imitation learning ({epochs} epochs, device={device})...")
+    print(f"\n[TRAIN] Beginning supervised LSTM imitation learning ({epochs} epochs, batch_size={batch_size}, device={device})...")
     start_time = time.time()
     
     for epoch in range(epochs):
@@ -396,6 +426,8 @@ def train_behavioral_cloning(
         {"name": "Evasive Crossing Right (Seed 42)", "profile": "evasive", "pos": [12.0, -5.0, -2.5], "heading": np.pi/2.0, "seed": 42},
         {"name": "Hyper-Evasive Weave (Seed 100)", "profile": "hyper_evasive", "pos": [10.0, 0.0, -3.0], "heading": 0.0, "seed": 100},
         {"name": "Sprint Break (Seed 777)", "profile": "sprint_break", "pos": [8.0, 0.0, -2.5], "heading": 0.0, "seed": 777},
+        {"name": "Hyper-Evasive Crossing Left (Seed 202)", "profile": "hyper_evasive", "pos": [11.0, 5.0, -2.8], "heading": -np.pi/2.0, "seed": 202},
+        {"name": "Evasive Close Basket Dwell (Seed 333)", "profile": "evasive", "pos": [3.5, 0.0, -2.5], "heading": 0.0, "seed": 333},
     ]
     
     results = []
@@ -409,7 +441,7 @@ def train_behavioral_cloning(
             seed=bench["seed"]
         )
         results.append(r)
-        print(f"  • {r['scenario']:<32} | In-View: {r['in_view_pct']:5.1f}% | Dist: [{r['min_dist_m']:.2f}m..{r['max_dist_m']:.2f}m] -> Final: {r['final_dist_m']:.2f}m | Strikes: {r['ground_strikes']}")
+        print(f"  • {r['scenario']:<36} | In-View: {r['in_view_pct']:5.1f}% | Dist: [{r['min_dist_m']:.2f}m..{r['max_dist_m']:.2f}m] -> Final: {r['final_dist_m']:.2f}m | Strikes: {r['ground_strikes']}")
         
     # 4. Save Weights and Benchmark Manifest
     weights_path = out_path / "actor_weights.pt"
@@ -434,13 +466,15 @@ def train_behavioral_cloning(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train Behavioral Cloning Policy for Drone Pursuit")
-    parser.add_argument("--episodes", type=int, default=120, help="Number of expert demonstrations")
-    parser.add_argument("--epochs", type=int, default=35, help="Training epochs")
+    parser.add_argument("--episodes", type=int, default=1000, help="Number of expert demonstrations")
+    parser.add_argument("--epochs", type=int, default=40, help="Training epochs")
+    parser.add_argument("--batch-size", type=int, default=32, help="Batch size for training")
     parser.add_argument("--output-dir", type=str, default="control/weights/cloned_expert_v1", help="Output directory")
     args = parser.parse_args()
     
     train_behavioral_cloning(
         num_episodes=args.episodes,
         epochs=args.epochs,
+        batch_size=args.batch_size,
         output_dir=args.output_dir
     )

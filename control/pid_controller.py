@@ -72,8 +72,8 @@ class KinematicVisualServoController:
         ki_z: float = None,
         kd_z: float = None,
         # Output Saturation Limits per axis: [Forward, Lateral, Vertical, Yaw]
-        min_limits: np.ndarray = None,       # Default: [-0.5 m/s fwd (gentle reverse cushion), -2.5 m/s lat, -2.5 m/s climb, -90 deg/s yaw]
-        max_limits: np.ndarray = None,       # Default: [12.0 m/s fwd, +2.5 m/s lat, +1.5 m/s desc, +90 deg/s yaw]
+        min_limits: np.ndarray = None,       # Default: [-0.5 m/s fwd (gentle reverse cushion), -4.0 m/s lat, -3.0 m/s climb, -120 deg/s yaw]
+        max_limits: np.ndarray = None,       # Default: [15.0 m/s fwd, +4.0 m/s lat, +2.0 m/s desc, +120 deg/s yaw]
         # Integrator Anti-Windup Clamping Bounds
         int_limits: np.ndarray = None,       # Forward and Lateral integrators are 0.0 (kinematic surge + PD sway)
         # Acceleration & Slew Rate Limits (Calibrated for ~2 kg quadrotor flight envelope)
@@ -87,8 +87,11 @@ class KinematicVisualServoController:
         enable_lateral_strafe: bool = True,
         kp_lat: float = 2.5,                 # Lateral proportional gain (m/s per unit error_x)
         kd_lat: float = 0.35,                # Lateral derivative damping (counteracts roll-induced visual swings)
-        max_lat_vel: float = 2.5,            # Maximum lateral velocity in m/s (matched identically to RL envelope)
-        max_lat_accel: float = 4.0,          # Maximum lateral acceleration in m/s^2 for agile roll initiation
+        max_lat_vel: float = 4.0,            # Maximum lateral velocity in m/s (matched identically to RL envelope)
+        max_lat_accel: float = 5.0,          # Maximum lateral acceleration in m/s^2 for agile roll initiation
+        kp_forward: float = 1.2,             # Forward throttle modulation gain (m/s per meter of distance error)
+        centering_damping: float = 0.15,     # Cornering deceleration factor per unit horizontal error
+        min_centering_factor: float = 0.85,  # Maximum speed retention floor during sharp turns
         search_mode: str = "decay",          # 'decay' (smooth forward speed decay), 'brake' (immediate active hover), or 'legacy_coast'
         coast_mode: str = "decay",           # 'decay' (inhibit forward acceleration & smooth decay), 'brake' (immediate hover), or 'follow'
     ):
@@ -100,6 +103,9 @@ class KinematicVisualServoController:
         self.use_bbox_size = use_bbox_size
         self.scale_mode = str(scale_mode).lower().strip()
         self.deadband_dist = float(deadband_dist)
+        self.kp_forward = float(kp_forward)
+        self.centering_damping = float(centering_damping)
+        self.min_centering_factor = float(min_centering_factor)
         self.search_mode = str(search_mode).lower().strip()
         self.coast_mode = str(coast_mode).lower().strip()
 
@@ -137,7 +143,7 @@ class KinematicVisualServoController:
         if kd_z is not None:   self.kd[2] = kd_z
 
         # Output Saturation Limits per axis: [Forward, Lateral, Vertical, Yaw]
-        yaw_limit = float(max_yawspeed_deg) if max_yawspeed_deg is not None else 90.0
+        yaw_limit = float(max_yawspeed_deg) if max_yawspeed_deg is not None else 120.0
         lat_limit = float(max_lat_vel)
 
         if min_limits is not None:
@@ -148,9 +154,9 @@ class KinematicVisualServoController:
                 vx_min = float(min_limits[0])
                 self.min_limits = np.array([vx_min, -lat_limit, min_limits[1], min_limits[2]], dtype=np.float64)
             else:
-                self.min_limits = np.array([-0.5, -lat_limit, -2.5, -yaw_limit], dtype=np.float64)
+                self.min_limits = np.array([-0.5, -lat_limit, -3.0, -yaw_limit], dtype=np.float64)
         else:
-            self.min_limits = np.array([-0.5, -lat_limit, -2.5, -yaw_limit], dtype=np.float64)
+            self.min_limits = np.array([-0.5, -lat_limit, -3.0, -yaw_limit], dtype=np.float64)
 
         if max_limits is not None:
             if len(max_limits) == 4:
@@ -158,9 +164,9 @@ class KinematicVisualServoController:
             elif len(max_limits) == 3:
                 self.max_limits = np.array([max_limits[0], lat_limit, max_limits[1], max_limits[2]], dtype=np.float64)
             else:
-                self.max_limits = np.array([12.0, lat_limit, 1.5, yaw_limit], dtype=np.float64)
+                self.max_limits = np.array([15.0, lat_limit, 2.0, yaw_limit], dtype=np.float64)
         else:
-            self.max_limits = np.array([12.0, lat_limit, 1.5, yaw_limit], dtype=np.float64)
+            self.max_limits = np.array([15.0, lat_limit, 2.0, yaw_limit], dtype=np.float64)
 
         if int_limits is not None:
             if len(int_limits) == 4:
@@ -472,7 +478,7 @@ class KinematicVisualServoController:
         # match moving target cruise velocity and modulate forward throttle proportionally to distance error:
         #   v_fwd = v_target_cruise + K_dist * dist_signal
         nominal_cruise_speed = target_vx_ff if target_vx_ff > 0.5 else 3.5
-        kp_forward = 1.2  # Velocity modulation gain: ~1.2 m/s per meter of distance error
+        kp_forward = self.kp_forward
 
         if dist_signal > self.deadband_dist:
             eff_err = dist_signal - self.deadband_dist
@@ -487,7 +493,7 @@ class KinematicVisualServoController:
 
         # Centering damping: gently trim excess surge during sharp lateral maneuvers without killing pursuit momentum
         if raw_output[0] > 0.0:
-            centering_factor = max(0.85, 1.0 - horiz_err_norm * 0.15)
+            centering_factor = max(self.min_centering_factor, 1.0 - horiz_err_norm * self.centering_damping)
             raw_output[0] *= centering_factor
 
         # COASTING behavior governance:

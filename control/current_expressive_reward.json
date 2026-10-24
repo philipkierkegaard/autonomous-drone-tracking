@@ -1,0 +1,14 @@
+{
+  "r_arrival": 140.0,
+  "tau_arrival": 3.5,
+  "dist_peak": 8.0,
+  "dist_sigma": 1.5,
+  "dist_pull": 0.35,
+  "blast_base": 25.0,
+  "dwell_scale": 10.0,
+  "p_collision": 0.0,
+  "p_ground": -20.0,
+  "pn_lead_weight": 3.5,
+  "collision_dist": 0.9,
+  "sprint_weight": 3.5
+}

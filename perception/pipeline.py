@@ -421,12 +421,16 @@ class DroneTrackingPipeline:
         enable_kalman: bool = True,
         imgsz: Optional[int] = None,
         device: Optional[str] = None,
-        enable_ego_ablation: bool = False
+        enable_ego_ablation: bool = False,
+        min_crop_size: Optional[int] = 768,
+        zoom_lost_threshold: int = 3
     ):
         self.conf_threshold = conf_threshold
         self.iou_threshold = iou_threshold
         self.enable_kalman = enable_kalman
         self.imgsz = imgsz
+        self.min_crop_size = min_crop_size
+        self.zoom_lost_threshold = zoom_lost_threshold
         if device is not None:
             self.device = device
         elif torch.backends.mps.is_available():
@@ -680,10 +684,11 @@ class DroneTrackingPipeline:
                         self.target_zoom = float(np.clip(zoom_calc, 1.0, self.max_zoom))
                     break
 
-        # Failsafe: if target is lost/coasting for >= 3 frames while zoomed, snap back to wide FOV
-        if primary_trk is None or (primary_trk.time_since_update >= 3):
+        # Failsafe: if target is lost/coasting for >= zoom_lost_threshold frames while zoomed, snap back to wide FOV
+        lost_thresh = getattr(self, "zoom_lost_threshold", 3)
+        if primary_trk is None or (primary_trk.time_since_update >= lost_thresh):
             self.target_zoom = 1.0
-            if self.current_zoom > 1.2:
+            if self.current_zoom > 1.12:
                 self.current_zoom = 1.0  # Instant wide FOV search fallback
             self.smooth_crop_center = None
 
@@ -704,6 +709,15 @@ class DroneTrackingPipeline:
             # Calculate crop dimensions in native sensor pixels
             crop_w = int(w / self.current_zoom)
             crop_h = int(h / self.current_zoom)
+
+            # Clamp crop dimensions to never be less than min_crop_size (default: 768px)
+            # without exceeding the frame's native width and height
+            min_crop = getattr(self, "min_crop_size", 768)
+            if min_crop is not None:
+                min_w = min(w, min_crop)
+                min_h = min(h, min_crop)
+                crop_w = max(min_w, crop_w)
+                crop_h = max(min_h, crop_h)
 
             tcx, tcy = target_pred_center
             if self.smooth_crop_center is None:
@@ -733,6 +747,7 @@ class DroneTrackingPipeline:
             inference_input = frame
 
         # Run YOLOv8 inference (on crop or full frame)
+        t_infer_start = time.perf_counter()
         results = self.model.predict(
             source=inference_input,
             imgsz=self.imgsz,
@@ -741,6 +756,8 @@ class DroneTrackingPipeline:
             iou=self.iou_threshold,
             verbose=False
         )
+        t_infer_end = time.perf_counter()
+
 
         detections = []
         confs = []
@@ -762,6 +779,7 @@ class DroneTrackingPipeline:
         # ----------------------------------------------------------------------
         # 3. Update 8D Kalman Filter in Global Sensor Coordinates (or Pure Raw Mode)
         # ----------------------------------------------------------------------
+        t_track_start = time.perf_counter()
         if self.enable_kalman:
             active_tracks = self.tracker.update(detections, confs, ego_shifts=ego_shifts, dt_step=frame_dt)
             primary_track = None
@@ -826,6 +844,7 @@ class DroneTrackingPipeline:
             else:
                 self.raw_prev_target = None
                 self.raw_trajectory.clear()
+        t_track_end = time.perf_counter()
 
         # ----------------------------------------------------------------------
         # 4. Extract Visual Servoing Flight Control Telemetry
@@ -974,17 +993,25 @@ class DroneTrackingPipeline:
         telemetry["fps"] = float(np.mean(self.fps_history))
         self.frame_idx += 1
 
+        t_post_end = time.perf_counter()
+        telemetry["timings"] = {
+            "preprocess_ms": float((t_infer_start - t_start) * 1000.0),
+            "inference_ms": float((t_infer_end - t_infer_start) * 1000.0),
+            "tracking_ms": float((t_track_end - t_track_start) * 1000.0),
+            "telemetry_ms": float((t_post_end - t_track_end) * 1000.0),
+            "pipeline_total_ms": float((t_post_end - t_start) * 1000.0)
+        }
+
         # ----------------------------------------------------------------------
         # 5. Render Aeronautical HUD (True Zoom POV or Wide View)
         # ----------------------------------------------------------------------
         if draw_hud:
+            t_render_start = time.perf_counter()
             annotated = self._render_hud(frame, active_tracks, telemetry)
+            telemetry["timings"]["render_ms"] = float((time.perf_counter() - t_render_start) * 1000.0)
         else:
-            if self.view_mode == "zoom_pov" and is_zoomed and self.active_crop_box is not None:
-                zx1, zy1, zx2, zy2 = self.active_crop_box
-                annotated = cv2.resize(frame[zy1:zy2, zx1:zx2], (w, h), interpolation=cv2.INTER_LINEAR)
-            else:
-                annotated = frame.copy()
+            annotated = frame
+            telemetry["timings"]["render_ms"] = 0.0
 
         return annotated, telemetry
 

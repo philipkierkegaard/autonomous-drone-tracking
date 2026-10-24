@@ -19,6 +19,7 @@ Gymnasium interface supporting:
 """
 
 import sys
+import json
 from pathlib import Path
 from typing import Dict, Any, Tuple, Optional, Union
 import numpy as np
@@ -98,16 +99,16 @@ class DronePursuitEnv(gym.Env):
         self.max_decel = 4.0
 
         # Physical Kinematic Flight Envelope Limits (matched identically to KinematicVisualServoController & run_tracker.py)
-        self.max_fwd_vel = 12.0         # Forward speed cap: 12.0 m/s (sufficient to intercept 9.5 m/s hyper-evasive targets)
+        self.max_fwd_vel = 15.0         # Forward speed cap: 15.0 m/s (superior sprint closing against evasive targets)
         self.max_rev_vel = 0.5          # Max reverse cushion: 0.5 m/s
-        self.max_lat_vel = 2.5          # Max lateral velocity: 2.5 m/s
-        self.max_climb_vel = 2.5        # Max climb velocity: 2.5 m/s (NED: -2.5)
-        self.max_desc_vel = 1.5         # Max descent velocity: 1.5 m/s (NED: +1.5)
-        self.max_yaw_rate_deg = 90.0    # Max yaw rate: 90 deg/s
-        self.max_accel_xy = 6.0         # Max horizontal accel: 6.0 m/s^2 (agile intercept sprint)
+        self.max_lat_vel = 4.0          # Max lateral velocity: 4.0 m/s (agile roll-slide cornering)
+        self.max_climb_vel = 3.0        # Max climb velocity: 3.0 m/s (NED: -3.0)
+        self.max_desc_vel = 2.0         # Max descent velocity: 2.0 m/s (NED: +2.0)
+        self.max_yaw_rate_deg = 120.0   # Max yaw rate: 120 deg/s (matches Pixhawk & FastPixhawkQuadSim)
+        self.max_accel_xy = 6.0         # Max horizontal accel: 6.0 m/s^2 (agile intercept sprint, ~31.5 deg tilt)
         self.max_decel_xy = 6.0         # Max horizontal decel: 6.0 m/s^2 (calibrated braking)
         self.max_accel_z = 3.0          # Max vertical accel: 3.0 m/s^2
-        self.max_accel_yaw = 180.0      # Max yaw accel: 180 deg/s^2
+        self.max_accel_yaw = 240.0      # Max yaw accel: 240 deg/s^2 (agile corner tracking)
 
         # Empirical YOLO perception & Kalman tracking configuration
         self.use_empirical_perception = use_empirical_perception
@@ -213,9 +214,41 @@ class DronePursuitEnv(gym.Env):
         self.milestone_1s_awarded = False
         self.milestone_2s_awarded = False
         self.first_contact_awarded = False
+        self.first_bucket_awarded = False
+        self.bucket_entry_time: Optional[float] = None
+        self.expressive_cfg = self._load_expressive_cfg()
 
         # Flight Dynamics & Actuator Slew-Rate Memory
         self.last_physical_cmd = np.zeros(4, dtype=np.float64)
+
+    def _load_expressive_cfg(self) -> Dict[str, Any]:
+        """Loads expressive reward shaping parameters from control/current_expressive_reward.json if present."""
+        cfg_path = PROJECT_ROOT / "control" / "current_expressive_reward.json"
+        defaults = {
+            "r_arrival": 140.0,
+            "tau_arrival": 3.5,
+            "dist_peak": 8.0,
+            "dist_sigma": 1.5,
+            "dist_pull": 0.35,
+            "blast_base": 25.0,
+            "dwell_scale": 10.0,
+            "p_collision": 0.0,
+            "p_ground": -20.0,
+            "pn_lead_weight": 3.5,
+            "collision_dist": 0.9,
+            "sprint_weight": 3.5,
+        }
+        if cfg_path.exists():
+            try:
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    user_cfg = json.load(f)
+                    defaults.update(user_cfg)
+            except Exception:
+                pass
+        # Dynamically apply collision_dist override if provided
+        if "collision_dist" in defaults:
+            self.collision_dist = float(defaults["collision_dist"])
+        return defaults
 
     def _map_action_to_physical(self, action: np.ndarray) -> np.ndarray:
         """
@@ -544,6 +577,8 @@ class DronePursuitEnv(gym.Env):
         self.milestone_1s_awarded = False
         self.milestone_2s_awarded = False
         self.first_contact_awarded = False
+        self.first_bucket_awarded = False
+        self.bucket_entry_time = None
 
         # Project initial target state to camera sensor
         t_sim = 0.0
@@ -928,9 +963,18 @@ class DronePursuitEnv(gym.Env):
         r_first_contact = 0.0
         if in_basket and not self.first_contact_awarded:
             closing_speed = (self.prev_distance_error - dist_err) / self.dt
-            if closing_speed < 3.0:
+            if closing_speed < 3.0 and not self.reward_mode.startswith("expressive"):
                 self.first_contact_awarded = True
                 r_first_contact = 40.0 * time_decay_arrival
+
+        # Term 2C: Expressive Reverse-Exponential Fast-Arrival Jackpot
+        r_first_bucket = 0.0
+        if in_basket and not self.first_bucket_awarded:
+            self.first_bucket_awarded = True
+            self.bucket_entry_time = float(t_sim)
+            tau = float(self.expressive_cfg.get("tau_arrival", 4.5))
+            r_arr = float(self.expressive_cfg.get("r_arrival", 120.0))
+            r_first_bucket = r_arr * float(np.exp(-t_sim / max(0.5, tau)))
 
         if in_basket:
             self.cumulative_firing_window_s += self.dt
@@ -976,18 +1020,24 @@ class DronePursuitEnv(gym.Env):
             terminated = True
             termination_reason = "lock_dwell_achieved"
             terminal_reward = 80.0 + 120.0 * time_decay_arrival
+            if self.reward_mode.startswith("expressive"):
+                terminal_reward = 120.0 + 100.0 * float(np.exp(-t_sim / 6.0))
 
         # Physical Collision Breach (d < 1.2m) — True physical collision radius
         elif dist < self.collision_dist:
             terminated = True
             termination_reason = "collision"
             terminal_reward = 0.0
+            if self.reward_mode.startswith("expressive"):
+                terminal_reward = float(self.expressive_cfg.get("p_collision", -1.0))
 
         # Altitude Floor Breach (z > -1.0m in NED means altitude < 1.0m AGL)
         elif self.sim.pos[2] > -self.min_altitude_agl:
             terminated = True
             termination_reason = "ground_strike"
             terminal_reward = 0.0
+            if self.reward_mode.startswith("expressive"):
+                terminal_reward = float(self.expressive_cfg.get("p_ground", -20.0))
 
         # Target Lost Timeout (out of FOV for > 3.5s)
         elif self.time_lost > self.lost_target_timeout:
@@ -1364,6 +1414,47 @@ class DronePursuitEnv(gym.Env):
             if nc > 0.5 and nt > 0.5 and raw_in_view:
                 r_lead_vec = 2.5 * float(max(0.0, np.dot(v_c, v_t) / (nc * nt)))
             r_basket_dwell = (10.0 + 15.0 * dwell_progress) if in_basket else 0.0
+
+        elif self.reward_mode.startswith("expressive") or self.reward_mode == "expressive_iterative":
+            # Expressive Goal-Directed: Fast arrival + 3.5m continuous pull + bucket reward blast
+            r_alive = 0.50 if (raw_in_view and dist <= 6.0) else 0.0
+            dist_err_m = abs(dist - self.standoff_nominal)
+            sig = float(self.expressive_cfg.get("dist_sigma", 1.5))
+            peak = float(self.expressive_cfg.get("dist_peak", 8.0))
+            pull = float(self.expressive_cfg.get("dist_pull", 0.30))
+
+            if raw_in_view:
+                r_dist = peak * float(np.exp(-0.5 * (dist_err_m / sig)**2)) - pull * float(max(0.0, dist - self.standoff_max))
+            else:
+                r_dist = 1.0 * float(np.exp(-0.5 * (dist_err_m / 3.0)**2)) - 0.20 * float(max(0.0, dist - self.standoff_max))
+
+            # Bucket reward blast (base + quadratic dwell acceleration)
+            blast_b = float(self.expressive_cfg.get("blast_base", 15.0))
+            dwell_s = float(self.expressive_cfg.get("dwell_scale", 6.0))
+            r_basket_dwell = (blast_b + dwell_s * float(self.continuous_lock_dwell_s**2)) if in_basket else 0.0
+
+            # Proportional Navigation velocity vector alignment
+            pn_w = float(self.expressive_cfg.get("pn_lead_weight", 2.0))
+            v_c = self.sim.vel[:2]
+            v_t = target_vel_w[:2]
+            nc = float(np.linalg.norm(v_c))
+            nt = float(np.linalg.norm(v_t))
+            if nc > 0.5 and nt > 0.5 and raw_in_view and pn_w > 0:
+                r_lead_vec = pn_w * float(max(0.0, np.dot(v_c, v_t) / (nc * nt)))
+            else:
+                r_lead_vec = 0.0
+
+            # Sprint Closing & Speed Matching Potential
+            sprint_w = float(self.expressive_cfg.get("sprint_weight", 3.5))
+            if dist > self.standoff_max:
+                r_sprint = sprint_w * float(np.clip(closing_speed, -1.0, 6.0))
+            else:
+                r_sprint = 2.0 * float(np.exp(-0.5 * (closing_speed / 1.0)**2)) if abs(raw_ex) < 0.25 else 0.0
+
+            # Combined Progress: Sprint acceleration outside + arrival jackpot upon entry + speed matching inside
+            r_progress = r_first_bucket + r_sprint
+
+        else:
             # Default: "monotone_potential" (Linear-Exponential Hybrid)
             r_alive = 0.50 if (raw_in_view and dist <= 6.0) else 0.0
             dist_err_m = abs(dist - self.standoff_nominal)
