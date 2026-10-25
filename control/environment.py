@@ -69,6 +69,7 @@ class DronePursuitEnv(gym.Env):
         env_perception_mode: str = "nominal",
         reward_mode: str = "monotone_potential",
         profile_distribution: Optional[Tuple[float, float, float]] = None,
+        dwell_time_required_s: float = 1.0,
     ):
         super().__init__()
 
@@ -207,7 +208,7 @@ class DronePursuitEnv(gym.Env):
         self.last_camera_status = 0.0
 
         # Mission Objective: Reach 5.0m - 7.0m basket & maintain continuous lock
-        self.dwell_time_required = 3.0
+        self.dwell_time_required = float(dwell_time_required_s)
         self.continuous_lock_dwell_s = 0.0
         self.time_to_first_lock: Optional[float] = None
         self.lock_achieved = False
@@ -960,7 +961,7 @@ class DronePursuitEnv(gym.Env):
         r_first_contact = 0.0
         if in_basket and not self.first_contact_awarded:
             closing_speed = (self.prev_distance_error - dist_err) / self.dt
-            if closing_speed < 3.0 and not self.reward_mode.startswith("expressive"):
+            if closing_speed < 3.0 and not self.reward_mode.startswith("expressive") and self.reward_mode != "steep_funnel_bullseye":
                 self.first_contact_awarded = True
                 r_first_contact = 40.0 * time_decay_arrival
 
@@ -984,17 +985,20 @@ class DronePursuitEnv(gym.Env):
             dwell_rate = alignment_quality
             self.continuous_lock_dwell_s = min(self.dwell_time_required, self.continuous_lock_dwell_s + dwell_rate * self.dt)
 
-            # Milestone 1: 1.0s continuous lock
-            if self.continuous_lock_dwell_s >= 1.0 and not self.milestone_1s_awarded:
+            m1_thresh = 0.4 * self.dwell_time_required
+            m2_thresh = 0.7 * self.dwell_time_required
+
+            # Milestone 1: 40% of target continuous lock dwell
+            if self.continuous_lock_dwell_s >= m1_thresh and not self.milestone_1s_awarded:
                 self.milestone_1s_awarded = True
                 r_milestone += 15.0 + 20.0 * time_decay_arrival
 
-            # Milestone 2: 2.0s continuous lock
-            if self.continuous_lock_dwell_s >= 2.0 and not self.milestone_2s_awarded:
+            # Milestone 2: 70% of target continuous lock dwell
+            if self.continuous_lock_dwell_s >= m2_thresh and not self.milestone_2s_awarded:
                 self.milestone_2s_awarded = True
                 r_milestone += 25.0 + 35.0 * time_decay_arrival
 
-            # Goal: 3.0s continuous lock (interception jackpot)
+            # Goal: 100% continuous lock (interception jackpot)
             if self.continuous_lock_dwell_s >= self.dwell_time_required:
                 if not self.lock_achieved:
                     self.lock_achieved = True
@@ -1007,9 +1011,11 @@ class DronePursuitEnv(gym.Env):
             self.continuous_lock_dwell_s = max(0.0, self.continuous_lock_dwell_s - 0.5 * self.dt)
             if self.continuous_lock_dwell_s <= 0.0 and not self.first_bucket_awarded:
                 self.bucket_entry_time = None
-            if self.continuous_lock_dwell_s < 1.0:
+            m1_thresh = 0.4 * self.dwell_time_required
+            m2_thresh = 0.7 * self.dwell_time_required
+            if self.continuous_lock_dwell_s < m1_thresh:
                 self.milestone_1s_awarded = False
-            if self.continuous_lock_dwell_s < 2.0:
+            if self.continuous_lock_dwell_s < m2_thresh:
                 self.milestone_2s_awarded = False
 
         # 5. Check Termination & Truncation Criteria
@@ -1030,23 +1036,23 @@ class DronePursuitEnv(gym.Env):
         elif dist < self.collision_dist:
             terminated = True
             termination_reason = "collision"
-            terminal_reward = 0.0
+            terminal_reward = -30.0
             if self.reward_mode.startswith("expressive"):
-                terminal_reward = float(self.expressive_cfg.get("p_collision", -20.0))
+                terminal_reward = float(self.expressive_cfg.get("p_collision", -30.0))
 
         # Altitude Floor Breach (z > -1.0m in NED means altitude < 1.0m AGL)
         elif self.sim.pos[2] > -self.min_altitude_agl:
             terminated = True
             termination_reason = "ground_strike"
-            terminal_reward = 0.0
+            terminal_reward = -30.0
             if self.reward_mode.startswith("expressive"):
-                terminal_reward = float(self.expressive_cfg.get("p_ground", -20.0))
+                terminal_reward = float(self.expressive_cfg.get("p_ground", -30.0))
 
         # Target Lost Timeout (out of FOV for > 3.5s)
         elif self.time_lost > self.lost_target_timeout:
             terminated = True
             termination_reason = "lost_target_timeout"
-            terminal_reward = 0.0
+            terminal_reward = -15.0
 
         # Time Horizon Reached (25.0 seconds = 1250 steps)
         elif self.step_count >= self.max_steps:
@@ -1057,6 +1063,7 @@ class DronePursuitEnv(gym.Env):
         # 6. Reward Shaping Architectures (Selected by self.reward_mode)
         # -------------------------------------------------------------
         r_lead_vec = 0.0
+        r_center = 0.0
         closing_speed = (self.prev_distance_error - dist_err) / self.dt
         dwell_progress = min(1.0, self.continuous_lock_dwell_s / self.dwell_time_required)
 
@@ -1459,6 +1466,92 @@ class DronePursuitEnv(gym.Env):
             # Combined Progress: Sprint acceleration outside + arrival jackpot upon entry + speed matching inside
             r_progress = r_first_bucket + r_sprint
 
+        elif self.reward_mode == "grand_champion_synthesis":
+            # Ultimate Evolutionary Synthesis: Huber Standoff Well + Trail-Brake Cornering + PN Apex Lead + Dwell Escalator
+            r_alive = 0.50 if (raw_in_view and dist <= 6.0) else 0.0
+            dist_err_m = abs(dist - self.standoff_nominal)
+            # Huber potential field centered on 3.5m
+            delta = 1.0
+            if dist_err_m <= delta:
+                r_dist = 8.0 - 2.5 * (dist_err_m ** 2)
+            else:
+                r_dist = 8.0 - 2.5 * (delta ** 2) - 0.65 * (dist_err_m - delta)
+            if not raw_in_view:
+                r_dist = min(0.0, r_dist) - 0.35 * max(0.0, dist - self.standoff_max)
+
+            # Proportional Navigation Lead Pursuit
+            v_c = self.sim.vel[:2]
+            v_t = target_vel_w[:2]
+            nc = float(np.linalg.norm(v_c))
+            nt = float(np.linalg.norm(v_t))
+            if nc > 0.5 and nt > 0.5 and raw_in_view:
+                align = float(np.dot(v_c, v_t) / (nc * nt))
+                r_lead_vec = 3.5 * float(max(0.0, align))
+            else:
+                r_lead_vec = 0.0
+
+            # Decelerate-to-turn corner braking vs straight-line sprint
+            c_yaw, s_yaw = np.cos(self.sim.yaw), np.sin(self.sim.yaw)
+            v_fwd = float(c_yaw * self.sim.vel[0] + s_yaw * self.sim.vel[1])
+            if abs(raw_ex) < 0.20 and abs(self.filtered_d_ex) < 0.25:
+                # Straight-line tracking: reward closing sprint
+                r_progress = 4.0 * float(np.clip(closing_speed, 0.0, 5.0)) if dist > self.standoff_max else 1.5 * float(np.exp(-0.5 * (closing_speed / 1.0)**2))
+            else:
+                # Cornering: reward active braking and penalize carrying excessive surge into turns
+                r_brake = 3.0 * float(max(0.0, -action[0])) if v_fwd > 3.5 else 0.5
+                p_skid = 3.0 * float((v_fwd / 12.0) * max(0.0, abs(raw_ex) - 0.15))
+                r_progress = r_brake - p_skid
+
+            # Continuous formation hold dwell escalator
+            dwell_progress = min(1.0, float(self.continuous_lock_dwell_s / self.dwell_time_required))
+            r_basket_dwell = (10.0 + 15.0 * (dwell_progress ** 1.5)) if in_basket else 0.0
+
+        elif self.reward_mode == "steep_funnel_bullseye":
+            # Continuous Variable-Curvature Funnel: Steep Lorentzian Centering x Continuous Standoff Well
+            r_alive = 0.0
+
+            # 1. Standoff Potential Field centered on 3.5m (C^1 continuous piece-wise)
+            if dist < self.standoff_min:
+                r_standoff = 6.0 - 4.0 * float(self.standoff_min - dist)
+            elif dist <= self.standoff_max:
+                r_standoff = 10.0 - 4.0 * float((dist - self.standoff_nominal) ** 2)
+            else:
+                r_standoff = 6.0 - 1.5 * float(dist - self.standoff_max)
+
+            # 2. Distance-Adaptive Steep Lorentzian Centering
+            if raw_in_view:
+                e_opt = float(np.sqrt(raw_ex_unclipped**2 + raw_ey_unclipped**2))
+                sigma_cam = 0.15 + 0.04 * float(max(0.0, dist - self.standoff_nominal))
+                r_center = float(1.0 / (1.0 + (e_opt / sigma_cam) ** 2))
+            else:
+                e_opt = 1.0
+                r_center = 0.0
+
+            # 3. Multiplicative Coupling: centering acts as a gating funnel for positive standoff rewards
+            if r_standoff > 0.0:
+                r_dist = r_standoff * r_center
+            else:
+                # Outside basket beyond 8.5m: unconditional negative distance bleed regardless of centering
+                r_dist = r_standoff
+
+            # 4. Relative Closing Speed Progress Term
+            if dist > self.standoff_max:
+                # Reward closing sprint toward 3.5m, penalize hovering or retreating
+                r_progress = 3.5 * float(np.clip(closing_speed, -2.0, 6.0))
+            elif dist >= self.standoff_min:
+                # Inside basket: reward velocity matching (closing speed near 0)
+                r_progress = 2.0 * float(np.exp(-0.5 * (closing_speed / 0.8) ** 2))
+            else:
+                # Inside collision zone: reward moving back out toward 3.5m
+                r_progress = 2.5 * float(np.clip(closing_speed, -3.0, 3.0))
+
+            # 5. Continuous Basket Dwell Escalator
+            if in_basket and e_opt < 0.25:
+                dwell_progress = min(1.0, float(self.continuous_lock_dwell_s / self.dwell_time_required))
+                r_basket_dwell = 8.0 * (1.0 + dwell_progress)
+            else:
+                r_basket_dwell = 0.0
+
         else:
             # Default: "monotone_potential" (Linear-Exponential Hybrid)
             r_alive = 0.50 if (raw_in_view and dist <= 6.0) else 0.0
@@ -1476,7 +1569,10 @@ class DronePursuitEnv(gym.Env):
             r_basket_dwell = (8.0 + 10.0 * dwell_progress) if in_basket else 0.0
 
         # Continuous Field-of-View Retention & Centering Guidance
-        if raw_in_view:
+        if self.reward_mode == "steep_funnel_bullseye":
+            r_fov = 0.0
+            r_lead = 0.0
+        elif raw_in_view:
             ang_err = float(np.sqrt(raw_ex_unclipped**2 + raw_ey_unclipped**2))
             r_fov_base = 2.0 / (1.0 + (ang_err / 0.45)**2)
             dist_fov_scale = float(1.0 / (1.0 + max(0.0, dist - self.standoff_max) / 6.0))
@@ -1562,6 +1658,15 @@ class DronePursuitEnv(gym.Env):
         if self.reward_mode.startswith("expressive") and not raw_in_view:
             p_lost = float(self.expressive_cfg.get("p_lost_fov", -1.5))
             step_reward = p_lost + terminal_reward
+        elif self.reward_mode == "steep_funnel_bullseye":
+            if not raw_in_view:
+                step_reward = -2.5 - 0.3 * float(max(0.0, dist - self.standoff_nominal)) + terminal_reward
+            else:
+                r_core = r_dist + r_progress + r_basket_dwell
+                if r_core > 0.0:
+                    step_reward = r_core * q_smooth * q_alt * q_pitch - p_effort + terminal_reward
+                else:
+                    step_reward = r_core - p_effort + terminal_reward
         else:
             step_reward = max(0.05, r_positive * q_fov * q_smooth * q_alt * q_pitch * q_speed - p_effort) + terminal_reward
 
@@ -1582,7 +1687,7 @@ class DronePursuitEnv(gym.Env):
             "p_effort": float(p_effort),
             "termination_reason": termination_reason,
             "r_fov": float(r_fov),
-            "r_center": 0.0,
+            "r_center": float(r_center),
             "p_edge": float(p_edge),
             "r_dist": float(r_dist),
             "r_gamma": float(r_dist),

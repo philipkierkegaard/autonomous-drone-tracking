@@ -112,7 +112,7 @@ def simulate_scenario(
     )
     sim.reset(initial_pos=np.array(c_init, dtype=np.float64), initial_yaw=c_yaw, initial_vel=c_vel)
 
-    # 2. Candidate Controller
+    # 2. Candidate Controller (Normal PID across all 4 axes with zero integral terms)
     ctrl = KinematicVisualServoController(
         camera_uptilt_deg=15.0,
         hfov_deg=62.0,
@@ -123,16 +123,24 @@ def simulate_scenario(
         use_bbox_size=True,
         enable_lateral_strafe=True,
         kp_forward=float(kp_fwd),
+        ki_forward=0.0,
+        kd_forward=0.15,
         centering_damping=float(centering_damp),
         min_centering_factor=float(min_centering),
         kp_lat=float(kp_lat),
+        ki_lat=0.0,
         kd_lat=float(kd_lat),
+        kp_z=6.0,
+        ki_z=0.0,
+        kd_z=1.0,
         kp_yaw=float(kp_yaw),
+        ki_yaw=0.0,
         kd_yaw=float(kd_yaw),
         max_lat_vel=4.0,
-        max_lat_accel=5.0,
+        max_lat_accel=6.0,
         max_accel=6.0,
         max_decel=6.0,
+        max_accel_yaw=240.0,
         min_limits=np.array([-0.5, -4.0, -3.0, -120.0]),
         max_limits=np.array([15.0,  4.0,  2.0,  120.0]),
     )
@@ -339,9 +347,38 @@ def run_tuning_optimization(
     print(f"        Tuned Parameters:   {opt_params.round(3)}")
     print(f"        Final Tuned Cost:   {opt_cost:.4f} (Baseline: {baseline_cost:.4f}, Prev Tuned: {prev_cost:.4f}, Improvement: {pct_gain:+.1f}%)")
 
-    param_names = ["kp_forward", "centering_damping", "min_centering_factor", "kp_lat", "kd_lat", "kp_yaw", "kd_yaw"]
-    tuned_dict = {name: float(val) for name, val in zip(param_names, opt_params)}
-    baseline_dict = {name: float(val) for name, val in zip(param_names, baseline_params)}
+    tuned_dict = {
+        "kp_forward": float(opt_params[0]),
+        "ki_forward": 0.0,
+        "kd_forward": 0.15,
+        "centering_damping": float(opt_params[1]),
+        "min_centering_factor": float(opt_params[2]),
+        "kp_lat": float(opt_params[3]),
+        "ki_lat": 0.0,
+        "kd_lat": float(opt_params[4]),
+        "kp_z": 6.0,
+        "ki_z": 0.0,
+        "kd_z": 1.0,
+        "kp_yaw": float(opt_params[5]),
+        "ki_yaw": 0.0,
+        "kd_yaw": float(opt_params[6]),
+    }
+    baseline_dict = {
+        "kp_forward": float(baseline_params[0]),
+        "ki_forward": 0.0,
+        "kd_forward": 0.15,
+        "centering_damping": float(baseline_params[1]),
+        "min_centering_factor": float(baseline_params[2]),
+        "kp_lat": float(baseline_params[3]),
+        "ki_lat": 0.0,
+        "kd_lat": float(baseline_params[4]),
+        "kp_z": 6.0,
+        "ki_z": 0.0,
+        "kd_z": 1.0,
+        "kp_yaw": float(baseline_params[5]),
+        "ki_yaw": 0.0,
+        "kd_yaw": float(baseline_params[6]),
+    }
 
     results = {
         "status": "SUCCESS",

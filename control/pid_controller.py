@@ -65,17 +65,23 @@ class KinematicVisualServoController:
         ki: np.ndarray = None,
         kd: np.ndarray = None,
         # Backward-compatible individual gain parameters
-        kp_yaw: float = None,
-        ki_yaw: float = None,
-        kd_yaw: float = None,
+        kp_forward: float = 1.2,
+        ki_forward: float = 0.0,
+        kd_forward: float = None,
+        kp_lat: float = 2.5,
+        ki_lat: float = 0.0,
+        kd_lat: float = 0.35,
         kp_z: float = None,
         ki_z: float = None,
         kd_z: float = None,
+        kp_yaw: float = None,
+        ki_yaw: float = None,
+        kd_yaw: float = None,
         # Output Saturation Limits per axis: [Forward, Lateral, Vertical, Yaw]
         min_limits: np.ndarray = None,       # Default: [-0.5 m/s fwd (gentle reverse cushion), -4.0 m/s lat, -3.0 m/s climb, -120 deg/s yaw]
         max_limits: np.ndarray = None,       # Default: [15.0 m/s fwd, +4.0 m/s lat, +2.0 m/s desc, +120 deg/s yaw]
         # Integrator Anti-Windup Clamping Bounds
-        int_limits: np.ndarray = None,       # Forward and Lateral integrators are 0.0 (kinematic surge + PD sway)
+        int_limits: np.ndarray = None,       # Anti-windup clamping bounds for active integrators
         # Acceleration & Slew Rate Limits (Calibrated for ~2 kg quadrotor flight envelope)
         max_accel: float = 6.0,              # m/s^2 forward acceleration (calibrated ~31.5 deg tilt ramp for 2 kg quad)
         max_decel: float = 6.0,              # m/s^2 calibrated braking deceleration (matched identically to RL envelope)
@@ -85,11 +91,8 @@ class KinematicVisualServoController:
         max_yawspeed_deg: float = None,
         # 4-DOF Lateral Strafe (Roll Tilt) Control
         enable_lateral_strafe: bool = True,
-        kp_lat: float = 2.5,                 # Lateral proportional gain (m/s per unit error_x)
-        kd_lat: float = 0.35,                # Lateral derivative damping (counteracts roll-induced visual swings)
         max_lat_vel: float = 4.0,            # Maximum lateral velocity in m/s (matched identically to RL envelope)
         max_lat_accel: float = 6.0,          # Maximum lateral acceleration in m/s^2 (matched identically to RL envelope)
-        kp_forward: float = 1.2,             # Forward throttle modulation gain (m/s per meter of distance error)
         centering_damping: float = 0.15,     # Cornering deceleration factor per unit horizontal error
         min_centering_factor: float = 0.35,  # Speed retention floor during sharp turns (allows braking down to 35% speed)
         search_mode: str = "decay",          # 'decay' (smooth forward speed decay), 'brake' (immediate active hover), or 'legacy_coast'
@@ -112,12 +115,25 @@ class KinematicVisualServoController:
         self.lost_time = 0.0
 
         # 4-DOF Gains: [Forward (X), Lateral (Y), Vertical (Z), Yaw (Psi)]
+        fwd_kp = float(kp_forward)
+        fwd_ki = float(ki_forward)
+        fwd_kd = float(kd_forward) if kd_forward is not None else 0.15
+
         lat_kp = float(kp_lat) if enable_lateral_strafe else 0.0
+        lat_ki = float(ki_lat) if enable_lateral_strafe else 0.0
         lat_kd = float(kd_lat) if enable_lateral_strafe else 0.0
-        # Axis 0 uses kinematic deceleration curve; integrator is 0.0 to prevent phantom windup.
-        default_kp = np.array([1.2, lat_kp, 6.0, 180.0], dtype=np.float64)
-        default_ki = np.array([0.0, 0.0, 0.5, 5.0], dtype=np.float64)
-        default_kd = np.array([0.15, lat_kd, 1.0, 20.0], dtype=np.float64)
+
+        z_kp = float(kp_z) if kp_z is not None else 6.0
+        z_ki = float(ki_z) if ki_z is not None else 0.0
+        z_kd = float(kd_z) if kd_z is not None else 1.0
+
+        yaw_kp = float(kp_yaw) if kp_yaw is not None else 180.0
+        yaw_ki = float(ki_yaw) if ki_yaw is not None else 0.0
+        yaw_kd = float(kd_yaw) if kd_yaw is not None else 20.0
+
+        default_kp = np.array([fwd_kp, lat_kp, z_kp, yaw_kp], dtype=np.float64)
+        default_ki = np.array([fwd_ki, lat_ki, z_ki, yaw_ki], dtype=np.float64)
+        default_kd = np.array([fwd_kd, lat_kd, z_kd, yaw_kd], dtype=np.float64)
 
         if kp is not None:
             self.kp = np.array(kp if len(kp) == 4 else [kp[0], lat_kp, kp[1], kp[2]], dtype=np.float64)
@@ -125,7 +141,7 @@ class KinematicVisualServoController:
             self.kp = default_kp.copy()
 
         if ki is not None:
-            self.ki = np.array(ki if len(ki) == 4 else [ki[0], 0.0, ki[1], ki[2]], dtype=np.float64)
+            self.ki = np.array(ki if len(ki) == 4 else [ki[0], lat_ki, ki[1], ki[2]], dtype=np.float64)
         else:
             self.ki = default_ki.copy()
 
@@ -135,12 +151,18 @@ class KinematicVisualServoController:
             self.kd = default_kd.copy()
 
         # Override individual gains if provided
-        if kp_yaw is not None: self.kp[3] = kp_yaw
-        if ki_yaw is not None: self.ki[3] = ki_yaw
-        if kd_yaw is not None: self.kd[3] = kd_yaw
-        if kp_z is not None:   self.kp[2] = kp_z
-        if ki_z is not None:   self.ki[2] = ki_z
-        if kd_z is not None:   self.kd[2] = kd_z
+        if kp_forward is not None: self.kp[0] = float(kp_forward)
+        if ki_forward is not None: self.ki[0] = float(ki_forward)
+        if kd_forward is not None: self.kd[0] = float(kd_forward)
+        if kp_lat is not None: self.kp[1] = float(kp_lat)
+        if ki_lat is not None: self.ki[1] = float(ki_lat)
+        if kd_lat is not None: self.kd[1] = float(kd_lat)
+        if kp_z is not None:   self.kp[2] = float(kp_z)
+        if ki_z is not None:   self.ki[2] = float(ki_z)
+        if kd_z is not None:   self.kd[2] = float(kd_z)
+        if kp_yaw is not None: self.kp[3] = float(kp_yaw)
+        if ki_yaw is not None: self.ki[3] = float(ki_yaw)
+        if kd_yaw is not None: self.kd[3] = float(kd_yaw)
 
         # Output Saturation Limits per axis: [Forward, Lateral, Vertical, Yaw]
         yaw_limit = float(max_yawspeed_deg) if max_yawspeed_deg is not None else 120.0
@@ -172,11 +194,11 @@ class KinematicVisualServoController:
             if len(int_limits) == 4:
                 self.int_limits = np.array(int_limits, dtype=np.float64)
             elif len(int_limits) == 3:
-                self.int_limits = np.array([0.0, 0.0, int_limits[1], int_limits[2]], dtype=np.float64)
+                self.int_limits = np.array([3.0, 2.0, int_limits[1], int_limits[2]], dtype=np.float64)
             else:
-                self.int_limits = np.array([0.0, 0.0, 1.2, 25.0], dtype=np.float64)
+                self.int_limits = np.array([3.0, 2.0, 1.2, 25.0], dtype=np.float64)
         else:
-            self.int_limits = np.array([0.0, 0.0, 1.2, 25.0], dtype=np.float64)
+            self.int_limits = np.array([3.0, 2.0, 1.2, 25.0], dtype=np.float64)
 
         self.filter_tau = filter_tau
 
@@ -451,18 +473,20 @@ class KinematicVisualServoController:
         # ----------------------------------------------------------------------
         # 4. Vectorized Integrator Update with Anti-Windup Clamping
         # ----------------------------------------------------------------------
-        # Exclude Axis 0 (kinematic surge) and Axis 1 (PD sway) from integrator windup
         # Skip integrating errors during COASTING to prevent windup on dead-reckoned predictions
         if not is_coasting:
             tentative_out = p_term + self.ki * self.integral + d_term
             saturated_high = (tentative_out >= self.max_limits) & (e > 0)
             saturated_low  = (tentative_out <= self.min_limits) & (e < 0)
-            unclamped_mask = ~(saturated_high | saturated_low)
+            unclamped_mask = ~(saturated_high | saturated_low) & (self.ki > 0)
 
             self.integral[unclamped_mask] += e[unclamped_mask] * dt
-            self.integral[0] = 0.0  # Zero phantom windup on Axis 0
-            self.integral[1] = 0.0  # Zero phantom windup on Axis 1
+            # Axes with ki == 0 stay cleanly at 0.0
+            self.integral[self.ki == 0] = 0.0
             self.integral = np.clip(self.integral, -self.int_limits, self.int_limits)
+        else:
+            # During coasting, decay existing integrals gently
+            self.integral *= max(0.0, 1.0 - 0.5 * dt)
         i_term = self.ki * self.integral
 
         # ----------------------------------------------------------------------
@@ -482,22 +506,20 @@ class KinematicVisualServoController:
             dist_signal = dist_err
 
         # Pursuit Speed-Matching Guidance Law on Axis 0 (Forward Velocity):
-        # Rather than decelerating to 0 m/s relative to the ground (which treats the target as a stationary obstacle),
-        # match moving target cruise velocity and modulate forward throttle proportionally to distance error:
-        #   v_fwd = v_target_cruise + K_dist * dist_signal
+        # Match moving target cruise velocity and modulate forward throttle with normal PID:
+        #   v_fwd = v_target_cruise + Kp * eff_err + Ki * integral + Kd * deriv
         nominal_cruise_speed = target_vx_ff if target_vx_ff > 0.5 else 3.5
-        kp_forward = self.kp_forward
+        kp_forward = self.kp[0]
 
         if dist_signal > self.deadband_dist:
             eff_err = dist_signal - self.deadband_dist
-            v_kinematic = nominal_cruise_speed + kp_forward * eff_err
         elif dist_signal < -self.deadband_dist:
             eff_err = dist_signal + self.deadband_dist
-            v_kinematic = nominal_cruise_speed + kp_forward * eff_err
         else:
-            v_kinematic = nominal_cruise_speed
+            eff_err = 0.0
 
-        raw_output[0] = np.clip(v_kinematic + d_term[0], self.min_limits[0], self.max_limits[0])
+        v_pid = nominal_cruise_speed + kp_forward * eff_err + i_term[0] + d_term[0]
+        raw_output[0] = np.clip(v_pid, self.min_limits[0], self.max_limits[0])
 
         # Centering damping: gently trim excess surge during sharp lateral maneuvers without killing pursuit momentum
         if raw_output[0] > 0.0:

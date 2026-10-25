@@ -61,10 +61,11 @@ class StandaloneRecurrentPolicy(torch.nn.Module):
         deterministic: bool = True
     ) -> Tuple[np.ndarray, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
         with torch.no_grad():
+            dev = next(self.parameters()).device
             if not isinstance(obs, torch.Tensor):
-                obs_t = torch.as_tensor(obs, dtype=torch.float32)
+                obs_t = torch.as_tensor(obs, dtype=torch.float32, device=dev)
             else:
-                obs_t = obs.float()
+                obs_t = obs.float().to(dev)
 
             if obs_t.ndim == 1:
                 obs_t = obs_t.unsqueeze(0).unsqueeze(0)
@@ -75,7 +76,7 @@ class StandaloneRecurrentPolicy(torch.nn.Module):
                 state = None
 
             act_t, next_state = self(obs_t, state)
-            action = act_t.squeeze(1).numpy()
+            action = act_t.cpu().squeeze(1).numpy()
             if action.shape[0] == 1 and obs.ndim == 1:
                 return action[0], next_state
             return action, next_state

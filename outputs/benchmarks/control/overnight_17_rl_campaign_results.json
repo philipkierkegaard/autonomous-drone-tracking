@@ -1,0 +1,1122 @@
+{
+  "run_01_monotone_potential_cushion": {
+    "id": "run_01_monotone_potential_cushion",
+    "phase": "Phase I: Foundation & Safety",
+    "reward_mode": "monotone_potential",
+    "hypothesis": "Eliminates suicidal ground strikes by establishing negative terminal barriers while testing baseline standoff attraction.",
+    "notes": "Linear-Exponential Hybrid Standoff Well with Ground Strike Barrier (-30.0 terminal penalty)",
+    "lr": 0.0002,
+    "ent_coef": 0.002,
+    "hyper_weight": 0.45,
+    "elapsed_min": 36.79208611647288,
+    "best_task_score": -91.59755337303615,
+    "best_model_path": "/Users/philipkierkegaard/Development/autonomous-drone-tracking/control/weights/overnight_17_campaign/run_01_monotone_potential_cushion/best_model/best_model.zip",
+    "validation_metrics": {
+      "n_scenarios": 30,
+      "success_rate_pct": 0.0,
+      "fov_retention_pct": 19.221333333333337,
+      "firing_window_s": 0.06733333333333337,
+      "min_distance_m": 5.4145727715153855,
+      "collision_breaches": 2,
+      "collision_rate_pct": 6.666666666666667,
+      "by_profile": {
+        "cruising": {
+          "n": 9,
+          "success_rate": 0.0,
+          "fov_retention": 19.822222222222223,
+          "firing_window_s": 0.02666666666666666,
+          "min_distance_m": 6.1457826635108495
+        },
+        "evasive": {
+          "n": 14,
+          "success_rate": 0.0,
+          "fov_retention": 18.708571428571425,
+          "firing_window_s": 0.11857142857142862,
+          "min_distance_m": 5.336048541939936
+        },
+        "hyper_evasive": {
+          "n": 7,
+          "success_rate": 0.0,
+          "fov_retention": 19.474285714285717,
+          "firing_window_s": 0.017142857142857144,
+          "min_distance_m": 4.631494226672116
+        }
+      }
+    },
+    "heldout_metrics": {
+      "n_scenarios": 50,
+      "success_rate_pct": 0.0,
+      "fov_retention_pct": 17.363200000000003,
+      "firing_window_s": 0.05640000000000001,
+      "min_distance_m": 5.804671746424594,
+      "collision_breaches": 1,
+      "collision_rate_pct": 2.0,
+      "by_profile": {
+        "cruising": {
+          "n": 15,
+          "success_rate": 0.0,
+          "fov_retention": 17.40266666666667,
+          "firing_window_s": 0.13866666666666674,
+          "min_distance_m": 5.3335710910823355
+        },
+        "evasive": {
+          "n": 23,
+          "success_rate": 0.0,
+          "fov_retention": 16.99478260869565,
+          "firing_window_s": 0.02086956521739131,
+          "min_distance_m": 5.997143066430306
+        },
+        "hyper_evasive": {
+          "n": 12,
+          "success_rate": 0.0,
+          "fov_retention": 18.02,
+          "firing_window_s": 0.021666666666666664,
+          "min_distance_m": 6.024644202258135
+        }
+      }
+    },
+    "diagnostic_analysis": "**Low Catch Success (0.0%):** Although FOV was 17.4%, the continuous 3.0s lock condition was rarely satisfied (dwell: 0.06s). **Severe Field-of-View Loss (17.4%):** Agent regularly loses visual lock. Indicates insufficient cornering deceleration or weak directional re-acquisition. **Profile Breakdown:** Cruising: 0.0% catch / 17.4% FOV | Hyper-Evasive: 0.0% catch / 18.0% FOV. **Hyper-Evasive Deficit:** High-G target jinks exceed the policy's turn rate envelope without aggressive deceleration. **Safety Infraction:** 1 physical collision breaches (d < 1.2m). Closing speed at the basket entry exceeded safe kinematic glide-slope limits.",
+    "completed": true,
+    "timestamp": "2026-10-25 03:44:47"
+  },
+  "run_02_huber_loss_standoff_well": {
+    "id": "run_02_huber_loss_standoff_well",
+    "phase": "Phase I: Foundation & Safety",
+    "reward_mode": "huber_loss",
+    "hypothesis": "Linear gradients at long range prevent 30-50m drift without explosive gradient spikes near the basket.",
+    "notes": "Smooth Huber Loss Potential Field (delta=1.0m, constant linear pull outside 4.5m)",
+    "lr": 0.0002,
+    "ent_coef": 0.002,
+    "hyper_weight": 0.45,
+    "elapsed_min": 36.866959798336026,
+    "best_task_score": -44.30273213235748,
+    "best_model_path": "/Users/philipkierkegaard/Development/autonomous-drone-tracking/control/weights/overnight_17_campaign/run_02_huber_loss_standoff_well/best_model/best_model.zip",
+    "validation_metrics": {
+      "n_scenarios": 30,
+      "success_rate_pct": 0.0,
+      "fov_retention_pct": 17.362666666666666,
+      "firing_window_s": 0.01466666666666667,
+      "min_distance_m": 5.203854826556669,
+      "collision_breaches": 2,
+      "collision_rate_pct": 6.666666666666667,
+      "by_profile": {
+        "cruising": {
+          "n": 9,
+          "success_rate": 0.0,
+          "fov_retention": 17.82222222222222,
+          "firing_window_s": 0.0488888888888889,
+          "min_distance_m": 6.096546181407043
+        },
+        "evasive": {
+          "n": 14,
+          "success_rate": 0.0,
+          "fov_retention": 17.60571428571429,
+          "firing_window_s": 0.0,
+          "min_distance_m": 5.0858310745262
+        },
+        "hyper_evasive": {
+          "n": 7,
+          "success_rate": 0.0,
+          "fov_retention": 16.28571428571429,
+          "firing_window_s": 0.0,
+          "min_distance_m": 4.292156302952839
+        }
+      }
+    },
+    "heldout_metrics": {
+      "n_scenarios": 50,
+      "success_rate_pct": 0.0,
+      "fov_retention_pct": 17.105599999999995,
+      "firing_window_s": 0.023600000000000003,
+      "min_distance_m": 5.419693342219838,
+      "collision_breaches": 1,
+      "collision_rate_pct": 2.0,
+      "by_profile": {
+        "cruising": {
+          "n": 15,
+          "success_rate": 0.0,
+          "fov_retention": 17.65866666666667,
+          "firing_window_s": 0.05866666666666667,
+          "min_distance_m": 4.638217576020666
+        },
+        "evasive": {
+          "n": 23,
+          "success_rate": 0.0,
+          "fov_retention": 17.29391304347826,
+          "firing_window_s": 0.010434782608695653,
+          "min_distance_m": 5.743665299179326
+        },
+        "hyper_evasive": {
+          "n": 12,
+          "success_rate": 0.0,
+          "fov_retention": 16.05333333333333,
+          "firing_window_s": 0.005,
+          "min_distance_m": 5.775591799129784
+        }
+      }
+    },
+    "diagnostic_analysis": "**Low Catch Success (0.0%):** Although FOV was 17.1%, the continuous 3.0s lock condition was rarely satisfied (dwell: 0.02s). **Severe Field-of-View Loss (17.1%):** Agent regularly loses visual lock. Indicates insufficient cornering deceleration or weak directional re-acquisition. **Profile Breakdown:** Cruising: 0.0% catch / 17.7% FOV | Hyper-Evasive: 0.0% catch / 16.1% FOV. **Hyper-Evasive Deficit:** High-G target jinks exceed the policy's turn rate envelope without aggressive deceleration. **Safety Infraction:** 1 physical collision breaches (d < 1.2m). Closing speed at the basket entry exceeded safe kinematic glide-slope limits.",
+    "completed": true,
+    "timestamp": "2026-10-25 04:21:55"
+  },
+  "run_03_closing_speed_bell_glide_slope": {
+    "id": "run_03_closing_speed_bell_glide_slope",
+    "phase": "Phase I: Foundation & Safety",
+    "reward_mode": "closing_speed_bell",
+    "hypothesis": "Analytical glide-slope matching stops overshoot collisions by shaping closing speed to zero as distance reaches 3.5m.",
+    "notes": "Kinematic Deceleration Glide-Slope + Gaussian Bell on Approach Velocity",
+    "lr": 0.00018,
+    "ent_coef": 0.002,
+    "hyper_weight": 0.45,
+    "elapsed_min": 35.98622274796168,
+    "best_task_score": -45.78198798664038,
+    "best_model_path": "/Users/philipkierkegaard/Development/autonomous-drone-tracking/control/weights/overnight_17_campaign/run_03_closing_speed_bell_glide_slope/best_model/best_model.zip",
+    "validation_metrics": {
+      "n_scenarios": 30,
+      "success_rate_pct": 0.0,
+      "fov_retention_pct": 3.378666666666667,
+      "firing_window_s": 0.0013333333333333333,
+      "min_distance_m": 5.553098896944132,
+      "collision_breaches": 0,
+      "collision_rate_pct": 0.0,
+      "by_profile": {
+        "cruising": {
+          "n": 9,
+          "success_rate": 0.0,
+          "fov_retention": 3.0666666666666664,
+          "firing_window_s": 0.0,
+          "min_distance_m": 6.16805275637272
+        },
+        "evasive": {
+          "n": 14,
+          "success_rate": 0.0,
+          "fov_retention": 3.7085714285714286,
+          "firing_window_s": 0.002857142857142857,
+          "min_distance_m": 5.526980164297619
+        },
+        "hyper_evasive": {
+          "n": 7,
+          "success_rate": 0.0,
+          "fov_retention": 3.12,
+          "firing_window_s": 0.0,
+          "min_distance_m": 4.814681400114685
+        }
+      }
+    },
+    "heldout_metrics": {
+      "n_scenarios": 50,
+      "success_rate_pct": 0.0,
+      "fov_retention_pct": 4.8208,
+      "firing_window_s": 0.02,
+      "min_distance_m": 5.818209576202182,
+      "collision_breaches": 1,
+      "collision_rate_pct": 2.0,
+      "by_profile": {
+        "cruising": {
+          "n": 15,
+          "success_rate": 0.0,
+          "fov_retention": 4.442666666666668,
+          "firing_window_s": 0.026666666666666665,
+          "min_distance_m": 5.403896712130281
+        },
+        "evasive": {
+          "n": 23,
+          "success_rate": 0.0,
+          "fov_retention": 5.224347826086956,
+          "firing_window_s": 0.018260869565217393,
+          "min_distance_m": 5.899766328898221
+        },
+        "hyper_evasive": {
+          "n": 12,
+          "success_rate": 0.0,
+          "fov_retention": 4.52,
+          "firing_window_s": 0.015000000000000001,
+          "min_distance_m": 6.179783546957986
+        }
+      }
+    },
+    "diagnostic_analysis": "**Low Catch Success (0.0%):** Although FOV was 4.8%, the continuous 3.0s lock condition was rarely satisfied (dwell: 0.02s). **Severe Field-of-View Loss (4.8%):** Agent regularly loses visual lock. Indicates insufficient cornering deceleration or weak directional re-acquisition. **Profile Breakdown:** Cruising: 0.0% catch / 4.4% FOV | Hyper-Evasive: 0.0% catch / 4.5% FOV. **Hyper-Evasive Deficit:** High-G target jinks exceed the policy's turn rate envelope without aggressive deceleration. **Safety Infraction:** 1 physical collision breaches (d < 1.2m). Closing speed at the basket entry exceeded safe kinematic glide-slope limits.",
+    "completed": true,
+    "timestamp": "2026-10-25 04:58:10"
+  },
+  "run_04_cumulative_dwell_jackpot": {
+    "id": "run_04_cumulative_dwell_jackpot",
+    "phase": "Phase I: Foundation & Safety",
+    "reward_mode": "cumulative_dwell_jackpot",
+    "hypothesis": "Superlinear dwell acceleration creates strong gradient to hold continuous lock rather than making high-speed passes.",
+    "notes": "Superlinear Dwell Scaling (rewards continuous formation hold over glancing passes)",
+    "lr": 0.00018,
+    "ent_coef": 0.002,
+    "hyper_weight": 0.45,
+    "elapsed_min": 35.0852064371109,
+    "best_task_score": -38.14525245937645,
+    "best_model_path": "/Users/philipkierkegaard/Development/autonomous-drone-tracking/control/weights/overnight_17_campaign/run_04_cumulative_dwell_jackpot/best_model/best_model.zip",
+    "validation_metrics": {
+      "n_scenarios": 30,
+      "success_rate_pct": 0.0,
+      "fov_retention_pct": 7.136000000000001,
+      "firing_window_s": 0.034,
+      "min_distance_m": 3.874433656656394,
+      "collision_breaches": 1,
+      "collision_rate_pct": 3.3333333333333335,
+      "by_profile": {
+        "cruising": {
+          "n": 9,
+          "success_rate": 0.0,
+          "fov_retention": 5.777777777777778,
+          "firing_window_s": 0.028888888888888884,
+          "min_distance_m": 4.323834944466703
+        },
+        "evasive": {
+          "n": 14,
+          "success_rate": 0.0,
+          "fov_retention": 5.794285714285714,
+          "firing_window_s": 0.028571428571428574,
+          "min_distance_m": 3.448582976685485
+        },
+        "hyper_evasive": {
+          "n": 7,
+          "success_rate": 0.0,
+          "fov_retention": 11.565714285714284,
+          "firing_window_s": 0.051428571428571435,
+          "min_distance_m": 4.1483333608421
+        }
+      }
+    },
+    "heldout_metrics": {
+      "n_scenarios": 50,
+      "success_rate_pct": 0.0,
+      "fov_retention_pct": 4.184,
+      "firing_window_s": 0.06520000000000004,
+      "min_distance_m": 4.438147565065247,
+      "collision_breaches": 3,
+      "collision_rate_pct": 6.0,
+      "by_profile": {
+        "cruising": {
+          "n": 15,
+          "success_rate": 0.0,
+          "fov_retention": 2.1813333333333333,
+          "firing_window_s": 0.02133333333333333,
+          "min_distance_m": 3.908029103039923
+        },
+        "evasive": {
+          "n": 23,
+          "success_rate": 0.0,
+          "fov_retention": 4.434782608695653,
+          "firing_window_s": 0.10347826086956527,
+          "min_distance_m": 3.923395758046161
+        },
+        "hyper_evasive": {
+          "n": 12,
+          "success_rate": 0.0,
+          "fov_retention": 6.206666666666667,
+          "firing_window_s": 0.04666666666666668,
+          "min_distance_m": 6.087403272716814
+        }
+      }
+    },
+    "diagnostic_analysis": "**Low Catch Success (0.0%):** Although FOV was 4.2%, the continuous 3.0s lock condition was rarely satisfied (dwell: 0.07s). **Severe Field-of-View Loss (4.2%):** Agent regularly loses visual lock. Indicates insufficient cornering deceleration or weak directional re-acquisition. **Profile Breakdown:** Cruising: 0.0% catch / 2.2% FOV | Hyper-Evasive: 0.0% catch / 6.2% FOV. **Hyper-Evasive Deficit:** High-G target jinks exceed the policy's turn rate envelope without aggressive deceleration. **Safety Infraction:** 3 physical collision breaches (d < 1.2m). Closing speed at the basket entry exceeded safe kinematic glide-slope limits.",
+    "completed": true,
+    "timestamp": "2026-10-25 05:33:30"
+  },
+  "run_05_trail_brake_corner_governor": {
+    "id": "run_05_trail_brake_corner_governor",
+    "phase": "Phase II: Agile Cornering",
+    "reward_mode": "trail_brake_corner_governor",
+    "hypothesis": "Prevents hyper-evasive blow-by by incentivizing deceleration to 2-3 m/s during hard target jinks.",
+    "notes": "Decelerate-to-Turn Governor: rewards active surge braking when |ex| > 0.25",
+    "lr": 0.00015,
+    "ent_coef": 0.0025,
+    "hyper_weight": 0.5,
+    "elapsed_min": 37.95752755006154,
+    "best_task_score": -104.38449249691212,
+    "best_model_path": "/Users/philipkierkegaard/Development/autonomous-drone-tracking/control/weights/overnight_17_campaign/run_05_trail_brake_corner_governor/best_model/best_model.zip",
+    "validation_metrics": {
+      "n_scenarios": 30,
+      "success_rate_pct": 0.0,
+      "fov_retention_pct": 12.967999999999998,
+      "firing_window_s": 0.008666666666666665,
+      "min_distance_m": 5.394731079600319,
+      "collision_breaches": 0,
+      "collision_rate_pct": 0.0,
+      "by_profile": {
+        "cruising": {
+          "n": 9,
+          "success_rate": 0.0,
+          "fov_retention": 13.102222222222224,
+          "firing_window_s": 0.02666666666666666,
+          "min_distance_m": 6.055374923095523
+        },
+        "evasive": {
+          "n": 14,
+          "success_rate": 0.0,
+          "fov_retention": 13.097142857142856,
+          "firing_window_s": 0.0014285714285714286,
+          "min_distance_m": 5.319207695971487
+        },
+        "hyper_evasive": {
+          "n": 7,
+          "success_rate": 0.0,
+          "fov_retention": 12.537142857142856,
+          "firing_window_s": 0.0,
+          "min_distance_m": 4.696378619507006
+        }
+      }
+    },
+    "heldout_metrics": {
+      "n_scenarios": 50,
+      "success_rate_pct": 0.0,
+      "fov_retention_pct": 12.8464,
+      "firing_window_s": 0.008400000000000001,
+      "min_distance_m": 5.6651760393056545,
+      "collision_breaches": 2,
+      "collision_rate_pct": 4.0,
+      "by_profile": {
+        "cruising": {
+          "n": 15,
+          "success_rate": 0.0,
+          "fov_retention": 13.178666666666667,
+          "firing_window_s": 0.02266666666666667,
+          "min_distance_m": 5.275816964664518
+        },
+        "evasive": {
+          "n": 23,
+          "success_rate": 0.0,
+          "fov_retention": 12.730434782608697,
+          "firing_window_s": 0.0,
+          "min_distance_m": 5.511661681777179
+        },
+        "hyper_evasive": {
+          "n": 12,
+          "success_rate": 0.0,
+          "fov_retention": 12.653333333333334,
+          "firing_window_s": 0.006666666666666667,
+          "min_distance_m": 6.44611073453665
+        }
+      }
+    },
+    "diagnostic_analysis": "**Low Catch Success (0.0%):** Although FOV was 12.8%, the continuous 3.0s lock condition was rarely satisfied (dwell: 0.01s). **Severe Field-of-View Loss (12.8%):** Agent regularly loses visual lock. Indicates insufficient cornering deceleration or weak directional re-acquisition. **Profile Breakdown:** Cruising: 0.0% catch / 13.2% FOV | Hyper-Evasive: 0.0% catch / 12.7% FOV. **Hyper-Evasive Deficit:** High-G target jinks exceed the policy's turn rate envelope without aggressive deceleration. **Safety Infraction:** 2 physical collision breaches (d < 1.2m). Closing speed at the basket entry exceeded safe kinematic glide-slope limits.",
+    "completed": true,
+    "timestamp": "2026-10-25 06:11:43"
+  },
+  "run_06_proportional_nav_apex_cutter": {
+    "id": "run_06_proportional_nav_apex_cutter",
+    "phase": "Phase II: Agile Cornering",
+    "reward_mode": "proportional_nav_apex_cutter",
+    "hypothesis": "Aligns velocity vector with target heading vector to cut the inside corner of evasive weave patterns.",
+    "notes": "Proportional Navigation Velocity Alignment: cuts evasive turn apexes",
+    "lr": 0.00015,
+    "ent_coef": 0.0025,
+    "hyper_weight": 0.5,
+    "elapsed_min": 36.488078848520914,
+    "best_task_score": -42.81058124997951,
+    "best_model_path": "/Users/philipkierkegaard/Development/autonomous-drone-tracking/control/weights/overnight_17_campaign/run_06_proportional_nav_apex_cutter/best_model/best_model.zip",
+    "validation_metrics": {
+      "n_scenarios": 30,
+      "success_rate_pct": 0.0,
+      "fov_retention_pct": 6.3306666666666676,
+      "firing_window_s": 0.023333333333333334,
+      "min_distance_m": 5.483967296342464,
+      "collision_breaches": 1,
+      "collision_rate_pct": 3.3333333333333335,
+      "by_profile": {
+        "cruising": {
+          "n": 9,
+          "success_rate": 0.0,
+          "fov_retention": 5.982222222222223,
+          "firing_window_s": 0.0,
+          "min_distance_m": 6.73501271765765
+        },
+        "evasive": {
+          "n": 14,
+          "success_rate": 0.0,
+          "fov_retention": 6.388571428571429,
+          "firing_window_s": 0.030000000000000006,
+          "min_distance_m": 5.362844018314497
+        },
+        "hyper_evasive": {
+          "n": 7,
+          "success_rate": 0.0,
+          "fov_retention": 6.662857142857143,
+          "firing_window_s": 0.039999999999999994,
+          "min_distance_m": 4.117726882136011
+        }
+      }
+    },
+    "heldout_metrics": {
+      "n_scenarios": 50,
+      "success_rate_pct": 0.0,
+      "fov_retention_pct": 6.5760000000000005,
+      "firing_window_s": 0.0184,
+      "min_distance_m": 5.908074704621074,
+      "collision_breaches": 0,
+      "collision_rate_pct": 0.0,
+      "by_profile": {
+        "cruising": {
+          "n": 15,
+          "success_rate": 0.0,
+          "fov_retention": 5.04,
+          "firing_window_s": 0.03733333333333334,
+          "min_distance_m": 5.741246028461204
+        },
+        "evasive": {
+          "n": 23,
+          "success_rate": 0.0,
+          "fov_retention": 6.375652173913043,
+          "firing_window_s": 0.012173913043478259,
+          "min_distance_m": 5.81666817404161
+        },
+        "hyper_evasive": {
+          "n": 12,
+          "success_rate": 0.0,
+          "fov_retention": 8.88,
+          "firing_window_s": 0.006666666666666667,
+          "min_distance_m": 6.291806400098216
+        }
+      }
+    },
+    "diagnostic_analysis": "**Low Catch Success (0.0%):** Although FOV was 6.6%, the continuous 3.0s lock condition was rarely satisfied (dwell: 0.02s). **Severe Field-of-View Loss (6.6%):** Agent regularly loses visual lock. Indicates insufficient cornering deceleration or weak directional re-acquisition. **Profile Breakdown:** Cruising: 0.0% catch / 5.0% FOV | Hyper-Evasive: 0.0% catch / 8.9% FOV. **Hyper-Evasive Deficit:** High-G target jinks exceed the policy's turn rate envelope without aggressive deceleration. **Clean Safety Record:** 0 collisions detected across all 50 held-out test encounters.",
+    "completed": true,
+    "timestamp": "2026-10-25 06:48:27"
+  },
+  "run_07_retinal_slip_kinetic_barrier": {
+    "id": "run_07_retinal_slip_kinetic_barrier",
+    "phase": "Phase II: Agile Cornering",
+    "reward_mode": "retinal_slip_kinetic_barrier",
+    "hypothesis": "Raptor attack law stabilizes line-of-sight angular rates before authorizing high-speed forward acceleration.",
+    "notes": "Biological Raptor Pursuit: high optical retinal slip triggers kinetic braking",
+    "lr": 0.00015,
+    "ent_coef": 0.0025,
+    "hyper_weight": 0.5,
+    "elapsed_min": 35.653377870718636,
+    "best_task_score": -80.86530637168013,
+    "best_model_path": "/Users/philipkierkegaard/Development/autonomous-drone-tracking/control/weights/overnight_17_campaign/run_07_retinal_slip_kinetic_barrier/best_model/best_model.zip",
+    "validation_metrics": {
+      "n_scenarios": 30,
+      "success_rate_pct": 0.0,
+      "fov_retention_pct": 21.101333333333333,
+      "firing_window_s": 0.05533333333333334,
+      "min_distance_m": 3.9899502847036428,
+      "collision_breaches": 3,
+      "collision_rate_pct": 10.0,
+      "by_profile": {
+        "cruising": {
+          "n": 9,
+          "success_rate": 0.0,
+          "fov_retention": 21.271111111111107,
+          "firing_window_s": 0.0977777777777778,
+          "min_distance_m": 3.5609754133814437
+        },
+        "evasive": {
+          "n": 14,
+          "success_rate": 0.0,
+          "fov_retention": 23.057142857142857,
+          "firing_window_s": 0.055714285714285716,
+          "min_distance_m": 3.7753218094708023
+        },
+        "hyper_evasive": {
+          "n": 7,
+          "success_rate": 0.0,
+          "fov_retention": 16.97142857142857,
+          "firing_window_s": 0.0,
+          "min_distance_m": 4.970746355440723
+        }
+      }
+    },
+    "heldout_metrics": {
+      "n_scenarios": 50,
+      "success_rate_pct": 0.0,
+      "fov_retention_pct": 16.1376,
+      "firing_window_s": 0.0172,
+      "min_distance_m": 5.487580467796526,
+      "collision_breaches": 2,
+      "collision_rate_pct": 4.0,
+      "by_profile": {
+        "cruising": {
+          "n": 15,
+          "success_rate": 0.0,
+          "fov_retention": 17.413333333333334,
+          "firing_window_s": 0.025333333333333333,
+          "min_distance_m": 4.913195144577941
+        },
+        "evasive": {
+          "n": 23,
+          "success_rate": 0.0,
+          "fov_retention": 16.076521739130442,
+          "firing_window_s": 0.0052173913043478265,
+          "min_distance_m": 5.644588715147879
+        },
+        "hyper_evasive": {
+          "n": 12,
+          "success_rate": 0.0,
+          "fov_retention": 14.660000000000002,
+          "firing_window_s": 0.030000000000000002,
+          "min_distance_m": 5.904629647729668
+        }
+      }
+    },
+    "diagnostic_analysis": "**Low Catch Success (0.0%):** Although FOV was 16.1%, the continuous 3.0s lock condition was rarely satisfied (dwell: 0.02s). **Severe Field-of-View Loss (16.1%):** Agent regularly loses visual lock. Indicates insufficient cornering deceleration or weak directional re-acquisition. **Profile Breakdown:** Cruising: 0.0% catch / 17.4% FOV | Hyper-Evasive: 0.0% catch / 14.7% FOV. **Hyper-Evasive Deficit:** High-G target jinks exceed the policy's turn rate envelope without aggressive deceleration. **Safety Infraction:** 2 physical collision breaches (d < 1.2m). Closing speed at the basket entry exceeded safe kinematic glide-slope limits.",
+    "completed": true,
+    "timestamp": "2026-10-25 07:24:23"
+  },
+  "run_08_centripetal_load_envelope": {
+    "id": "run_08_centripetal_load_envelope",
+    "phase": "Phase II: Agile Cornering",
+    "reward_mode": "centripetal_load_envelope",
+    "hypothesis": "Centripetal acceleration matching (v_safe = a_max / omega_turn) guarantees the drone stays inside camera turn envelope.",
+    "notes": "Physics Centripetal Load Matching: dynamically constrains surge speed by yaw rate",
+    "lr": 0.00015,
+    "ent_coef": 0.0025,
+    "hyper_weight": 0.5,
+    "elapsed_min": 38.04812168280284,
+    "best_task_score": -86.30575442806361,
+    "best_model_path": "/Users/philipkierkegaard/Development/autonomous-drone-tracking/control/weights/overnight_17_campaign/run_08_centripetal_load_envelope/best_model/best_model.zip",
+    "validation_metrics": {
+      "n_scenarios": 30,
+      "success_rate_pct": 0.0,
+      "fov_retention_pct": 18.786666666666672,
+      "firing_window_s": 0.024,
+      "min_distance_m": 5.502186861783014,
+      "collision_breaches": 0,
+      "collision_rate_pct": 0.0,
+      "by_profile": {
+        "cruising": {
+          "n": 9,
+          "success_rate": 0.0,
+          "fov_retention": 18.951111111111114,
+          "firing_window_s": 0.008888888888888889,
+          "min_distance_m": 6.665455796871511
+        },
+        "evasive": {
+          "n": 14,
+          "success_rate": 0.0,
+          "fov_retention": 18.41714285714286,
+          "firing_window_s": 0.04571428571428571,
+          "min_distance_m": 5.514179618513823
+        },
+        "hyper_evasive": {
+          "n": 7,
+          "success_rate": 0.0,
+          "fov_retention": 19.314285714285713,
+          "firing_window_s": 0.0,
+          "min_distance_m": 3.9825698603504662
+        }
+      }
+    },
+    "heldout_metrics": {
+      "n_scenarios": 50,
+      "success_rate_pct": 0.0,
+      "fov_retention_pct": 16.92,
+      "firing_window_s": 0.05000000000000001,
+      "min_distance_m": 5.686380741351257,
+      "collision_breaches": 2,
+      "collision_rate_pct": 4.0,
+      "by_profile": {
+        "cruising": {
+          "n": 15,
+          "success_rate": 0.0,
+          "fov_retention": 16.144,
+          "firing_window_s": 0.05066666666666667,
+          "min_distance_m": 4.951684612161348
+        },
+        "evasive": {
+          "n": 23,
+          "success_rate": 0.0,
+          "fov_retention": 16.591304347826085,
+          "firing_window_s": 0.06260869565217393,
+          "min_distance_m": 5.7678944008441695
+        },
+        "hyper_evasive": {
+          "n": 12,
+          "success_rate": 0.0,
+          "fov_retention": 18.52,
+          "firing_window_s": 0.024999999999999994,
+          "min_distance_m": 6.448516388810557
+        }
+      }
+    },
+    "diagnostic_analysis": "**Low Catch Success (0.0%):** Although FOV was 16.9%, the continuous 3.0s lock condition was rarely satisfied (dwell: 0.05s). **Severe Field-of-View Loss (16.9%):** Agent regularly loses visual lock. Indicates insufficient cornering deceleration or weak directional re-acquisition. **Profile Breakdown:** Cruising: 0.0% catch / 16.1% FOV | Hyper-Evasive: 0.0% catch / 18.5% FOV. **Hyper-Evasive Deficit:** High-G target jinks exceed the policy's turn rate envelope without aggressive deceleration. **Safety Infraction:** 2 physical collision breaches (d < 1.2m). Closing speed at the basket entry exceeded safe kinematic glide-slope limits.",
+    "completed": true,
+    "timestamp": "2026-10-25 08:02:42"
+  },
+  "run_09_optical_expansion_lead": {
+    "id": "run_09_optical_expansion_lead",
+    "phase": "Phase III: Sensor Robustness",
+    "reward_mode": "optical_expansion_lead",
+    "hypothesis": "Bypasses metric range estimation noise by directly regulating image-plane bounding box divergence.",
+    "notes": "Direct Image-Plane Bbox Expansion Rate Feedback (range-sensor invariant)",
+    "lr": 0.00015,
+    "ent_coef": 0.002,
+    "hyper_weight": 0.5,
+    "elapsed_min": 38.458196643988295,
+    "best_task_score": -93.95478068671368,
+    "best_model_path": "/Users/philipkierkegaard/Development/autonomous-drone-tracking/control/weights/overnight_17_campaign/run_09_optical_expansion_lead/best_model/best_model.zip",
+    "validation_metrics": {
+      "n_scenarios": 30,
+      "success_rate_pct": 0.0,
+      "fov_retention_pct": 19.088,
+      "firing_window_s": 0.012666666666666666,
+      "min_distance_m": 5.294038859401681,
+      "collision_breaches": 2,
+      "collision_rate_pct": 6.666666666666667,
+      "by_profile": {
+        "cruising": {
+          "n": 9,
+          "success_rate": 0.0,
+          "fov_retention": 19.564444444444447,
+          "firing_window_s": 0.0,
+          "min_distance_m": 6.53131801049047
+        },
+        "evasive": {
+          "n": 14,
+          "success_rate": 0.0,
+          "fov_retention": 19.194285714285712,
+          "firing_window_s": 0.005714285714285714,
+          "min_distance_m": 5.262112369331024
+        },
+        "hyper_evasive": {
+          "n": 7,
+          "success_rate": 0.0,
+          "fov_retention": 18.26285714285714,
+          "firing_window_s": 0.04285714285714286,
+          "min_distance_m": 3.767104359571693
+        }
+      }
+    },
+    "heldout_metrics": {
+      "n_scenarios": 50,
+      "success_rate_pct": 0.0,
+      "fov_retention_pct": 18.468799999999998,
+      "firing_window_s": 0.028800000000000006,
+      "min_distance_m": 5.6032696127828014,
+      "collision_breaches": 1,
+      "collision_rate_pct": 2.0,
+      "by_profile": {
+        "cruising": {
+          "n": 15,
+          "success_rate": 0.0,
+          "fov_retention": 18.784,
+          "firing_window_s": 0.03733333333333334,
+          "min_distance_m": 5.440864882889808
+        },
+        "evasive": {
+          "n": 23,
+          "success_rate": 0.0,
+          "fov_retention": 18.69565217391304,
+          "firing_window_s": 0.034782608695652174,
+          "min_distance_m": 5.360868141220478
+        },
+        "hyper_evasive": {
+          "n": 12,
+          "success_rate": 0.0,
+          "fov_retention": 17.64,
+          "firing_window_s": 0.006666666666666667,
+          "min_distance_m": 6.270878345643491
+        }
+      }
+    },
+    "diagnostic_analysis": "**Low Catch Success (0.0%):** Although FOV was 18.5%, the continuous 3.0s lock condition was rarely satisfied (dwell: 0.03s). **Severe Field-of-View Loss (18.5%):** Agent regularly loses visual lock. Indicates insufficient cornering deceleration or weak directional re-acquisition. **Profile Breakdown:** Cruising: 0.0% catch / 18.8% FOV | Hyper-Evasive: 0.0% catch / 17.6% FOV. **Hyper-Evasive Deficit:** High-G target jinks exceed the policy's turn rate envelope without aggressive deceleration. **Safety Infraction:** 1 physical collision breaches (d < 1.2m). Closing speed at the basket entry exceeded safe kinematic glide-slope limits.",
+    "completed": true,
+    "timestamp": "2026-10-25 08:41:25"
+  },
+  "run_10_tight_centering_border_penalty": {
+    "id": "run_10_tight_centering_border_penalty",
+    "phase": "Phase III: Sensor Robustness",
+    "reward_mode": "tight_centering",
+    "hypothesis": "Steep quartic frame border penalties force target into tight 20% central optical cone.",
+    "notes": "High-Gain Boresight Centering with Quartic Frame Border Dampening",
+    "lr": 0.00015,
+    "ent_coef": 0.002,
+    "hyper_weight": 0.5,
+    "elapsed_min": 35.88132404883702,
+    "best_task_score": -87.16507789561751,
+    "best_model_path": "/Users/philipkierkegaard/Development/autonomous-drone-tracking/control/weights/overnight_17_campaign/run_10_tight_centering_border_penalty/best_model/best_model.zip",
+    "validation_metrics": {
+      "n_scenarios": 30,
+      "success_rate_pct": 0.0,
+      "fov_retention_pct": 19.319999999999997,
+      "firing_window_s": 0.03733333333333334,
+      "min_distance_m": 5.270613931133266,
+      "collision_breaches": 1,
+      "collision_rate_pct": 3.3333333333333335,
+      "by_profile": {
+        "cruising": {
+          "n": 9,
+          "success_rate": 0.0,
+          "fov_retention": 20.275555555555556,
+          "firing_window_s": 0.04222222222222223,
+          "min_distance_m": 5.869146552691646
+        },
+        "evasive": {
+          "n": 14,
+          "success_rate": 0.0,
+          "fov_retention": 19.18857142857143,
+          "firing_window_s": 0.05285714285714287,
+          "min_distance_m": 5.149341418255481
+        },
+        "hyper_evasive": {
+          "n": 7,
+          "success_rate": 0.0,
+          "fov_retention": 18.354285714285712,
+          "firing_window_s": 0.0,
+          "min_distance_m": 4.743617014885202
+        }
+      }
+    },
+    "heldout_metrics": {
+      "n_scenarios": 50,
+      "success_rate_pct": 0.0,
+      "fov_retention_pct": 18.9312,
+      "firing_window_s": 0.04080000000000001,
+      "min_distance_m": 5.5821340263228345,
+      "collision_breaches": 1,
+      "collision_rate_pct": 2.0,
+      "by_profile": {
+        "cruising": {
+          "n": 15,
+          "success_rate": 0.0,
+          "fov_retention": 18.959999999999997,
+          "firing_window_s": 0.0986666666666667,
+          "min_distance_m": 4.942519991407546
+        },
+        "evasive": {
+          "n": 23,
+          "success_rate": 0.0,
+          "fov_retention": 19.377391304347828,
+          "firing_window_s": 0.02347826086956522,
+          "min_distance_m": 5.805262197171078
+        },
+        "hyper_evasive": {
+          "n": 12,
+          "success_rate": 0.0,
+          "fov_retention": 18.04,
+          "firing_window_s": 0.0016666666666666668,
+          "min_distance_m": 5.953989242507814
+        }
+      }
+    },
+    "diagnostic_analysis": "**Low Catch Success (0.0%):** Although FOV was 18.9%, the continuous 3.0s lock condition was rarely satisfied (dwell: 0.04s). **Severe Field-of-View Loss (18.9%):** Agent regularly loses visual lock. Indicates insufficient cornering deceleration or weak directional re-acquisition. **Profile Breakdown:** Cruising: 0.0% catch / 19.0% FOV | Hyper-Evasive: 0.0% catch / 18.0% FOV. **Hyper-Evasive Deficit:** High-G target jinks exceed the policy's turn rate envelope without aggressive deceleration. **Safety Infraction:** 1 physical collision breaches (d < 1.2m). Closing speed at the basket entry exceeded safe kinematic glide-slope limits.",
+    "completed": true,
+    "timestamp": "2026-10-25 09:17:34"
+  },
+  "run_11_aerodynamic_sideslip_governor": {
+    "id": "run_11_aerodynamic_sideslip_governor",
+    "phase": "Phase III: Sensor Robustness",
+    "reward_mode": "aerodynamic_sideslip_governor",
+    "hypothesis": "Nulling aerodynamic sideslip maximizes forward thrust efficiency while keeping lateral strafe for micro-adjustments.",
+    "notes": "Sideslip Angle Nulling: aligns thrust vector with camera optical axis during sprint",
+    "lr": 0.00015,
+    "ent_coef": 0.002,
+    "hyper_weight": 0.5,
+    "elapsed_min": 38.416896084944405,
+    "best_task_score": -62.43430753553164,
+    "best_model_path": "/Users/philipkierkegaard/Development/autonomous-drone-tracking/control/weights/overnight_17_campaign/run_11_aerodynamic_sideslip_governor/best_model/best_model.zip",
+    "validation_metrics": {
+      "n_scenarios": 30,
+      "success_rate_pct": 0.0,
+      "fov_retention_pct": 16.026666666666664,
+      "firing_window_s": 0.05266666666666668,
+      "min_distance_m": 4.993936651417218,
+      "collision_breaches": 1,
+      "collision_rate_pct": 3.3333333333333335,
+      "by_profile": {
+        "cruising": {
+          "n": 9,
+          "success_rate": 0.0,
+          "fov_retention": 15.902222222222223,
+          "firing_window_s": 0.06444444444444447,
+          "min_distance_m": 5.817564853621795
+        },
+        "evasive": {
+          "n": 14,
+          "success_rate": 0.0,
+          "fov_retention": 15.862857142857143,
+          "firing_window_s": 0.03285714285714286,
+          "min_distance_m": 4.90310374637653
+        },
+        "hyper_evasive": {
+          "n": 7,
+          "success_rate": 0.0,
+          "fov_retention": 16.514285714285712,
+          "firing_window_s": 0.07714285714285715,
+          "min_distance_m": 4.116651915806993
+        }
+      }
+    },
+    "heldout_metrics": {
+      "n_scenarios": 50,
+      "success_rate_pct": 0.0,
+      "fov_retention_pct": 17.296000000000003,
+      "firing_window_s": 0.030800000000000015,
+      "min_distance_m": 5.333249688325383,
+      "collision_breaches": 1,
+      "collision_rate_pct": 2.0,
+      "by_profile": {
+        "cruising": {
+          "n": 15,
+          "success_rate": 0.0,
+          "fov_retention": 17.194666666666663,
+          "firing_window_s": 0.05600000000000003,
+          "min_distance_m": 4.288998311303467
+        },
+        "evasive": {
+          "n": 23,
+          "success_rate": 0.0,
+          "fov_retention": 17.088695652173918,
+          "firing_window_s": 0.03043478260869566,
+          "min_distance_m": 5.518526148653309
+        },
+        "hyper_evasive": {
+          "n": 12,
+          "success_rate": 0.0,
+          "fov_retention": 17.82,
+          "firing_window_s": 0.0,
+          "min_distance_m": 6.283450693974255
+        }
+      }
+    },
+    "diagnostic_analysis": "**Low Catch Success (0.0%):** Although FOV was 17.3%, the continuous 3.0s lock condition was rarely satisfied (dwell: 0.03s). **Severe Field-of-View Loss (17.3%):** Agent regularly loses visual lock. Indicates insufficient cornering deceleration or weak directional re-acquisition. **Profile Breakdown:** Cruising: 0.0% catch / 17.2% FOV | Hyper-Evasive: 0.0% catch / 17.8% FOV. **Hyper-Evasive Deficit:** High-G target jinks exceed the policy's turn rate envelope without aggressive deceleration. **Safety Infraction:** 1 physical collision breaches (d < 1.2m). Closing speed at the basket entry exceeded safe kinematic glide-slope limits.",
+    "completed": true,
+    "timestamp": "2026-10-25 09:56:15"
+  },
+  "run_12_staged_curriculum_trail_brake": {
+    "id": "run_12_staged_curriculum_trail_brake",
+    "phase": "Phase III: Sensor Robustness",
+    "reward_mode": "staged_curriculum_trail_brake",
+    "hypothesis": "Biasing training encounter distribution to 55% hyper-evasive and crossing targets forces specialized multi-aspect capability.",
+    "notes": "Trail-Braking + Encounter Curriculum (heavy weighting on crossing & head-on)",
+    "lr": 0.00012,
+    "ent_coef": 0.002,
+    "hyper_weight": 0.55,
+    "elapsed_min": 38.31764993270238,
+    "best_task_score": -35.491460800579894,
+    "best_model_path": "/Users/philipkierkegaard/Development/autonomous-drone-tracking/control/weights/overnight_17_campaign/run_12_staged_curriculum_trail_brake/best_model/best_model.zip",
+    "validation_metrics": {
+      "n_scenarios": 30,
+      "success_rate_pct": 0.0,
+      "fov_retention_pct": 5.058666666666666,
+      "firing_window_s": 0.05866666666666668,
+      "min_distance_m": 6.053643018815993,
+      "collision_breaches": 0,
+      "collision_rate_pct": 0.0,
+      "by_profile": {
+        "cruising": {
+          "n": 9,
+          "success_rate": 0.0,
+          "fov_retention": 4.7555555555555555,
+          "firing_window_s": 0.0,
+          "min_distance_m": 7.114877219327145
+        },
+        "evasive": {
+          "n": 14,
+          "success_rate": 0.0,
+          "fov_retention": 4.96,
+          "firing_window_s": 0.06142857142857143,
+          "min_distance_m": 5.901682830975068
+        },
+        "hyper_evasive": {
+          "n": 7,
+          "success_rate": 0.0,
+          "fov_retention": 5.645714285714285,
+          "firing_window_s": 0.12857142857142861,
+          "min_distance_m": 4.993119422412078
+        }
+      }
+    },
+    "heldout_metrics": {
+      "n_scenarios": 50,
+      "success_rate_pct": 0.0,
+      "fov_retention_pct": 3.9456,
+      "firing_window_s": 0.0228,
+      "min_distance_m": 6.227904478556303,
+      "collision_breaches": 1,
+      "collision_rate_pct": 2.0,
+      "by_profile": {
+        "cruising": {
+          "n": 15,
+          "success_rate": 0.0,
+          "fov_retention": 3.2959999999999994,
+          "firing_window_s": 0.05333333333333334,
+          "min_distance_m": 6.226793770065343
+        },
+        "evasive": {
+          "n": 23,
+          "success_rate": 0.0,
+          "fov_retention": 4.413913043478261,
+          "firing_window_s": 0.006086956521739131,
+          "min_distance_m": 6.21876562373603
+        },
+        "hyper_evasive": {
+          "n": 12,
+          "success_rate": 0.0,
+          "fov_retention": 3.86,
+          "firing_window_s": 0.016666666666666666,
+          "min_distance_m": 6.246809002575522
+        }
+      }
+    },
+    "diagnostic_analysis": "**Low Catch Success (0.0%):** Although FOV was 3.9%, the continuous 3.0s lock condition was rarely satisfied (dwell: 0.02s). **Severe Field-of-View Loss (3.9%):** Agent regularly loses visual lock. Indicates insufficient cornering deceleration or weak directional re-acquisition. **Profile Breakdown:** Cruising: 0.0% catch / 3.3% FOV | Hyper-Evasive: 0.0% catch / 3.9% FOV. **Hyper-Evasive Deficit:** High-G target jinks exceed the policy's turn rate envelope without aggressive deceleration. **Safety Infraction:** 1 physical collision breaches (d < 1.2m). Closing speed at the basket entry exceeded safe kinematic glide-slope limits.",
+    "completed": true,
+    "timestamp": "2026-10-25 10:34:49"
+  },
+  "run_13_unified_dogfight_optimal": {
+    "id": "run_13_unified_dogfight_optimal",
+    "phase": "Phase IV: Synthesis Champions",
+    "reward_mode": "unified_dogfight_optimal",
+    "hypothesis": "Synergistic multi-objective synthesis combining the strongest distance, lead, and speed matching mechanisms.",
+    "notes": "Unified Multi-Objective: Huber Well + PN Lead Vector + Glide-Slope Closing",
+    "lr": 0.00012,
+    "ent_coef": 0.002,
+    "hyper_weight": 0.5,
+    "elapsed_min": 35.88763965368271,
+    "best_task_score": -74.66379377482892,
+    "best_model_path": "/Users/philipkierkegaard/Development/autonomous-drone-tracking/control/weights/overnight_17_campaign/run_13_unified_dogfight_optimal/best_model/best_model.zip",
+    "validation_metrics": {
+      "n_scenarios": 30,
+      "success_rate_pct": 0.0,
+      "fov_retention_pct": 7.127999999999999,
+      "firing_window_s": 0.04466666666666668,
+      "min_distance_m": 5.09274785827231,
+      "collision_breaches": 1,
+      "collision_rate_pct": 3.3333333333333335,
+      "by_profile": {
+        "cruising": {
+          "n": 9,
+          "success_rate": 0.0,
+          "fov_retention": 4.746666666666666,
+          "firing_window_s": 0.10222222222222227,
+          "min_distance_m": 5.887046138463096
+        },
+        "evasive": {
+          "n": 14,
+          "success_rate": 0.0,
+          "fov_retention": 6.325714285714285,
+          "firing_window_s": 0.030000000000000006,
+          "min_distance_m": 5.158181836800291
+        },
+        "hyper_evasive": {
+          "n": 7,
+          "success_rate": 0.0,
+          "fov_retention": 11.794285714285712,
+          "firing_window_s": 0.0,
+          "min_distance_m": 3.9406392552567646
+        }
+      }
+    },
+    "heldout_metrics": {
+      "n_scenarios": 50,
+      "success_rate_pct": 0.0,
+      "fov_retention_pct": 4.7824,
+      "firing_window_s": 0.0456,
+      "min_distance_m": 5.447139523168004,
+      "collision_breaches": 2,
+      "collision_rate_pct": 4.0,
+      "by_profile": {
+        "cruising": {
+          "n": 15,
+          "success_rate": 0.0,
+          "fov_retention": 3.552,
+          "firing_window_s": 0.03200000000000001,
+          "min_distance_m": 4.649400113250414
+        },
+        "evasive": {
+          "n": 23,
+          "success_rate": 0.0,
+          "fov_retention": 4.782608695652174,
+          "firing_window_s": 0.043478260869565216,
+          "min_distance_m": 5.528849610640057
+        },
+        "hyper_evasive": {
+          "n": 12,
+          "success_rate": 0.0,
+          "fov_retention": 6.319999999999999,
+          "firing_window_s": 0.0666666666666667,
+          "min_distance_m": 6.28770278457689
+        }
+      }
+    },
+    "diagnostic_analysis": "**Low Catch Success (0.0%):** Although FOV was 4.8%, the continuous 3.0s lock condition was rarely satisfied (dwell: 0.05s). **Severe Field-of-View Loss (4.8%):** Agent regularly loses visual lock. Indicates insufficient cornering deceleration or weak directional re-acquisition. **Profile Breakdown:** Cruising: 0.0% catch / 3.6% FOV | Hyper-Evasive: 0.0% catch / 6.3% FOV. **Hyper-Evasive Deficit:** High-G target jinks exceed the policy's turn rate envelope without aggressive deceleration. **Safety Infraction:** 2 physical collision breaches (d < 1.2m). Closing speed at the basket entry exceeded safe kinematic glide-slope limits.",
+    "completed": true,
+    "timestamp": "2026-10-25 11:10:58"
+  },
+  "run_14_unified_apex_dogfight_v2": {
+    "id": "run_14_unified_apex_dogfight_v2",
+    "phase": "Phase IV: Synthesis Champions",
+    "reward_mode": "unified_apex_dogfight_v2",
+    "hypothesis": "Refined dogfight formulation combining cornering deceleration with superlinear dwell jackpot bonuses.",
+    "notes": "Enhanced Dogfight Synthesis: Apex Cutting + Kinetic Braking + High Dwell Jackpot",
+    "lr": 0.00012,
+    "ent_coef": 0.002,
+    "hyper_weight": 0.55,
+    "elapsed_min": 36.27562510172526,
+    "best_task_score": -62.94384402690662,
+    "best_model_path": "/Users/philipkierkegaard/Development/autonomous-drone-tracking/control/weights/overnight_17_campaign/run_14_unified_apex_dogfight_v2/best_model/best_model.zip",
+    "validation_metrics": {
+      "n_scenarios": 30,
+      "success_rate_pct": 0.0,
+      "fov_retention_pct": 19.330666666666666,
+      "firing_window_s": 0.04266666666666667,
+      "min_distance_m": 5.2662161570847585,
+      "collision_breaches": 1,
+      "collision_rate_pct": 3.3333333333333335,
+      "by_profile": {
+        "cruising": {
+          "n": 9,
+          "success_rate": 0.0,
+          "fov_retention": 20.755555555555556,
+          "firing_window_s": 0.02666666666666666,
+          "min_distance_m": 6.053985518546867
+        },
+        "evasive": {
+          "n": 14,
+          "success_rate": 0.0,
+          "fov_retention": 18.297142857142855,
+          "firing_window_s": 0.02428571428571429,
+          "min_distance_m": 5.311522586206587
+        },
+        "hyper_evasive": {
+          "n": 7,
+          "success_rate": 0.0,
+          "fov_retention": 19.565714285714286,
+          "firing_window_s": 0.10000000000000002,
+          "min_distance_m": 4.162756976961245
+        }
+      }
+    },
+    "heldout_metrics": {
+      "n_scenarios": 50,
+      "success_rate_pct": 0.0,
+      "fov_retention_pct": 11.1696,
+      "firing_window_s": 0.05240000000000002,
+      "min_distance_m": 5.862560001041886,
+      "collision_breaches": 1,
+      "collision_rate_pct": 2.0,
+      "by_profile": {
+        "cruising": {
+          "n": 15,
+          "success_rate": 0.0,
+          "fov_retention": 9.824000000000002,
+          "firing_window_s": 0.14000000000000007,
+          "min_distance_m": 5.304214974442666
+        },
+        "evasive": {
+          "n": 23,
+          "success_rate": 0.0,
+          "fov_retention": 11.245217391304347,
+          "firing_window_s": 0.016521739130434785,
+          "min_distance_m": 5.978880169248398
+        },
+        "hyper_evasive": {
+          "n": 12,
+          "success_rate": 0.0,
+          "fov_retention": 12.706666666666665,
+          "firing_window_s": 0.011666666666666667,
+          "min_distance_m": 6.337544295228434
+        }
+      }
+    },
+    "diagnostic_analysis": "**Low Catch Success (0.0%):** Although FOV was 11.2%, the continuous 3.0s lock condition was rarely satisfied (dwell: 0.05s). **Severe Field-of-View Loss (11.2%):** Agent regularly loses visual lock. Indicates insufficient cornering deceleration or weak directional re-acquisition. **Profile Breakdown:** Cruising: 0.0% catch / 9.8% FOV | Hyper-Evasive: 0.0% catch / 12.7% FOV. **Hyper-Evasive Deficit:** High-G target jinks exceed the policy's turn rate envelope without aggressive deceleration. **Safety Infraction:** 1 physical collision breaches (d < 1.2m). Closing speed at the basket entry exceeded safe kinematic glide-slope limits.",
+    "completed": true,
+    "timestamp": "2026-10-25 11:47:30"
+  }
+}

@@ -111,6 +111,9 @@ def render_simple_chase_video(
         elif "continuous_potential" in model_str:
             ctrl_label = "Learned Recurrent PPO (Gen 4 Continuous)"
             ctrl_short = "Gen 4 RL"
+        elif "cloned_expert_v2" in model_str:
+            ctrl_label = "Cloned Expert v2 (Imitation Learning)"
+            ctrl_short = "Cloned Expert v2"
         elif "cloned_expert" in model_str:
             ctrl_label = "Cloned Expert Policy (Behavioral Cloning)"
             ctrl_short = "Cloned Expert"
@@ -120,10 +123,13 @@ def render_simple_chase_video(
     else:
         # Load tuned gains if available or specified
         kp_fwd = 1.2
+        kd_fwd = 0.15
         cent_damp = 0.15
         min_cent = 0.35
         kp_lat = 2.5
         kd_lat = 0.35
+        kp_z = 6.0
+        kd_z = 1.0
         kp_yaw = 180.0
         kd_yaw = 20.0
         is_tuned = False
@@ -134,10 +140,13 @@ def render_simple_chase_video(
                     g_data = json.load(f)
                 params = g_data.get("tuned_parameters", g_data)
                 kp_fwd = float(params.get("kp_forward", kp_fwd))
+                kd_fwd = float(params.get("kd_forward", kd_fwd))
                 cent_damp = float(params.get("centering_damping", cent_damp))
                 min_cent = float(params.get("min_centering_factor", min_cent))
                 kp_lat = float(params.get("kp_lat", kp_lat))
                 kd_lat = float(params.get("kd_lat", kd_lat))
+                kp_z = float(params.get("kp_z", kp_z))
+                kd_z = float(params.get("kd_z", kd_z))
                 kp_yaw = float(params.get("kp_yaw", kp_yaw))
                 kd_yaw = float(params.get("kd_yaw", kd_yaw))
                 is_tuned = True
@@ -185,10 +194,13 @@ def render_simple_chase_video(
             use_bbox_size=True,
             enable_lateral_strafe=True,
             kp_forward=kp_fwd,
+            kd_forward=kd_fwd,
             centering_damping=cent_damp,
             min_centering_factor=min_cent,
             kp_lat=kp_lat,
             kd_lat=kd_lat,
+            kp_z=kp_z,
+            kd_z=kd_z,
             kp_yaw=kp_yaw,
             kd_yaw=kd_yaw,
             max_lat_vel=4.0,
@@ -603,6 +615,9 @@ def render_dual_chase_video(
     kd_lat = 0.35
     kp_yaw = 180.0
     kd_yaw = 20.0
+    kd_fwd = 0.15
+    kp_z = 6.0
+    kd_z = 1.0
     pid_label = "Classical PID"
     pid_short = "PID"
 
@@ -613,10 +628,13 @@ def render_dual_chase_video(
                 g_data = json.load(f)
             params = g_data.get("tuned_parameters", g_data)
             kp_fwd = float(params.get("kp_forward", kp_fwd))
+            kd_fwd = float(params.get("kd_forward", kd_fwd))
             cent_damp = float(params.get("centering_damping", cent_damp))
             min_cent = float(params.get("min_centering_factor", min_cent))
             kp_lat = float(params.get("kp_lat", kp_lat))
             kd_lat = float(params.get("kd_lat", kd_lat))
+            kp_z = float(params.get("kp_z", kp_z))
+            kd_z = float(params.get("kd_z", kd_z))
             kp_yaw = float(params.get("kp_yaw", kp_yaw))
             kd_yaw = float(params.get("kd_yaw", kd_yaw))
             pid_label = "Tuned Kinematic PID"
@@ -634,10 +652,13 @@ def render_dual_chase_video(
         use_bbox_size=True,
         enable_lateral_strafe=True,
         kp_forward=kp_fwd,
+        kd_forward=kd_fwd,
         centering_damping=cent_damp,
         min_centering_factor=min_cent,
         kp_lat=kp_lat,
         kd_lat=kd_lat,
+        kp_z=kp_z,
+        kd_z=kd_z,
         kp_yaw=kp_yaw,
         kd_yaw=kd_yaw,
         max_lat_vel=4.0,
@@ -679,6 +700,9 @@ def render_dual_chase_video(
     elif "continuous_potential" in model_str:
         rl_label = "Learned Gen 4 RL Chaser"
         rl_short = "Gen 4 RL"
+    elif "cloned_expert_v2" in model_str:
+        rl_label = "Cloned Expert v2 (Imitation Learning)"
+        rl_short = "Expert v2"
     elif "cloned_expert" in model_str:
         rl_label = "Cloned Expert Policy (Behavioral Cloning)"
         rl_short = "Cloned Expert"
@@ -1166,6 +1190,7 @@ if __name__ == "__main__":
     if args.scenario:
         scenarios = []
         for s_file in [
+            PROJECT_ROOT / "outputs" / "benchmarks" / "datasets" / "heldout_test_suite_50.json",
             PROJECT_ROOT / "outputs" / "benchmarks" / "datasets" / "validation_suite_30.json",
             PROJECT_ROOT / "outputs" / "benchmarks" / "datasets" / "benchmark_suite_v1.json",
         ]:

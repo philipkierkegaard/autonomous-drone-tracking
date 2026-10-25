@@ -35,10 +35,11 @@ from control.pid_controller import KinematicVisualServoController
 from control.trajectory import StochasticTargetTrajectory
 from control.predictive_controller import StandaloneRecurrentPolicy, RecurrentVisualServoController
 from control.spatial import unproject_camera_to_horizon
+from benchmarks.control.benchmark_controller import create_pid_controller
 
 
 def collect_expert_demonstrations(
-    num_episodes: int = 100,
+    num_episodes: int = 1500,
     episode_duration: float = 15.0,
     dt: float = 0.02,
     dropout_prob: float = 0.05,
@@ -52,10 +53,13 @@ def collect_expert_demonstrations(
     print(f"[EXPERT] Collecting {num_episodes} expert flight demonstrations ({int(episode_duration/dt)} steps each)...")
     trajectories = []
     
-    profiles = ["evasive", "hyper_evasive", "cruising", "sprint_break", "aerobatic"]
-    profile_weights = [0.35, 0.35, 0.15, 0.10, 0.05]
+    profiles = ["hyper_evasive", "evasive", "cruising", "sprint_break", "aerobatic", "high_speed_evasive"]
+    profile_weights = [0.40, 0.30, 0.10, 0.10, 0.05, 0.05]
     
     rng = np.random.default_rng(seed_offset)
+    
+    # Load tuned kinematic controller as expert once
+    ctrl = create_pid_controller(max_decel=6.0)
     
     for ep in range(num_episodes):
         prof = rng.choice(profiles, p=profile_weights)
@@ -63,48 +67,68 @@ def collect_expert_demonstrations(
         
         # Geometry sampling: Diverse initial positions, altitudes, and headings
         chaser_alt = float(rng.uniform(-4.5, -2.5))  # 2.5m to 4.5m AGL (NED coordinate)
-        # Altitude delta between target and chaser: ±1.2m (ensuring target stays > 1.8m AGL)
-        delta_alt = float(rng.uniform(-1.2, 1.2))
-        target_alt = float(np.clip(chaser_alt + delta_alt, -6.5, -1.8))
+        # Altitude delta between target and chaser: ±1.5m (ensuring target stays > 1.8m AGL)
+        delta_alt = float(rng.uniform(-1.5, 1.5))
+        target_alt = float(np.clip(chaser_alt + delta_alt, -6.8, -1.8))
         
         init_dist = float(rng.uniform(5.0, 16.0))
         init_lat = float(rng.uniform(-4.5, 4.5))
         init_heading = float(rng.uniform(-0.8, 0.8))
-        init_chaser_vel = float(rng.uniform(2.5, 5.0))
+        init_chaser_vel = float(rng.uniform(3.0, 5.0))
         init_yaw = float(rng.uniform(-0.45, 0.45))
         
-        # Encounter types:
-        # 1. Close Basket & Dwell (20%): Spawns within/near 2.8-4.8m basket for fine speed-matching & dwell demos
-        # 2. Crossing Right (20%): Spawns on left flank, cuts East (+90 deg) across FOV
-        # 3. Crossing Left (20%): Spawns on right flank, cuts West (-90 deg) across FOV
-        # 4. Oblique / Head-On Break (15%): Angled breakaway forcing aggressive yaw correction
-        # 5. Tail Chase Sprint (25%): Deep forward chase (7-16m) demanding high-speed catch
+        # Diverse encounter types:
+        # 1. Close Basket & Dwell (10%): Spawns within 2.8-4.5m basket for fine speed-matching & dwell demos
+        # 2. Crossing Right (15%): Spawns on left flank, cuts East (+90 deg) across FOV
+        # 3. Crossing Left (15%): Spawns on right flank, cuts West (-90 deg) across FOV
+        # 4. Head-On Approach (12%): Spawns 12-24m ahead, flying toward and past the chaser
+        # 5. Oblique Break Away (12%): Angled breakaway forcing aggressive yaw correction
+        # 6. Oblique Inward (10%): Angled closing approach
+        # 7. Omnidirectional 360 (8%): Full random 360-degree heading relative to LOS
+        # 8. Tail Chase Sprint (18%): Deep forward chase (6-18m) demanding high-speed catch
         encounter_roll = rng.random()
-        if encounter_roll < 0.20:
+        if encounter_roll < 0.10:
             # Close basket dwell encounter
-            close_dist = float(rng.uniform(2.8, 4.8))
-            close_lat = float(rng.uniform(-1.5, 1.5))
+            close_dist = float(rng.uniform(2.8, 4.5))
+            close_lat = float(rng.uniform(-1.2, 1.2))
             target_pos = [close_dist, close_lat, target_alt]
             target_heading = float(rng.uniform(-0.35, 0.35))
             init_chaser_vel = float(rng.uniform(3.5, 4.5))  # Match target cruising speed
-        elif encounter_roll < 0.40:
+        elif encounter_roll < 0.25:
             # Crossing right
-            flank_lat = float(rng.uniform(-6.0, -3.5))
-            target_pos = [init_dist, flank_lat, target_alt]
+            flank_lat = float(rng.uniform(-7.0, -3.5))
+            cross_dist = float(rng.uniform(6.0, 15.0))
+            target_pos = [cross_dist, flank_lat, target_alt]
             target_heading = float(np.pi / 2.0 + rng.uniform(-0.25, 0.25))
-        elif encounter_roll < 0.60:
+        elif encounter_roll < 0.40:
             # Crossing left
-            flank_lat = float(rng.uniform(3.5, 6.0))
-            target_pos = [init_dist, flank_lat, target_alt]
+            flank_lat = float(rng.uniform(3.5, 7.0))
+            cross_dist = float(rng.uniform(6.0, 15.0))
+            target_pos = [cross_dist, flank_lat, target_alt]
             target_heading = float(-np.pi / 2.0 + rng.uniform(-0.25, 0.25))
-        elif encounter_roll < 0.75:
-            # Oblique break
+        elif encounter_roll < 0.52:
+            # Head-on approach
+            head_dist = float(rng.uniform(12.0, 24.0))
+            head_lat = float(rng.uniform(-3.5, 3.5))
+            target_pos = [head_dist, head_lat, target_alt]
+            target_heading = float(np.pi + rng.uniform(-0.35, 0.35))
+        elif encounter_roll < 0.64:
+            # Oblique break away
             sign = float(rng.choice([-1.0, 1.0]))
             target_pos = [init_dist, init_lat, target_alt]
-            target_heading = float(sign * (np.pi / 3.0) + rng.uniform(-0.2, 0.2))
+            target_heading = float(sign * (np.pi / 4.0) + rng.uniform(-0.25, 0.25))
+        elif encounter_roll < 0.74:
+            # Oblique inward
+            sign = float(rng.choice([-1.0, 1.0]))
+            target_pos = [init_dist, init_lat, target_alt]
+            target_heading = float(sign * (3.0 * np.pi / 4.0) + rng.uniform(-0.2, 0.2))
+        elif encounter_roll < 0.82:
+            # Omnidirectional 360
+            target_pos = [init_dist, init_lat, target_alt]
+            target_heading = float(rng.uniform(-np.pi, np.pi))
         else:
             # Tail chase sprint
-            sprint_dist = float(rng.uniform(7.0, 16.0))
+            sprint_dist = float(rng.uniform(6.0, 18.0))
             target_pos = [sprint_dist, init_lat, target_alt]
             target_heading = init_heading
             
@@ -116,32 +140,21 @@ def collect_expert_demonstrations(
             seed=ep_seed
         )
         
-        sim = FastPixhawkQuadSim(dt=dt)
+        sim = FastPixhawkQuadSim(
+            dt=dt,
+            max_vel_xy=15.0,
+            max_accel_xy=6.0,
+            max_vel_up=3.0,
+            max_vel_down=2.0
+        )
         sim.reset(
             initial_pos=np.array([0.0, 0.0, chaser_alt]),
             initial_yaw=init_yaw,
             initial_vel=np.array([np.cos(init_yaw) * init_chaser_vel, np.sin(init_yaw) * init_chaser_vel, 0.0])
         )
         
-        ctrl = KinematicVisualServoController(
-            camera_uptilt_deg=15.0,
-            hfov_deg=62.0,
-            vfov_deg=38.0,
-            desired_bbox_size=110.0,
-            desired_standoff_dist=3.5,
-            scale_mode="width",
-            use_bbox_size=True,
-            enable_lateral_strafe=True,
-            kp_lat=2.5,
-            kd_lat=0.35,
-            max_lat_vel=4.0,
-            max_lat_accel=6.0,
-            max_accel=6.0,
-            max_decel=6.0,
-            max_accel_yaw=240.0,
-            min_limits=np.array([-0.5, -4.0, -3.0, -120.0]),
-            max_limits=np.array([15.0, 4.0, 2.0, 120.0])
-        )
+        # Reset kinematic controller for episode
+        ctrl.reset()
         ctrl.prev_cmd = np.array([init_chaser_vel, 0.0, 0.0, 0.0])
         
         # Optical filtering state
@@ -280,7 +293,13 @@ def evaluate_policy(
     dt: float = 0.02
 ) -> Dict[str, Any]:
     """Evaluates the cloned policy in closed-loop flight on a standardized benchmark trajectory."""
-    sim = FastPixhawkQuadSim(dt=dt)
+    sim = FastPixhawkQuadSim(
+        dt=dt,
+        max_vel_xy=15.0,
+        max_accel_xy=6.0,
+        max_vel_up=3.0,
+        max_vel_down=2.0
+    )
     target = StochasticTargetTrajectory(
         duration=duration + 5.0,
         profile=profile,
@@ -361,11 +380,11 @@ def evaluate_policy(
 
 
 def train_behavioral_cloning(
-    num_episodes: int = 1000,
+    num_episodes: int = 1500,
     epochs: int = 40,
     batch_size: int = 32,
     learning_rate: float = 1e-3,
-    output_dir: Union[str, Path] = "control/weights/cloned_expert_v1",
+    output_dir: Union[str, Path] = "control/weights/cloned_expert_v2",
 ) -> StandaloneRecurrentPolicy:
     """End-to-end Behavioral Cloning training loop."""
     out_path = Path(output_dir)
@@ -379,7 +398,10 @@ def train_behavioral_cloning(
     act_all = [torch.from_numpy(t[1]) for t in trajectories]
     
     # 2. Model initialization
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device(
+        "cuda" if torch.cuda.is_available()
+        else ("mps" if torch.backends.mps.is_available() else "cpu")
+    )
     model = StandaloneRecurrentPolicy(obs_dim=15, hidden_dim=128, act_dim=4).to(device)
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-4)
@@ -428,7 +450,8 @@ def train_behavioral_cloning(
         {"name": "Hyper-Evasive Weave (Seed 100)", "profile": "hyper_evasive", "pos": [10.0, 0.0, -3.0], "heading": 0.0, "seed": 100},
         {"name": "Sprint Break (Seed 777)", "profile": "sprint_break", "pos": [8.0, 0.0, -2.5], "heading": 0.0, "seed": 777},
         {"name": "Hyper-Evasive Crossing Left (Seed 202)", "profile": "hyper_evasive", "pos": [11.0, 5.0, -2.8], "heading": -np.pi/2.0, "seed": 202},
-        {"name": "Evasive Close Basket Dwell (Seed 333)", "profile": "evasive", "pos": [3.5, 0.0, -2.5], "heading": 0.0, "seed": 333},
+        {"name": "Hyper-Evasive Head-On (Seed 303)", "profile": "hyper_evasive", "pos": [15.0, 1.0, -3.0], "heading": np.pi, "seed": 303},
+        {"name": "Close Basket Dwell (Seed 333)", "profile": "evasive", "pos": [3.5, 0.0, -2.5], "heading": 0.0, "seed": 333},
     ]
     
     results = []
@@ -467,10 +490,10 @@ def train_behavioral_cloning(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train Behavioral Cloning Policy for Drone Pursuit")
-    parser.add_argument("--episodes", type=int, default=1000, help="Number of expert demonstrations")
+    parser.add_argument("--episodes", type=int, default=1500, help="Number of expert demonstrations")
     parser.add_argument("--epochs", type=int, default=40, help="Training epochs")
     parser.add_argument("--batch-size", type=int, default=32, help="Batch size for training")
-    parser.add_argument("--output-dir", type=str, default="control/weights/cloned_expert_v1", help="Output directory")
+    parser.add_argument("--output-dir", type=str, default="control/weights/cloned_expert_v2", help="Output directory")
     args = parser.parse_args()
     
     train_behavioral_cloning(

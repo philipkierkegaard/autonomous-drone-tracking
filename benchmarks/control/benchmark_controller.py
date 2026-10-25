@@ -43,6 +43,92 @@ from control.synthetic_sensor import SyntheticYOLOSensor
 from control.dataset_generator import PursuitScenario, PursuitDataset
 
 
+def create_pid_controller(
+    gains_path: Optional[Union[str, Path]] = None,
+    standoff_nominal: float = 3.5,
+    desired_bbox_size: float = 110.0,
+    max_decel: float = 6.0
+) -> KinematicVisualServoController:
+    """Instantiates KinematicVisualServoController with tuned or baseline gains."""
+    kp_fwd = 1.2
+    ki_fwd = 0.0
+    kd_fwd = 0.15
+    cent_damp = 0.15
+    min_cent = 0.35
+    kp_lat = 2.5
+    ki_lat = 0.0
+    kd_lat = 0.35
+    kp_z = 6.0
+    ki_z = 0.0
+    kd_z = 1.0
+    kp_yaw = 180.0
+    ki_yaw = 0.0
+    kd_yaw = 20.0
+
+    if gains_path is None:
+        default_tuned = PROJECT_ROOT / "control" / "weights" / "tuned_pid_gains.json"
+        if default_tuned.exists():
+            gains_path = default_tuned
+
+    if gains_path is not None and str(gains_path).lower() != "none":
+        p_path = Path(gains_path)
+        if p_path.exists():
+            try:
+                with open(p_path, "r", encoding="utf-8") as f:
+                    g_data = json.load(f)
+                params = g_data.get("tuned_parameters", g_data)
+                kp_fwd = float(params.get("kp_forward", kp_fwd))
+                ki_fwd = float(params.get("ki_forward", ki_fwd))
+                kd_fwd = float(params.get("kd_forward", kd_fwd))
+                cent_damp = float(params.get("centering_damping", cent_damp))
+                min_cent = float(params.get("min_centering_factor", min_cent))
+                kp_lat = float(params.get("kp_lat", kp_lat))
+                ki_lat = float(params.get("ki_lat", ki_lat))
+                kd_lat = float(params.get("kd_lat", kd_lat))
+                kp_z = float(params.get("kp_z", kp_z))
+                ki_z = float(params.get("ki_z", ki_z))
+                kd_z = float(params.get("kd_z", kd_z))
+                kp_yaw = float(params.get("kp_yaw", kp_yaw))
+                ki_yaw = float(params.get("ki_yaw", ki_yaw))
+                kd_yaw = float(params.get("kd_yaw", kd_yaw))
+                print(f"[PID] Loaded tuned gains from {p_path.name}: kp_fwd={kp_fwd:.3f}, cent_damp={cent_damp:.3f}, min_cent={min_cent:.3f}")
+            except Exception as e:
+                print(f"[WARN] Failed to load PID gains from {p_path}: {e}")
+
+    return KinematicVisualServoController(
+        camera_uptilt_deg=15.0,
+        hfov_deg=62.0,
+        vfov_deg=38.0,
+        desired_bbox_size=desired_bbox_size,
+        desired_standoff_dist=standoff_nominal,
+        scale_mode="width",
+        use_bbox_size=True,
+        enable_lateral_strafe=True,
+        kp_forward=kp_fwd,
+        ki_forward=ki_fwd,
+        kd_forward=kd_fwd,
+        centering_damping=cent_damp,
+        min_centering_factor=min_cent,
+        kp_lat=kp_lat,
+        ki_lat=ki_lat,
+        kd_lat=kd_lat,
+        kp_z=kp_z,
+        ki_z=ki_z,
+        kd_z=kd_z,
+        kp_yaw=kp_yaw,
+        ki_yaw=ki_yaw,
+        kd_yaw=kd_yaw,
+        max_lat_vel=4.0,
+        max_lat_accel=6.0,
+        max_accel=6.0,
+        max_decel=max_decel,
+        max_accel_yaw=240.0,
+        min_limits=np.array([-0.5, -4.0, -3.0, -120.0]),
+        max_limits=np.array([15.0,  4.0,  2.0,  120.0]),
+        search_mode="decay",
+    )
+
+
 def evaluate_single_run(
     profile: str = "evasive",
     seed: int = 42,
@@ -53,7 +139,7 @@ def evaluate_single_run(
     standoff_nominal: float = 3.5,
     standoff_min: float = 2.5,
     standoff_max: float = 4.5,
-    dwell_time_required: float = 3.0,
+    dwell_time_required: float = 1.0,
     desired_bbox_size: float = 110.0,
     max_lost_frames: int = 15,
     img_w: int = 1280,
@@ -72,16 +158,19 @@ def evaluate_single_run(
     """
     sim_kwargs = dict(
         dt=dt,
-        max_vel_xy=6.5,
+        max_vel_xy=15.0,
         max_accel_xy=6.0,
-        max_vel_up=2.5,
-        max_vel_down=1.5
+        max_vel_up=3.0,
+        max_vel_down=2.0
     )
 
     if scenario is not None:
         target_oracle = scenario.create_target_oracle()
         sim = FastPixhawkQuadSim(**sim_kwargs)
-        sim.reset(initial_pos=scenario.initial_chaser_pos, initial_yaw=scenario.initial_chaser_yaw)
+        c_yaw = scenario.initial_chaser_yaw
+        c, s = np.cos(c_yaw), np.sin(c_yaw)
+        v_init = np.array([c * 4.0, s * 4.0, 0.0], dtype=np.float64)
+        sim.reset(initial_pos=scenario.initial_chaser_pos, initial_yaw=c_yaw, initial_vel=v_init)
         profile = scenario.profile
         seed = scenario.seed
         duration = scenario.duration
@@ -96,7 +185,8 @@ def evaluate_single_run(
             seed=seed
         )
         sim = FastPixhawkQuadSim(**sim_kwargs)
-        sim.reset(initial_pos=[0.0, 0.0, -2.5], initial_yaw=0.0)
+        v_init = np.array([4.0, 0.0, 0.0], dtype=np.float64)
+        sim.reset(initial_pos=[0.0, 0.0, -2.5], initial_yaw=0.0, initial_vel=v_init)
         encounter_type = "tail_chase"
         scenario_id = f"{profile}_{seed}"
 
@@ -120,25 +210,10 @@ def evaluate_single_run(
                 w_nominal=0.0859
             )
         else:
-            controller = KinematicVisualServoController(
-                camera_uptilt_deg=15.0,
-                hfov_deg=62.0,
-                vfov_deg=38.0,
+            controller = create_pid_controller(
+                standoff_nominal=standoff_nominal,
                 desired_bbox_size=desired_bbox_size,
-                desired_standoff_dist=standoff_nominal,
-                scale_mode="width",
-                use_bbox_size=True,
-                enable_lateral_strafe=True,
-                kp_lat=2.5,
-                kd_lat=0.35,
-                max_lat_vel=4.0,
-                max_lat_accel=6.0,
-                max_accel=6.0,
-                max_decel=6.0,
-                max_accel_yaw=240.0,
-                min_limits=np.array([-0.5, -4.0, -3.0, -120.0]),
-                max_limits=np.array([15.0,  4.0,  2.0,  120.0]),
-                search_mode="decay",
+                max_decel=max_decel
             )
     else:
         if hasattr(controller, "reset"):
@@ -172,6 +247,7 @@ def evaluate_single_run(
 
     # 3. Telemetry & Metric Accumulators
     continuous_lock_dwell = 0.0
+    max_continuous_dwell = 0.0
     time_to_first_lock: Optional[float] = None
     lock_achieved = False
 
@@ -401,6 +477,7 @@ def evaluate_single_run(
         if in_envelope:
             cumulative_firing_time += dt
             continuous_lock_dwell += dt
+            max_continuous_dwell = max(max_continuous_dwell, continuous_lock_dwell)
             if continuous_lock_dwell >= dwell_time_required and time_to_first_lock is None:
                 time_to_first_lock = t - dwell_time_required
                 lock_achieved = True
@@ -416,6 +493,9 @@ def evaluate_single_run(
         "noise_mode": noise_mode,
         "frame_drop_rate": frame_drop_rate,
         "success": lock_achieved,
+        "success_1s": bool(max_continuous_dwell >= 1.0),
+        "success_3s": bool(max_continuous_dwell >= 3.0),
+        "max_continuous_dwell_s": float(max_continuous_dwell),
         "time_to_lock": time_to_first_lock,
         "fov_lock_pct": (in_view_count / total_steps) * 100.0,
         "firing_window_s": cumulative_firing_time,
@@ -477,26 +557,7 @@ def run_benchmark_matrix(
             w_nominal=0.0859
         )
     else:
-        shared_ctrl = KinematicVisualServoController(
-            camera_uptilt_deg=15.0,
-            hfov_deg=62.0,
-            vfov_deg=38.0,
-            desired_bbox_size=110.0,
-            desired_standoff_dist=3.5,
-            scale_mode="width",
-            use_bbox_size=True,
-            enable_lateral_strafe=True,
-            kp_lat=2.5,
-            kd_lat=0.35,
-            max_lat_vel=4.0,
-            max_lat_accel=6.0,
-            max_accel=6.0,
-            max_decel=6.0,
-            max_accel_yaw=240.0,
-            min_limits=np.array([-0.5, -4.0, -3.0, -120.0]),
-            max_limits=np.array([15.0,  4.0,  2.0,  120.0]),
-            search_mode="decay",
-        )
+        shared_ctrl = create_pid_controller(max_decel=max_decel)
 
     for profile in profiles:
         for drop_rate in drop_rates:
@@ -680,6 +741,7 @@ def run_dataset_benchmark(
     max_decel: float = 6.0,
     controller_type: str = "pid",
     model_path: Optional[Union[str, Path]] = None,
+    pid_gains: Optional[Union[str, Path]] = None,
     output_dir: Path = PROJECT_ROOT / "outputs" / "benchmarks" / "control",
     noise_mode: str = "empirical",
 ) -> Dict[str, Any]:
@@ -716,26 +778,7 @@ def run_dataset_benchmark(
             w_nominal=0.0859
         )
     else:
-        shared_ctrl = KinematicVisualServoController(
-            camera_uptilt_deg=15.0,
-            hfov_deg=62.0,
-            vfov_deg=38.0,
-            desired_bbox_size=110.0,
-            desired_standoff_dist=3.5,
-            scale_mode="width",
-            use_bbox_size=True,
-            enable_lateral_strafe=True,
-            kp_lat=2.5,
-            kd_lat=0.35,
-            max_lat_vel=4.0,
-            max_lat_accel=6.0,
-            max_accel=6.0,
-            max_decel=6.0,
-            max_accel_yaw=240.0,
-            min_limits=np.array([-0.5, -4.0, -3.0, -120.0]),
-            max_limits=np.array([15.0,  4.0,  2.0,  120.0]),
-            search_mode="decay",
-        )
+        shared_ctrl = create_pid_controller(gains_path=pid_gains, max_decel=max_decel)
 
     for idx, scenario in enumerate(dataset.scenarios, 1):
         res = evaluate_single_run(
@@ -791,11 +834,28 @@ def run_dataset_benchmark(
                 "collision_breach_pct": breach
             })
 
+    overall_succ_1s = float(np.mean([1 if r.get("success_1s", r["success"]) else 0 for r in raw_results]) * 100.0)
+    overall_succ_3s = float(np.mean([1 if r.get("success_3s", False) else 0 for r in raw_results]) * 100.0)
+    overall_fov = float(np.mean([r["fov_lock_pct"] for r in raw_results]))
+    overall_fwin = float(np.mean([r["firing_window_s"] for r in raw_results]))
+    overall_dwell = float(np.mean([r.get("max_continuous_dwell_s", 0.0) for r in raw_results]))
+    overall_min_d = float(np.mean([r["min_distance"] for r in raw_results]))
+    overall_breach = float(np.mean([1 if r["collision_breach"] else 0 for r in raw_results]) * 100.0)
+
+    print("-" * 95)
+    print(f"{'>>> OVERALL':16s} | {'ALL':14s} | 1s: {overall_succ_1s:5.1f}% | 3s: {overall_succ_3s:5.1f}% | MaxDwell: {overall_dwell:4.2f}s | FOV: {overall_fov:5.1f}% | Win: {overall_fwin:4.2f}s | MinD: {overall_min_d:4.2f}m | Breaches: {overall_breach:4.1f}%")
     print("=" * 95 + "\n")
 
-    out_json = output_dir / f"benchmark_results_{dataset.name}_{controller_type.lower()}_{mode_str.lower()}_{noise_mode}_d{int(frame_drop_rate*100)}.json"
+    ctrl_tag = controller_type.lower()
+    if ctrl_tag == "pid":
+        ctrl_tag = "pid_baseline" if (pid_gains is not None and str(pid_gains).lower() == "none") else "pid_tuned"
+    elif ctrl_tag == "rl" and model_path is not None:
+        p = Path(model_path)
+        tag_name = p.parent.name if p.parent.name not in ["weights", ".", "checkpoints"] else p.stem
+        ctrl_tag = f"rl_{tag_name}"
+    out_json = output_dir / f"benchmark_results_{dataset.name}_{ctrl_tag}_{mode_str.lower()}_{noise_mode}_d{int(frame_drop_rate*100)}.json"
     with open(out_json, "w", encoding="utf-8") as f:
-        json.dump({"dataset": dataset.name, "controller": controller_type, "noise_mode": noise_mode, "summary": summary_rows, "results": raw_results}, f, indent=2)
+        json.dump({"dataset": dataset.name, "controller": ctrl_tag, "model_path": str(model_path) if model_path else None, "noise_mode": noise_mode, "summary": summary_rows, "results": raw_results}, f, indent=2)
     print(f"[REPORT] Dataset benchmark report saved to: {out_json}")
     return {"summary": summary_rows, "results": raw_results}
 
@@ -811,6 +871,7 @@ if __name__ == "__main__":
     parser.add_argument("--no-ablation", action="store_true", help="Skip Kalman vs Raw ablation comparison")
     parser.add_argument("--drop-rate", type=float, default=0.0, help="Frame drop rate when running dataset (default: 0.0)")
     parser.add_argument("--noise-mode", type=str, default="empirical", choices=["empirical", "bernoulli", "none"], help="Perception noise model: 'empirical' (calibrated Jetson YOLO noise + AR(1) colored jitter), 'bernoulli' (simple random dropouts on ground truth), or 'none' (default: empirical)")
+    parser.add_argument("--pid-gains", type=str, default="control/weights/tuned_pid_gains.json", help="Path to tuned PID gains JSON (default: control/weights/tuned_pid_gains.json)")
     args = parser.parse_args()
 
     controllers_to_run = ["pid", "rl"] if args.controller == "both" else [args.controller]
@@ -825,6 +886,7 @@ if __name__ == "__main__":
                 max_decel=args.max_decel,
                 controller_type=ctrl,
                 model_path=args.model_path,
+                pid_gains=args.pid_gains,
                 noise_mode=args.noise_mode
             )
         else:

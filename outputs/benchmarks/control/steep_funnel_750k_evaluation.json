@@ -1,0 +1,73 @@
+{
+  "model_id": "steep_funnel_750k",
+  "reward_mode": "steep_funnel_bullseye",
+  "timesteps": 750000,
+  "elapsed_min": 13.611157703399659,
+  "best_task_score": -49.87167578041697,
+  "best_model_path": "/Users/philipkierkegaard/Development/autonomous-drone-tracking/control/weights/steep_funnel_750k/best_model/best_model.zip",
+  "validation_metrics": {
+    "n_scenarios": 30,
+    "success_rate_pct": 0.0,
+    "fov_retention_pct": 6.269333333333334,
+    "firing_window_s": 0.12200000000000007,
+    "min_distance_m": 4.540261446341963,
+    "collision_breaches": 1,
+    "collision_rate_pct": 3.3333333333333335,
+    "by_profile": {
+      "cruising": {
+        "n": 9,
+        "success_rate": 0.0,
+        "fov_retention": 5.3066666666666675,
+        "firing_window_s": 0.10222222222222223,
+        "min_distance_m": 4.705670749271629
+      },
+      "evasive": {
+        "n": 14,
+        "success_rate": 0.0,
+        "fov_retention": 6.314285714285714,
+        "firing_window_s": 0.1957142857142858,
+        "min_distance_m": 4.453328162330241
+      },
+      "hyper_evasive": {
+        "n": 7,
+        "success_rate": 0.0,
+        "fov_retention": 7.417142857142857,
+        "firing_window_s": 0.0,
+        "min_distance_m": 4.501458910598687
+      }
+    }
+  },
+  "heldout_metrics": {
+    "n_scenarios": 50,
+    "success_rate_pct": 0.0,
+    "fov_retention_pct": 4.5872,
+    "firing_window_s": 0.048400000000000006,
+    "min_distance_m": 5.208162573734931,
+    "collision_breaches": 2,
+    "collision_rate_pct": 4.0,
+    "by_profile": {
+      "cruising": {
+        "n": 15,
+        "success_rate": 0.0,
+        "fov_retention": 3.088,
+        "firing_window_s": 0.06400000000000002,
+        "min_distance_m": 4.733860803022467
+      },
+      "evasive": {
+        "n": 23,
+        "success_rate": 0.0,
+        "fov_retention": 4.883478260869565,
+        "firing_window_s": 0.04782608695652174,
+        "min_distance_m": 5.000421309387618
+      },
+      "hyper_evasive": {
+        "n": 12,
+        "success_rate": 0.0,
+        "fov_retention": 5.8933333333333335,
+        "firing_window_s": 0.030000000000000002,
+        "min_distance_m": 6.199210543791193
+      }
+    }
+  },
+  "timestamp": "2026-10-25 12:32:45"
+}

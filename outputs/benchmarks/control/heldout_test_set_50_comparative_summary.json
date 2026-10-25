@@ -1,0 +1,86 @@
+{
+  "baseline_pid": {
+    "success_rate": 8.0,
+    "fov_retention": 17.1728,
+    "firing_win": 3.3247999999999718,
+    "min_dist": 4.382998720040184,
+    "collision_breaches": 6.0,
+    "mean_ttl": 6.82,
+    "by_profile": {
+      "cruising": {
+        "success": 6.666666666666667,
+        "fov": 13.674666666666667,
+        "firing": 2.1013333333333217,
+        "min_dist": 3.6974985985962223
+      },
+      "evasive": {
+        "success": 13.043478260869565,
+        "fov": 20.19130434782609,
+        "firing": 5.67652173913038,
+        "min_dist": 4.488005663959067
+      },
+      "hyper_evasive": {
+        "success": 0.0,
+        "fov": 15.76,
+        "firing": 0.34666666666666673,
+        "min_dist": 5.038610562667278
+      }
+    }
+  },
+  "tuned_pid": {
+    "success_rate": 12.0,
+    "fov_retention": 30.014400000000002,
+    "firing_win": 6.166399999999952,
+    "min_dist": 4.247852650426483,
+    "collision_breaches": 6.0,
+    "mean_ttl": 8.116666666666667,
+    "by_profile": {
+      "cruising": {
+        "success": 33.33333333333333,
+        "fov": 36.826666666666675,
+        "firing": 13.797333333333194,
+        "min_dist": 3.0876925603782532
+      },
+      "evasive": {
+        "success": 4.3478260869565215,
+        "fov": 31.27652173913044,
+        "firing": 4.1391304347825955,
+        "min_dist": 4.392757392157806
+      },
+      "hyper_evasive": {
+        "success": 0.0,
+        "fov": 19.080000000000002,
+        "firing": 0.5133333333333335,
+        "min_dist": 5.4203186746684
+      }
+    }
+  },
+  "learned_rl": {
+    "success_rate": 0.0,
+    "fov_retention": 14.633600000000001,
+    "firing_win": 0.2736000000000001,
+    "min_dist": 5.364754337714418,
+    "collision_breaches": 2.0,
+    "mean_ttl": NaN,
+    "by_profile": {
+      "cruising": {
+        "success": 0.0,
+        "fov": 8.384,
+        "firing": 0.4906666666666669,
+        "min_dist": 4.833939077127824
+      },
+      "evasive": {
+        "success": 0.0,
+        "fov": 15.05391304347826,
+        "firing": 0.2678260869565218,
+        "min_dist": 5.271850252934027
+      },
+      "hyper_evasive": {
+        "success": 0.0,
+        "fov": 21.64,
+        "firing": 0.013333333333333334,
+        "min_dist": 6.2063395759434075
+      }
+    }
+  }
+}

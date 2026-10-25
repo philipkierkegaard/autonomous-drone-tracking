@@ -190,8 +190,13 @@ class TaskMetricEvalCallback(BaseCallback):
         mean_dwell_s = float(np.mean([r["dwell_s"] for r in results]))
         mean_reward = float(np.mean([r["reward"] for r in results]))
 
-        # Task-level composite score: Success% * 100 - 15 * MAE_d - 50 * Collision%
-        task_score = float(success_rate * 100.0 - 15.0 * mae_standoff_error - 50.0 * (collision_rate * 100.0))
+        # Task-level composite score: Success% * 100 - 15 * MAE_d - 50 * Collision% - 50 * GroundStrike%
+        task_score = float(
+            success_rate * 100.0
+            - 15.0 * mae_standoff_error
+            - 50.0 * (collision_rate * 100.0)
+            - 50.0 * (ground_strike_rate * 100.0)
+        )
 
         # Gate criteria for best_safe_model.zip qualification
         gate_collision = (n_collisions == 0)
