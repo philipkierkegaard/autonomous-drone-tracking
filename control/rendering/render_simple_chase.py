@@ -266,7 +266,7 @@ def render_simple_chase_video(
             if dwell_counter >= 3.0 and catch_t is None:
                 catch_t = t - 3.0
         else:
-            dwell_counter = max(0.0, dwell_counter - 0.5 * dt_sim)
+            dwell_counter = 0.0
         dwell_all.append(dwell_counter)
         in_basket_all.append(in_basket)
         catch_t_all.append(catch_t)
@@ -745,10 +745,10 @@ def render_dual_chase_video(
         in_b_p = bool((2.5 <= telem_p["distance"] <= 4.5) and telem_p["in_view"])
         if in_b_p:
             dwell_counter_p += dt_sim
-            if dwell_counter_p >= 3.0 and catch_t_p is None:
-                catch_t_p = t - 3.0
+            if dwell_counter_p >= 1.0 and catch_t_p is None:
+                catch_t_p = t - 1.0
         else:
-            dwell_counter_p = max(0.0, dwell_counter_p - 0.5 * dt_sim)
+            dwell_counter_p = 0.0
         dwell_all_p.append(dwell_counter_p)
 
         # RL step
@@ -771,10 +771,10 @@ def render_dual_chase_video(
         in_b_r = bool((2.5 <= telem_r["distance"] <= 4.5) and telem_r["in_view"])
         if in_b_r:
             dwell_counter_r += dt_sim
-            if dwell_counter_r >= 3.0 and catch_t_r is None:
-                catch_t_r = t - 3.0
+            if dwell_counter_r >= 1.0 and catch_t_r is None:
+                catch_t_r = t - 1.0
         else:
-            dwell_counter_r = max(0.0, dwell_counter_r - 0.5 * dt_sim)
+            dwell_counter_r = 0.0
         dwell_all_r.append(dwell_counter_r)
 
         times.append(t)
@@ -916,18 +916,18 @@ def render_dual_chase_video(
         # Target Drone
         ax_map.scatter(tgt_p[1], tgt_p[0], color="#d62728", s=85, marker="o", edgecolors="black", linewidths=1.2, zorder=6)
 
-        catch_done_r = (catch_t_r is not None and t_now >= catch_t_r + 3.0)
-        catch_done_p = (catch_t_p is not None and t_now >= catch_t_p + 3.0)
+        catch_done_r = (catch_t_r is not None and t_now >= catch_t_r + 1.0)
+        catch_done_p = (catch_t_p is not None and t_now >= catch_t_p + 1.0)
         if catch_done_r:
             ax_map.text(
-                0.98, 0.04, f"★ {rl_short} 3.0s LOCKED (t={catch_t_r+3.0:.2f}s)",
+                0.98, 0.04, f"★ {rl_short} 1.0s LOCKED (t={catch_t_r+1.0:.2f}s)",
                 transform=ax_map.transAxes, fontsize=8.8, fontweight="bold",
                 color="#1b7837", ha="right", va="bottom",
                 bbox=dict(boxstyle="round,pad=0.3", facecolor="#e8f5e9", edgecolor="#2ca02c", linewidth=1.4)
             )
         if catch_done_p:
             ax_map.text(
-                0.98, 0.11, f"★ Kinematic PID 3.0s LOCKED (t={catch_t_p+3.0:.2f}s)",
+                0.98, 0.11, f"★ Kinematic PID 1.0s LOCKED (t={catch_t_p+1.0:.2f}s)",
                 transform=ax_map.transAxes, fontsize=8.8, fontweight="bold",
                 color="#08519c", ha="right", va="bottom",
                 bbox=dict(boxstyle="round,pad=0.3", facecolor="#eff3ff", edgecolor="#3182bd", linewidth=1.4)
@@ -950,8 +950,8 @@ def render_dual_chase_video(
         dwell_p = dwell_all_p[s_idx]
         dwell_r = dwell_all_r[s_idx]
 
-        status_p = f"LOCKED({catch_t_p+3.0:.1f}s)" if catch_done_p else (f"DWELL({dwell_p:.1f}s)" if in_b_p else "SEEKING")
-        status_r = f"LOCKED({catch_t_r+3.0:.1f}s)" if catch_done_r else (f"DWELL({dwell_r:.1f}s)" if in_b_r else "SEEKING")
+        status_p = f"LOCKED({catch_t_p+1.0:.1f}s)" if catch_done_p else (f"DWELL({dwell_p:.1f}s)" if in_b_p else "SEEKING")
+        status_r = f"LOCKED({catch_t_r+1.0:.1f}s)" if catch_done_r else (f"DWELL({dwell_r:.1f}s)" if in_b_r else "SEEKING")
 
         hud_text = (
             f"DUAL SIMULTANEOUS TELEMETRY\n"
@@ -966,7 +966,7 @@ def render_dual_chase_video(
             f"In Camera FOV:    {'YES' if p_tel['in_view'] else 'NO':<10}   {'YES' if r_tel['in_view'] else 'NO':<10}\n"
             f"Distance:         {d_p:5.2f} m       {d_r:5.2f} m\n"
             f"In Basket(2.5-4.5m):{'YES' if in_b_p else 'NO':<10}   {'YES' if in_b_r else 'NO':<10}\n"
-            f"3.0s Lock Dwell:  {dwell_p:4.2f} / 3.0s    {dwell_r:4.2f} / 3.0s\n"
+            f"1.0s Lock Dwell:  {dwell_p:4.2f} / 1.0s    {dwell_r:4.2f} / 1.0s\n"
             f"Catch Lock:       {status_p:<10}   {status_r:<10}\n"
             f"\n"
             f"COMMANDS & VELOCITIES\n"

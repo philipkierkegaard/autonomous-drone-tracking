@@ -1,12 +1,21 @@
 #!/usr/bin/env python3
 """
-Automated Parameter Tuning for Classical Kinematic Visual Servoing Controller.
+Automated Parameter Tuning for Classical Kinematic Visual Servoing Controller
+Under Realistic In-Flight Observation Dynamics.
 DTU Bachelor Thesis — Autonomous Drone Pursuit & Interception.
 
-Optimizes 7 key kinematic visual servoing parameters against the user-specified dual objective:
-    1. Distance to desired standoff: (d - 3.5m)^2
+Optimizes 7 key visual servoing parameters against the realistic observation pipeline:
+    - 30 Hz camera sampling rate
+    - 5% random frame dropouts
+    - Synthetic YOLO bounding box noise & false positives (Jetson empirical mode)
+    - 8D Kalman filter tracking state estimation (DroneTracker)
+    - SO(3) gyroscopic ego-motion compensation (ego_shifts)
+    - Coasting / searching recovery dynamics (momentum_cruise)
+
+Target objective:
+    1. 1.0s Basket Dwell Retention ([2.5m, 4.5m] within camera FOV)
     2. Image plane tracking error: (e_x^2 + e_y^2) with smooth unclipped off-screen projection
-    3. Cornering deceleration & speed retention floor: min_centering_factor + centering_damping
+    3. Standoff distance error: (d - 3.5m)^2
 """
 
 import sys
@@ -15,6 +24,7 @@ import json
 import argparse
 from pathlib import Path
 from typing import Dict, Any, List, Tuple
+import multiprocessing as mp
 import numpy as np
 from scipy.optimize import differential_evolution, minimize
 
@@ -26,6 +36,9 @@ from control.simulation import FastPixhawkQuadSim
 from control.pid_controller import KinematicVisualServoController
 from control.trajectory import StochasticTargetTrajectory
 from control.dataset_generator import PursuitDatasetGenerator, EncounterType, PursuitScenario, PursuitDataset
+from control.synthetic_sensor import SyntheticYOLOSensor
+from perception.pipeline import DroneTracker
+from control.spatial import compute_ego_motion_compensation
 
 
 def create_tuning_suite(
@@ -34,8 +47,8 @@ def create_tuning_suite(
     duration: float = 18.0
 ) -> List[Dict[str, Any]]:
     """
-    Creates a dedicated, independent 36-scenario tuning dataset with balanced distribution
-    across Cruising, Evasive, and Hyper-Evasive regimes and all 4 encounter geometries.
+    Creates a dedicated, independent 40-scenario tuning dataset with balanced distribution
+    across Cruising, Evasive, and Hyper-Evasive regimes and all 5 encounter geometries.
     """
     if suite_path.exists():
         print(f"[TUNING] Loading existing tuning suite from: {suite_path}")
@@ -43,37 +56,41 @@ def create_tuning_suite(
             data = json.load(f)
             return data["scenarios"]
 
-    print(f"[TUNING] Generating balanced 36-scenario tuning dataset (base_seed={base_seed})...")
+    print(f"[TUNING] Generating balanced 40-scenario realistic tuning dataset (base_seed={base_seed})...")
     gen = PursuitDatasetGenerator()
     scenarios = []
     
-    # 12 Cruising, 12 Evasive, 12 Hyper-Evasive across 4 encounter types
+    # 10 Cruising (2 each), 15 Evasive (3 each), 15 Hyper-Evasive (3 each) across 5 encounters
     distribution = [
-        ("cruising", EncounterType.TAIL_CHASE, 3),
-        ("cruising", EncounterType.CROSSING_RIGHT, 3),
-        ("cruising", EncounterType.CROSSING_LEFT, 3),
-        ("cruising", EncounterType.OBLIQUE_AWAY, 3),
+        ("cruising", EncounterType.TAIL_CHASE, 2),
+        ("cruising", EncounterType.CROSSING_RIGHT, 2),
+        ("cruising", EncounterType.CROSSING_LEFT, 2),
+        ("cruising", EncounterType.HEAD_ON, 2),
+        ("cruising", EncounterType.OBLIQUE_AWAY, 2),
         ("evasive", EncounterType.TAIL_CHASE, 3),
         ("evasive", EncounterType.CROSSING_RIGHT, 3),
         ("evasive", EncounterType.CROSSING_LEFT, 3),
+        ("evasive", EncounterType.HEAD_ON, 3),
         ("evasive", EncounterType.OBLIQUE_AWAY, 3),
         ("hyper_evasive", EncounterType.TAIL_CHASE, 3),
         ("hyper_evasive", EncounterType.CROSSING_RIGHT, 3),
         ("hyper_evasive", EncounterType.CROSSING_LEFT, 3),
+        ("hyper_evasive", EncounterType.HEAD_ON, 3),
         ("hyper_evasive", EncounterType.OBLIQUE_AWAY, 3),
     ]
 
     scen_idx = 1
     for prof, enc, count in distribution:
         for c in range(count):
-            seed = base_seed + scen_idx * 31
+            seed = base_seed + scen_idx * 37
             scen_id = f"tune_{scen_idx:03d}_{prof}_{enc.value}_s{seed}"
             sc = gen.generate_scenario(
                 scenario_id=scen_id,
                 profile=prof,
                 encounter_type=enc,
                 seed=seed,
-                duration=duration
+                duration=duration,
+                chaser_alt_m=3.0
             )
             scenarios.append(sc.to_dict())
             scen_idx += 1
@@ -90,11 +107,17 @@ def simulate_scenario(
     scenario: Dict[str, Any],
     params: np.ndarray,
     dt: float = 0.02,
-    lambda_image: float = 15.0
+    lambda_image: float = 15.0,
+    camera_fps: float = 30.0,
+    frame_drop_rate: float = 0.05
 ) -> Dict[str, float]:
     """
-    Simulates a flight scenario under given candidate PID parameters and computes
-    the composite cost: Standoff Error + lambda * Image Plane Tracking Error.
+    Simulates a flight scenario under given candidate PID parameters driven by the
+    realistic in-flight observation pipeline:
+      - 30 Hz camera ticks with empirical YOLO noise & 5% frame drops
+      - 8D Kalman filter tracking state estimation
+      - SO(3) gyroscopic ego-motion compensation
+      - Momentum cruise search recovery dynamics
     """
     kp_fwd, centering_damp, min_centering, kp_lat, kd_lat, kp_yaw, kd_yaw = params
 
@@ -102,7 +125,7 @@ def simulate_scenario(
     c_yaw = float(scenario.get("initial_chaser_yaw", 0.0))
     c_vel = np.array([np.cos(c_yaw) * 4.0, np.sin(c_yaw) * 4.0, 0.0], dtype=np.float64)
 
-    # 1. Simulator with identical 15 m/s physical flight envelope
+    # 1. Quadrotor simulator matching 15 m/s physical flight envelope
     sim = FastPixhawkQuadSim(
         dt=dt,
         max_vel_xy=15.0,
@@ -112,7 +135,7 @@ def simulate_scenario(
     )
     sim.reset(initial_pos=np.array(c_init, dtype=np.float64), initial_yaw=c_yaw, initial_vel=c_vel)
 
-    # 2. Candidate Controller (Normal PID across all 4 axes with zero integral terms)
+    # 2. Candidate Controller with Momentum Cruise recovery
     ctrl = KinematicVisualServoController(
         camera_uptilt_deg=15.0,
         hfov_deg=62.0,
@@ -143,6 +166,7 @@ def simulate_scenario(
         max_accel_yaw=240.0,
         min_limits=np.array([-0.5, -4.0, -3.0, -120.0]),
         max_limits=np.array([15.0,  4.0,  2.0,  120.0]),
+        search_mode="momentum_cruise",
     )
 
     # 3. Target Trajectory
@@ -153,6 +177,28 @@ def simulate_scenario(
         initial_heading_rad=scenario["initial_target_heading_rad"],
         seed=int(scenario["seed"])
     )
+
+    # 4. Realistic Perception Pipeline
+    seed = int(scenario["seed"])
+    rng = np.random.default_rng(seed)
+    synthetic_sensor = SyntheticYOLOSensor(
+        img_w=1280,
+        img_h=720,
+        env_mode="nominal",
+        seed=seed
+    )
+    drone_tracker = DroneTracker(
+        dt=dt,
+        max_lost_frames=15,
+        min_hits_to_confirm=2
+    )
+
+    camera_dt = 1.0 / camera_fps
+    time_since_camera = 0.0
+
+    prev_chaser_pitch = sim.pitch
+    prev_chaser_roll = sim.roll
+    prev_chaser_yaw = sim.yaw
 
     total_steps = int(round(scenario["duration"] / dt))
     
@@ -169,8 +215,8 @@ def simulate_scenario(
         t = step * dt
         tgt_pos = target.get_position(t)
 
-        # Telemetry with standard projection for controller input
-        telem = sim.get_camera_telemetry(
+        # Ground-truth camera projection
+        true_telem = sim.get_camera_telemetry(
             tgt_pos,
             hfov_deg=62.0,
             vfov_deg=38.0,
@@ -181,13 +227,8 @@ def simulate_scenario(
             desired_target_size=110.0
         )
         
-        # Ground-truth metric distance
-        dist = float(telem["distance"])
+        dist = float(true_telem["distance"])
         dists.append(dist)
-        
-        # Standoff error: (d - 3.5)^2
-        err_standoff = (dist - 3.5) ** 2
-        standoff_costs.append(err_standoff)
 
         # Unclipped image plane projection for continuous optimization gradient
         u_ex, u_ey, in_view, _, _, _ = sim.project_to_camera(
@@ -202,12 +243,15 @@ def simulate_scenario(
         )
         in_views.append(bool(in_view))
 
+        # Standoff error: (d - 3.5)^2
+        err_standoff = (dist - 3.5) ** 2
+        standoff_costs.append(err_standoff)
+
         # Image plane tracking error: e_x^2 + e_y^2
-        # Smooth unclipped error penalizes losing sightline proportionally to angle
         err_image = float(u_ex ** 2 + u_ey ** 2)
         image_costs.append(err_image)
 
-        # Continuous basket dwell tracking
+        # Basket dwell tracking: 2.5m - 4.5m with target inside camera FOV
         if in_view and (2.5 <= dist <= 4.5):
             dwell_counter += dt
             max_dwell = max(max_dwell, dwell_counter)
@@ -220,17 +264,128 @@ def simulate_scenario(
         if -sim.pos[2] < 0.8:
             ground_strike = True
 
-        # Compute command and integrate quadrotor dynamics
-        cmd = ctrl.compute_cmd(telem, drone_pitch=sim.pitch, drone_roll=sim.roll, dt=dt)
+        # Attitude deltas for SO(3) gyroscopic ego-motion compensation
+        d_pitch = sim.pitch - prev_chaser_pitch
+        d_roll = sim.roll - prev_chaser_roll
+        d_yaw = float((sim.yaw - prev_chaser_yaw + np.pi) % (2.0 * np.pi) - np.pi)
+        prev_chaser_pitch = sim.pitch
+        prev_chaser_roll = sim.roll
+        prev_chaser_yaw = sim.yaw
+
+        # Compute ego shifts for active Kalman trackers
+        ego_shifts = {}
+        for tr in drone_tracker.trackers:
+            st = tr.get_state()
+            tcx = (st[0] + st[2]) / 2.0
+            tcy = (st[1] + st[3]) / 2.0
+            tw = max(1.0, st[2] - st[0])
+            th = max(1.0, st[3] - st[1])
+            shift = compute_ego_motion_compensation(
+                cx=tcx, cy=tcy, w=tw, h=th,
+                delta_pitch_rad=d_pitch,
+                delta_roll_rad=d_roll,
+                delta_yaw_rad=d_yaw,
+                vx_body=0.0, vy_body=0.0, vz_body=0.0,
+                dt=dt,
+                img_width=1280.0,
+                img_height=720.0
+            )
+            ego_shifts[tr.id] = shift
+
+        # -------------------------------------------------------------
+        # Realistic Perception Processing (30Hz Camera + 50Hz Kalman)
+        # -------------------------------------------------------------
+        time_since_camera += dt
+        is_camera_tick = (time_since_camera >= camera_dt - 1e-5)
+        if is_camera_tick:
+            time_since_camera -= camera_dt
+            norm_cx = (true_telem["error_x"] + 1.0) / 2.0
+            norm_cy = (true_telem["error_y"] + 1.0) / 2.0
+            norm_w = true_telem["bbox_w"] / 1280.0
+            norm_h = true_telem["bbox_h"] / 720.0
+            in_fov = bool(true_telem["in_view"])
+
+            det_bbox, conf, fps_boxes = synthetic_sensor.step(
+                norm_cx, norm_cy, norm_w, norm_h, in_fov=in_fov
+            )
+            if frame_drop_rate > 0.0 and rng.uniform(0.0, 1.0) < frame_drop_rate:
+                det_bbox = None
+
+            detections = []
+            confs = []
+            if det_bbox is not None:
+                detections.append(det_bbox)
+                confs.append(conf)
+            for fp in fps_boxes:
+                detections.append(fp)
+                confs.append(0.36)
+
+            det_arr = np.array(detections, dtype=np.float32) if detections else np.empty((0, 4), dtype=np.float32)
+            conf_arr = np.array(confs, dtype=np.float32) if confs else np.empty((0,), dtype=np.float32)
+            drone_tracker.update(det_arr, conf_arr, ego_shifts=ego_shifts, dt_step=dt)
+        else:
+            for trk in drone_tracker.trackers:
+                shift = ego_shifts.get(trk.id, None)
+                trk.predict(ego_shift=shift, dt_step=dt)
+
+        # Extract realistic controller telemetry (what the drone actually receives)
+        primary = None
+        if drone_tracker.primary_track_id is not None:
+            primary = next((t for t in drone_tracker.trackers if t.id == drone_tracker.primary_track_id), None)
+
+        if primary is not None and primary.hits >= drone_tracker.min_hits_to_confirm and primary.time_since_update <= 15:
+            pred_box = primary.get_state()
+            tcx = (pred_box[0] + pred_box[2]) / 2.0
+            tcy = (pred_box[1] + pred_box[3]) / 2.0
+            bw = max(1.0, pred_box[2] - pred_box[0])
+            bh = max(1.0, pred_box[3] - pred_box[1])
+            curr_sz = bw
+
+            err_x = (tcx - 1280.0 / 2.0) / (1280.0 / 2.0)
+            err_y = (tcy - 720.0 / 2.0) / (720.0 / 2.0)
+            range_err = (110.0 - curr_sz) / 110.0
+
+            ctrl_telem = {
+                "status": "COASTING" if primary.time_since_update > 0 else "LOCKED",
+                "error_x": float(np.clip(err_x, -1.0, 1.0)),
+                "error_y": float(np.clip(err_y, -1.0, 1.0)),
+                "error_range": float(np.clip(range_err, -1.0, 1.0)),
+                "target_size": float(curr_sz),
+                "desired_size": 110.0,
+                "bbox_w": float(bw),
+                "bbox_h": float(bh),
+                "w_norm": float(bw / 1280.0),
+                "scale_mode": "width",
+                "distance": true_telem["distance"]
+            }
+        else:
+            ctrl_telem = {
+                "status": "SEARCHING",
+                "error_x": 0.0,
+                "error_y": 0.0,
+                "error_range": 0.0,
+                "target_size": 0.0,
+                "desired_size": 110.0,
+                "bbox_w": 0.0,
+                "bbox_h": 0.0,
+                "w_norm": 0.0,
+                "scale_mode": "width",
+                "distance": true_telem["distance"]
+            }
+
+        # Compute command and step simulator
+        cmd = ctrl.compute_cmd(ctrl_telem, drone_pitch=sim.pitch, drone_roll=sim.roll, dt=dt)
         sim.step(cmd)
 
     mean_standoff = float(np.mean(standoff_costs))
     mean_image = float(np.mean(image_costs))
     
-    # Composite objective
-    base_cost = mean_standoff + lambda_image * mean_image
+    # 1.0s Basket Dwell optimization: heavily reward >= 1.0s dwell and penalize < 1.0s dwell
+    dwell_penalty = max(0.0, 1.0 - max_dwell) * 25.0
+    dwell_reward = -12.0 * min(4.0, max_dwell)
 
-    # Safety penalties
+    base_cost = mean_standoff + lambda_image * mean_image + dwell_penalty + dwell_reward
+
     safety_penalty = 0.0
     if collision:
         safety_penalty += 150.0
@@ -252,12 +407,28 @@ def simulate_scenario(
     }
 
 
-def evaluate_candidate(params: np.ndarray, scenarios: List[Dict[str, Any]], lambda_image: float = 15.0) -> float:
+def _eval_worker(args: Tuple[Dict[str, Any], np.ndarray, float]) -> float:
+    sc, params, lambda_image = args
+    res = simulate_scenario(sc, params, lambda_image=lambda_image)
+    return res["cost"]
+
+
+# Global pool holder for multi-process scenario evaluation
+_GLOBAL_POOL = None
+
+
+def evaluate_candidate(
+    params: np.ndarray,
+    scenarios: List[Dict[str, Any]],
+    lambda_image: float = 15.0
+) -> float:
     """Evaluates candidate parameters across the tuning scenarios and returns mean cost."""
-    costs = []
-    for sc in scenarios:
-        res = simulate_scenario(sc, params, lambda_image=lambda_image)
-        costs.append(res["cost"])
+    global _GLOBAL_POOL
+    if _GLOBAL_POOL is not None:
+        work_items = [(sc, params, lambda_image) for sc in scenarios]
+        costs = _GLOBAL_POOL.map(_eval_worker, work_items)
+    else:
+        costs = [simulate_scenario(sc, params, lambda_image=lambda_image)["cost"] for sc in scenarios]
     return float(np.mean(costs))
 
 
@@ -267,32 +438,37 @@ def run_tuning_optimization(
     lambda_image: float = 15.0,
     workers: int = 8
 ) -> Dict[str, Any]:
-    """Runs global differential evolution followed by Nelder-Mead polishing."""
+    """Runs global differential evolution followed by Nelder-Mead polishing under realistic observations."""
+    global _GLOBAL_POOL
+    if workers > 1:
+        ctx = mp.get_context("fork")
+        _GLOBAL_POOL = ctx.Pool(workers)
+        print(f"[TUNING] Initialized parallel worker pool with {workers} cores.")
     
     # 7 Tunable Parameters: [kp_fwd, centering_damp, min_centering_factor, kp_lat, kd_lat, kp_yaw, kd_yaw]
     bounds = [
-        (0.6, 2.2),     # kp_fwd (default: 1.2)
-        (0.15, 1.20),   # centering_damp (cornering deceleration factor per unit |e_x|)
-        (0.20, 0.65),   # min_centering_factor (speed retention floor during sharp turns)
-        (1.0, 4.5),     # kp_lat (default: 2.5)
-        (0.1, 1.2),     # kd_lat (default: 0.35)
-        (120.0, 320.0), # kp_yaw (default: 180.0)
-        (15.0, 65.0),   # kd_yaw (default: 20.0)
+        (0.5, 2.5),     # kp_fwd (nominal: 1.2)
+        (0.10, 1.20),   # centering_damp (cornering deceleration factor per unit |e_x|)
+        (0.20, 0.75),   # min_centering_factor (speed retention floor during sharp turns)
+        (0.5, 4.0),     # kp_lat (nominal: 2.5)
+        (0.05, 1.0),    # kd_lat (nominal: 0.35)
+        (120.0, 320.0), # kp_yaw (nominal: 180.0)
+        (10.0, 65.0),   # kd_yaw (nominal: 20.0)
     ]
 
     baseline_params = np.array([1.2, 0.25, 0.35, 2.5, 0.35, 180.0, 20.0], dtype=np.float64)
-    print(f"\n[EVAL] Evaluating baseline parameters on tuning suite ({len(scenarios)} scenarios):")
+    print(f"\n[EVAL] Evaluating baseline parameters on realistic observation suite ({len(scenarios)} scenarios):")
     print(f"       Gains: {baseline_params.round(3)}...")
     t0 = time.time()
     baseline_cost = evaluate_candidate(baseline_params, scenarios, lambda_image=lambda_image)
     print(f"       Baseline Mean Cost: {baseline_cost:.4f} (evaluated in {time.time()-t0:.2f}s)")
 
-    # Evaluate previous uncalibrated tuned gains (with min_centering_factor=0.85) for reference
-    prev_uncalibrated = np.array([0.863, 0.186, 0.850, 1.865, 0.736, 222.97, 47.84], dtype=np.float64)
-    prev_cost = evaluate_candidate(prev_uncalibrated, scenarios, lambda_image=lambda_image)
-    print(f"       Prior Tuned Gains (min_centering=0.85): Cost = {prev_cost:.4f}")
+    # Evaluate previous tuned gains (which were tuned without realistic observations)
+    prev_gains = np.array([0.824, 0.811, 0.290, 1.062, 0.471, 218.68, 37.64], dtype=np.float64)
+    prev_cost = evaluate_candidate(prev_gains, scenarios, lambda_image=lambda_image)
+    print(f"       Prior Tuned Gains (unobserved): Cost = {prev_cost:.4f}")
 
-    print(f"\n[OPTIM] Launching Differential Evolution Global Optimization (population=6, maxiter=12, workers={workers})...")
+    print(f"\n[OPTIM] Launching Differential Evolution Global Optimization (popsize=6, maxiter=12)...")
     t_start = time.time()
     
     eval_counter = [0]
@@ -316,8 +492,8 @@ def run_tuning_optimization(
         mutation=(0.5, 1.0),
         recombination=0.7,
         seed=42,
-        workers=workers,
-        updating="deferred",
+        workers=1, # Parallelism handled directly across scenarios via _GLOBAL_POOL
+        updating="immediate",
         polish=False,
         callback=callback_fn,
         disp=False
@@ -333,7 +509,7 @@ def run_tuning_optimization(
         x0=de_res.x,
         args=(scenarios, lambda_image),
         method="Nelder-Mead",
-        options={"maxiter": 40, "disp": False}
+        options={"maxiter": 35, "disp": False}
     )
 
     opt_params = nm_res.x
@@ -345,7 +521,7 @@ def run_tuning_optimization(
 
     print(f"[OPTIM] Optimization finished in {elapsed:.1f}s.")
     print(f"        Tuned Parameters:   {opt_params.round(3)}")
-    print(f"        Final Tuned Cost:   {opt_cost:.4f} (Baseline: {baseline_cost:.4f}, Prev Tuned: {prev_cost:.4f}, Improvement: {pct_gain:+.1f}%)")
+    print(f"        Final Tuned Cost:   {opt_cost:.4f} (Baseline: {baseline_cost:.4f}, Prev: {prev_cost:.4f}, Improvement: {pct_gain:+.1f}%)")
 
     tuned_dict = {
         "kp_forward": float(opt_params[0]),
@@ -396,7 +572,12 @@ def run_tuning_optimization(
     output_weights_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_weights_path, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2)
-    print(f"[SAVE] Exported tuned PID gains to: {output_weights_path}")
+    print(f"[SAVE] Exported realistic tuned PID gains to: {output_weights_path}")
+
+    if _GLOBAL_POOL is not None:
+        _GLOBAL_POOL.close()
+        _GLOBAL_POOL.join()
+        _GLOBAL_POOL = None
 
     return results
 
@@ -407,7 +588,7 @@ def validate_on_held_out(
     tuned_params: np.ndarray,
     lambda_image: float = 15.0
 ):
-    """Directly compares baseline vs tuned PID on the independent 30-scenario validation suite."""
+    """Directly compares baseline vs realistic tuned PID on the independent 30-scenario validation suite."""
     if not val_suite_path.exists():
         print(f"[WARN] Validation suite not found at {val_suite_path}")
         return
@@ -447,8 +628,8 @@ def validate_on_held_out(
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Tune Kinematic Controller for Standoff and Image Tracking")
-    parser.add_argument("--suite", type=str, default="outputs/benchmarks/datasets/pid_tuning_suite_36.json")
+    parser = argparse.ArgumentParser(description="Tune Kinematic Controller Under Realistic Observations")
+    parser.add_argument("--suite", type=str, default="outputs/benchmarks/datasets/pid_realistic_tuning_suite_40.json")
     parser.add_argument("--val-suite", type=str, default="outputs/benchmarks/datasets/validation_suite_30.json")
     parser.add_argument("--out", type=str, default="control/weights/tuned_pid_gains.json")
     parser.add_argument("--lambda-image", type=float, default=15.0, help="Weight for image plane error vs standoff error")

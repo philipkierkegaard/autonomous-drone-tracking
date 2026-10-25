@@ -95,7 +95,7 @@ class KinematicVisualServoController:
         max_lat_accel: float = 6.0,          # Maximum lateral acceleration in m/s^2 (matched identically to RL envelope)
         centering_damping: float = 0.15,     # Cornering deceleration factor per unit horizontal error
         min_centering_factor: float = 0.35,  # Speed retention floor during sharp turns (allows braking down to 35% speed)
-        search_mode: str = "decay",          # 'decay' (smooth forward speed decay), 'brake' (immediate active hover), or 'legacy_coast'
+        search_mode: str = "momentum_cruise", # 'momentum_cruise' (preserve pursuit momentum), 'decay' (smooth brake), or 'brake' (immediate hover)
         coast_mode: str = "decay",           # 'decay' (inhibit forward acceleration & smooth decay), 'brake' (immediate hover), or 'follow'
     ):
         self.camera_uptilt = np.deg2rad(camera_uptilt_deg)
@@ -208,8 +208,8 @@ class KinematicVisualServoController:
         self.max_accel_yaw = float(max_accel_yaw)
         self.max_lat_vel = lat_limit
         self.max_lat_accel = float(max_lat_accel)
-        self.prev_cmd = np.zeros(4, dtype=np.float64)
-        self.prev_cmd_vx = 0.0
+        self.prev_cmd = np.array([4.0, 0.0, 0.0, 0.0], dtype=np.float64)
+        self.prev_cmd_vx = 4.0
         self.prev_cmd_vy = 0.0
         self.last_seen_ex = 0.0
         self.last_seen_ey = 0.0
@@ -225,8 +225,8 @@ class KinematicVisualServoController:
         self.integral = np.zeros(4, dtype=np.float64)
         self.prev_error = np.zeros(4, dtype=np.float64)
         self.filtered_deriv = np.zeros(4, dtype=np.float64)
-        self.prev_cmd = np.zeros(4, dtype=np.float64)
-        self.prev_cmd_vx = 0.0
+        self.prev_cmd = np.array([4.0, 0.0, 0.0, 0.0], dtype=np.float64)
+        self.prev_cmd_vx = 4.0
         self.prev_cmd_vy = 0.0
         self.last_seen_ex = 0.0
         self.last_seen_ey = 0.0
@@ -264,7 +264,25 @@ class KinematicVisualServoController:
         if status == "SEARCHING":
             self.lost_time += dt
             self.initialized = False  # Reset initialized state to eliminate derivative spike upon re-acquisition
-            if self.search_mode == "decay":
+            if self.search_mode == "momentum_cruise":
+                # Option C: Momentum Cruise & Visual Search
+                # Preserves forward pursuit speed (nominally 4.0 m/s) and continues turning along
+                # the last seen azimuth direction for up to 2.5s, preventing sudden freezing/hovering
+                # when target transiently drops out during sharp maneuvers.
+                self.integral.fill(0.0)
+                if self.lost_time < 2.5:
+                    cruise_speed = max(3.5, min(8.0, self.prev_cmd_vx))
+                    sweep_dir = 1.0 if self.last_seen_ex >= 0.0 else -1.0
+                    cmd_yaw = float(sweep_dir * min(60.0, max(25.0, abs(self.prev_cmd[3]))))
+                else:
+                    cruise_speed = max(0.0, self.prev_cmd_vx - 3.0 * dt)
+                    cmd_yaw = 0.0
+                self.prev_cmd_vx = cruise_speed
+                self.prev_cmd[0] = cruise_speed
+                self.prev_cmd[1] = 0.0
+                self.prev_cmd[3] = cmd_yaw
+                return np.array([cruise_speed, 0.0, 0.0, cmd_yaw], dtype=np.float64)
+            elif self.search_mode == "decay":
                 # Option A: Smooth Forward Speed Decay & Turn Recovery
                 # Bleeds off forward momentum at 3.0 m/s^2 while continuing yaw search in the direction
                 # where the target was last seen, preventing blind straight-line overshoot.
