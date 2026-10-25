@@ -1,14 +1,16 @@
 {
   "r_arrival": 140.0,
   "tau_arrival": 3.5,
+  "min_arrival_dwell_s": 0.5,
   "dist_peak": 8.0,
-  "dist_sigma": 1.5,
+  "dist_sigma": 1.0,
   "dist_pull": 0.35,
-  "blast_base": 25.0,
-  "dwell_scale": 10.0,
-  "p_collision": 0.0,
+  "blast_base": 6.0,
+  "dwell_scale": 2.0,
+  "p_collision": -20.0,
   "p_ground": -20.0,
-  "pn_lead_weight": 3.5,
-  "collision_dist": 0.9,
+  "p_lost_fov": -1.5,
+  "pn_lead_weight": 2.5,
+  "collision_dist": 0.5,
   "sprint_weight": 3.5
 }

@@ -95,7 +95,10 @@ def render_simple_chase_video(
     is_rl = controller_type.lower() in ("recurrent_ppo", "rl", "recurrent")
     if is_rl:
         model_str = str(model_path).lower() if model_path else ""
-        if "gen5" in model_str:
+        if "calibrated_expressive" in model_str:
+            ctrl_label = "Learned Recurrent PPO (Calibrated Expressive 1.5M)"
+            ctrl_short = "Expressive RL"
+        elif "gen5" in model_str:
             if "calibrated" in model_str:
                 ctrl_label = "Learned Recurrent PPO (Gen 5C Calibrated)"
                 ctrl_short = "Gen 5C RL"
@@ -118,6 +121,7 @@ def render_simple_chase_video(
         # Load tuned gains if available or specified
         kp_fwd = 1.2
         cent_damp = 0.15
+        min_cent = 0.35
         kp_lat = 2.5
         kd_lat = 0.35
         kp_yaw = 180.0
@@ -131,6 +135,7 @@ def render_simple_chase_video(
                 params = g_data.get("tuned_parameters", g_data)
                 kp_fwd = float(params.get("kp_forward", kp_fwd))
                 cent_damp = float(params.get("centering_damping", cent_damp))
+                min_cent = float(params.get("min_centering_factor", min_cent))
                 kp_lat = float(params.get("kp_lat", kp_lat))
                 kd_lat = float(params.get("kd_lat", kd_lat))
                 kp_yaw = float(params.get("kp_yaw", kp_yaw))
@@ -181,14 +186,16 @@ def render_simple_chase_video(
             enable_lateral_strafe=True,
             kp_forward=kp_fwd,
             centering_damping=cent_damp,
+            min_centering_factor=min_cent,
             kp_lat=kp_lat,
             kd_lat=kd_lat,
             kp_yaw=kp_yaw,
             kd_yaw=kd_yaw,
             max_lat_vel=4.0,
-            max_lat_accel=5.0,
+            max_lat_accel=6.0,
             max_accel=6.0,
             max_decel=6.0,
+            max_accel_yaw=240.0,
             min_limits=np.array([-0.5, -4.0, -3.0, -120.0]),
             max_limits=np.array([15.0,  4.0,  2.0,  120.0]),
         )
@@ -591,6 +598,7 @@ def render_dual_chase_video(
     # 1. Classical / Tuned PID Controller
     kp_fwd = 1.2
     cent_damp = 0.15
+    min_cent = 0.35
     kp_lat = 2.5
     kd_lat = 0.35
     kp_yaw = 180.0
@@ -606,6 +614,7 @@ def render_dual_chase_video(
             params = g_data.get("tuned_parameters", g_data)
             kp_fwd = float(params.get("kp_forward", kp_fwd))
             cent_damp = float(params.get("centering_damping", cent_damp))
+            min_cent = float(params.get("min_centering_factor", min_cent))
             kp_lat = float(params.get("kp_lat", kp_lat))
             kd_lat = float(params.get("kd_lat", kd_lat))
             kp_yaw = float(params.get("kp_yaw", kp_yaw))
@@ -626,14 +635,16 @@ def render_dual_chase_video(
         enable_lateral_strafe=True,
         kp_forward=kp_fwd,
         centering_damping=cent_damp,
+        min_centering_factor=min_cent,
         kp_lat=kp_lat,
         kd_lat=kd_lat,
         kp_yaw=kp_yaw,
         kd_yaw=kd_yaw,
         max_lat_vel=4.0,
-        max_lat_accel=5.0,
+        max_lat_accel=6.0,
         max_accel=6.0,
         max_decel=6.0,
+        max_accel_yaw=240.0,
         min_limits=np.array([-0.5, -4.0, -3.0, -120.0]),
         max_limits=np.array([15.0,  4.0,  2.0,  120.0]),
     )
@@ -652,7 +663,10 @@ def render_dual_chase_video(
         raise ImportError("RecurrentVisualServoController could not be imported.")
 
     model_str = str(model_path).lower() if model_path else ""
-    if "gen5" in model_str:
+    if "calibrated_expressive" in model_str:
+        rl_label = "Learned Expressive RL (1.5M)"
+        rl_short = "Expressive RL"
+    elif "gen5" in model_str:
         if "calibrated" in model_str:
             rl_label = "Learned Gen 5C RL Chaser"
             rl_short = "Gen 5C RL"
@@ -1077,8 +1091,8 @@ def compute_shared_bounds(
         if ctype == "pid":
             ctrl = KinematicVisualServoController(
                 camera_uptilt_deg=15.0, hfov_deg=62.0, vfov_deg=38.0, desired_standoff_dist=3.5,
-                enable_lateral_strafe=True, kp_lat=2.5, kd_lat=0.35, max_lat_vel=4.0, max_lat_accel=5.0, max_accel=6.0, max_decel=6.0,
-                min_limits=np.array([-0.5, -4.0, -3.0, -120.0]), max_limits=np.array([14.0, 4.0, 2.0, 120.0])
+                enable_lateral_strafe=True, kp_lat=2.5, kd_lat=0.35, max_lat_vel=4.0, max_lat_accel=6.0, max_accel=6.0, max_decel=6.0, max_accel_yaw=240.0,
+                min_limits=np.array([-0.5, -4.0, -3.0, -120.0]), max_limits=np.array([15.0, 4.0, 2.0, 120.0])
             )
         else:
             if model_path is None:

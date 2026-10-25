@@ -427,12 +427,7 @@ class RecurrentVisualServoController:
         else:
             target_vx = float(standoff_nom + a[0] * (standoff_nom + self.max_rev_vel))
 
-        # Forward collision proximity barrier: inhibit excess surge if dangerously close (distance < 2.2m)
-        dist = telemetry.get("distance", None)
-        if dist is not None and dist < 2.2:
-            max_safe_vx = float(max(0.0, (dist - 1.3) / 0.9 * standoff_nom))
-            target_vx = min(target_vx, max_safe_vx)
-
+        # Forward velocity target
         target_vy = float(a[1] * self.max_lat_vel)
 
         # a2 in NED: negative is climb, positive is descend

@@ -80,7 +80,7 @@ class KinematicVisualServoController:
         max_accel: float = 6.0,              # m/s^2 forward acceleration (calibrated ~31.5 deg tilt ramp for 2 kg quad)
         max_decel: float = 6.0,              # m/s^2 calibrated braking deceleration (matched identically to RL envelope)
         max_accel_z: float = 3.0,            # m/s^2 vertical climb/descent acceleration limit
-        max_accel_yaw: float = 180.0,        # deg/s^2 yaw angular acceleration limit
+        max_accel_yaw: float = 240.0,        # deg/s^2 yaw angular acceleration limit (matched identically to RL envelope)
         filter_tau: float = 0.06,            # Derivative low-pass filter time constant (seconds)
         max_yawspeed_deg: float = None,
         # 4-DOF Lateral Strafe (Roll Tilt) Control
@@ -88,10 +88,10 @@ class KinematicVisualServoController:
         kp_lat: float = 2.5,                 # Lateral proportional gain (m/s per unit error_x)
         kd_lat: float = 0.35,                # Lateral derivative damping (counteracts roll-induced visual swings)
         max_lat_vel: float = 4.0,            # Maximum lateral velocity in m/s (matched identically to RL envelope)
-        max_lat_accel: float = 5.0,          # Maximum lateral acceleration in m/s^2 for agile roll initiation
+        max_lat_accel: float = 6.0,          # Maximum lateral acceleration in m/s^2 (matched identically to RL envelope)
         kp_forward: float = 1.2,             # Forward throttle modulation gain (m/s per meter of distance error)
         centering_damping: float = 0.15,     # Cornering deceleration factor per unit horizontal error
-        min_centering_factor: float = 0.85,  # Maximum speed retention floor during sharp turns
+        min_centering_factor: float = 0.35,  # Speed retention floor during sharp turns (allows braking down to 35% speed)
         search_mode: str = "decay",          # 'decay' (smooth forward speed decay), 'brake' (immediate active hover), or 'legacy_coast'
         coast_mode: str = "decay",           # 'decay' (inhibit forward acceleration & smooth decay), 'brake' (immediate hover), or 'follow'
     ):
@@ -243,15 +243,21 @@ class KinematicVisualServoController:
             self.lost_time += dt
             self.initialized = False  # Reset initialized state to eliminate derivative spike upon re-acquisition
             if self.search_mode == "decay":
-                # Option A: Smooth Forward Speed Decay & Station-Keeping Alignment
-                # Bleeds off forward momentum smoothly at 2.0 m/s^2 while zeroing lateral and yaw drift,
-                # preventing violent zero-velocity freezing during 1-frame visual dropouts.
+                # Option A: Smooth Forward Speed Decay & Turn Recovery
+                # Bleeds off forward momentum at 3.0 m/s^2 while continuing yaw search in the direction
+                # where the target was last seen, preventing blind straight-line overshoot.
                 self.integral.fill(0.0)
-                cmd_vx = max(0.0, self.prev_cmd_vx - 2.0 * dt)
+                cmd_vx = max(0.0, self.prev_cmd_vx - 3.0 * dt)
+                if self.lost_time < 1.5 and abs(self.last_seen_ex) > 0.05:
+                    sweep_dir = 1.0 if self.last_seen_ex > 0.0 else -1.0
+                    cmd_yaw = float(sweep_dir * min(60.0, max(25.0, abs(self.prev_cmd[3]))))
+                else:
+                    cmd_yaw = 0.0
                 self.prev_cmd_vx = cmd_vx
                 self.prev_cmd[0] = cmd_vx
                 self.prev_cmd[1] = 0.0
-                return np.array([cmd_vx, 0.0, 0.0, 0.0], dtype=np.float64)
+                self.prev_cmd[3] = cmd_yaw
+                return np.array([cmd_vx, 0.0, 0.0, cmd_yaw], dtype=np.float64)
             elif self.search_mode == "brake":
                 # Option B: Immediate Active Brake & Station-Keeping Hover
                 # Arrests all forward, lateral, vertical, and angular momentum immediately.
@@ -379,7 +385,8 @@ class KinematicVisualServoController:
             horiz_err_norm=abs(err_x),
             decoupled=True,
             target_vx_ff=target_vx_ff if not is_coasting else 0.0,
-            is_coasting=is_coasting
+            is_coasting=is_coasting,
+            current_alt_m=current_alt_m,
         )
 
     def update(
@@ -390,7 +397,8 @@ class KinematicVisualServoController:
         horiz_err_norm: float = 0.0,
         decoupled: bool = True,
         target_vx_ff: float = 0.0,
-        is_coasting: bool = False
+        is_coasting: bool = False,
+        current_alt_m: Optional[float] = None,
     ) -> np.ndarray:
         """
         Vectorized 4-DOF Kinematic Control Update.
@@ -502,6 +510,10 @@ class KinematicVisualServoController:
             decayed_vx = max(3.5, self.prev_cmd_vx - 1.5 * dt)
             raw_output[0] = min(raw_output[0], decayed_vx)
             raw_output[1] *= 0.75
+
+        # Ground proximity safety barrier: inhibit descent when below 1.4m AGL
+        if current_alt_m is not None and current_alt_m < 1.4 and raw_output[2] > 0.0:
+            raw_output[2] = float(raw_output[2] * max(0.0, (current_alt_m - 0.9) / 0.5))
 
         # ----------------------------------------------------------------------
         # 6. Slew-Rate Limiting Across All 4 Flight Axes

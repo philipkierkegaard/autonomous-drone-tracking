@@ -345,6 +345,7 @@ def compute_cross_configuration_analysis(
 
     has_raw = "raw_yolo" in results_by_cfg
     has_tuned = "kalman_tuned" in results_by_cfg
+    has_foveal = "kalman_tuned_foveal" in results_by_cfg
 
     dropout_analysis = {}
     shared_jitters = {}
@@ -374,27 +375,46 @@ def compute_cross_configuration_analysis(
         matched_raw_iou_all = []
         matched_kalman_iou_all = []
 
+        # Shared valid frames cohort (evaluated across all configurations on identical frames)
+        shared_valid_raw_iou_all = []
+        shared_valid_kf_iou_all = []
+        shared_valid_fov_iou_all = []
+        shared_valid_raw_cle_all = []
+        shared_valid_kf_cle_all = []
+        shared_valid_fov_cle_all = []
+
         raw_shared_jitters_all = []
         kf_shared_jitters_all = []
+        fov_shared_jitters_all = []
 
         for vid in TEST_VIDEOS:
             raw_r = results_by_cfg["raw_yolo"][vid]
             kf_r = results_by_cfg["kalman_tuned"][vid]
+            fov_r = results_by_cfg["kalman_tuned_foveal"].get(vid) if has_foveal else None
 
             raw_recs = raw_r["per_frame_records"]
             kf_recs = kf_r["per_frame_records"]
+            fov_recs = fov_r["per_frame_records"] if fov_r is not None else None
             img_cx = raw_r["img_w"] / 2.0
             img_cy = raw_r["img_h"] / 2.0
 
             n_frames = min(len(raw_recs), len(kf_recs))
+            if fov_recs is not None:
+                n_frames = min(n_frames, len(fov_recs))
 
-            # Build trajectory lookups for shared-frame jitter
+            # Build trajectory lookups for shared-frame jitter on identical frame triplets across all active configs
             raw_pts_map = {rec["frame"]: (rec["pred_cx"], rec["pred_cy"]) for rec in raw_recs if rec["has_pred"] and rec["pred_cx"] is not None and rec["pred_cy"] is not None}
             kf_pts_map = {rec["frame"]: (rec["pred_cx"], rec["pred_cy"]) for rec in kf_recs if rec["has_pred"] and rec["pred_cx"] is not None and rec["pred_cy"] is not None}
-            shared_frame_set = set(raw_pts_map.keys()) & set(kf_pts_map.keys())
+            if fov_recs is not None:
+                fov_pts_map = {rec["frame"]: (rec["pred_cx"], rec["pred_cy"]) for rec in fov_recs if rec["has_pred"] and rec["pred_cx"] is not None and rec["pred_cy"] is not None}
+                shared_frame_set = set(raw_pts_map.keys()) & set(kf_pts_map.keys()) & set(fov_pts_map.keys())
+            else:
+                fov_pts_map = {}
+                shared_frame_set = set(raw_pts_map.keys()) & set(kf_pts_map.keys())
 
             vid_raw_jitters = []
             vid_kf_jitters = []
+            vid_fov_jitters = []
             for f in sorted(list(shared_frame_set)):
                 if (f - 1 in shared_frame_set) and (f + 1 in shared_frame_set):
                     # Raw jerk
@@ -413,16 +433,27 @@ def compute_cross_configuration_analysis(
                     vid_kf_jitters.append(kf_jerk)
                     kf_shared_jitters_all.append(kf_jerk)
 
+                    # Foveal jerk
+                    if fov_recs is not None:
+                        fx_p, fy_p = fov_pts_map[f - 1]
+                        fx_c, fy_c = fov_pts_map[f]
+                        fx_n, fy_n = fov_pts_map[f + 1]
+                        fov_jerk = float(np.hypot(fx_n - 2 * fx_c + fx_p, fy_n - 2 * fy_c + fy_p))
+                        vid_fov_jitters.append(fov_jerk)
+                        fov_shared_jitters_all.append(fov_jerk)
+
             shared_jitters[vid] = {
                 "raw_jitter_mean": float(np.mean(vid_raw_jitters)) if vid_raw_jitters else 0.0,
                 "kalman_jitter_mean": float(np.mean(vid_kf_jitters)) if vid_kf_jitters else 0.0,
+                "foveal_jitter_mean": float(np.mean(vid_fov_jitters)) if vid_fov_jitters else 0.0,
                 "shared_triples_count": len(vid_raw_jitters)
             }
 
-            # Dropout & Coasting Quality inspection
+            # Dropout & Coasting Quality inspection AND Shared-Valid Evaluation
             for i in range(n_frames):
                 raw_rec = raw_recs[i]
                 kf_rec = kf_recs[i]
+                fov_rec = fov_recs[i] if fov_recs is not None else None
 
                 if not kf_rec["has_gt"]:
                     continue
@@ -490,6 +521,20 @@ def compute_cross_configuration_analysis(
                     matched_raw_iou_all.append(raw_rec["iou"])
                     matched_kalman_iou_all.append(kf_rec["iou"])
 
+                # Cohort 5: Mutual Shared Valid Evaluation (strictly on frames where ALL active configurations predicted)
+                raw_valid = raw_rec["has_pred"] and raw_rec["pred_box"] is not None and raw_rec["iou"] is not None
+                kf_valid = kf_rec["has_pred"] and kf_rec["pred_box"] is not None and kf_rec["iou"] is not None
+                fov_valid = (fov_rec is not None and fov_rec["has_pred"] and fov_rec["pred_box"] is not None and fov_rec["iou"] is not None) if has_foveal else True
+
+                if raw_valid and kf_valid and fov_valid:
+                    shared_valid_raw_iou_all.append(float(raw_rec["iou"]))
+                    shared_valid_kf_iou_all.append(float(kf_rec["iou"]))
+                    shared_valid_raw_cle_all.append(float(raw_rec["cle"]))
+                    shared_valid_kf_cle_all.append(float(kf_rec["cle"]))
+                    if has_foveal and fov_rec is not None:
+                        shared_valid_fov_iou_all.append(float(fov_rec["iou"]))
+                        shared_valid_fov_cle_all.append(float(fov_rec["cle"]))
+
         # Aggregate re-acquisitions
         tot_reacq_succ = sum(sum(r["reacq_success_by_k"].values()) for r in results_by_cfg["kalman_tuned"].values())
         tot_reacq_lost = sum(sum(r["reacq_lost_by_k"].values()) for r in results_by_cfg["kalman_tuned"].values())
@@ -551,8 +596,30 @@ def compute_cross_configuration_analysis(
             "shared_frame_jitter": {
                 "overall_raw_jitter_mean": round(float(np.mean(raw_shared_jitters_all)), 2) if raw_shared_jitters_all else None,
                 "overall_kalman_jitter_mean": round(float(np.mean(kf_shared_jitters_all)), 2) if kf_shared_jitters_all else None,
+                "overall_foveal_jitter_mean": round(float(np.mean(fov_shared_jitters_all)), 2) if fov_shared_jitters_all else None,
                 "jitter_suppression_percent": round((1.0 - np.mean(kf_shared_jitters_all) / max(1e-4, np.mean(raw_shared_jitters_all))) * 100.0, 1) if raw_shared_jitters_all else None,
+                "foveal_suppression_percent": round((1.0 - np.mean(fov_shared_jitters_all) / max(1e-4, np.mean(raw_shared_jitters_all))) * 100.0, 1) if (raw_shared_jitters_all and fov_shared_jitters_all) else None,
+                "shared_triples_count": len(raw_shared_jitters_all),
                 "per_video": shared_jitters
+            },
+            "shared_valid_evaluation": {
+                "description": "Controlled evaluation strictly on mutual frames where all evaluated configurations produced valid predictions",
+                "total_shared_valid_frames": len(shared_valid_raw_iou_all),
+                "raw_mean_iou": round(float(np.mean(shared_valid_raw_iou_all)), 3) if shared_valid_raw_iou_all else None,
+                "kalman_mean_iou": round(float(np.mean(shared_valid_kf_iou_all)), 3) if shared_valid_kf_iou_all else None,
+                "foveal_mean_iou": round(float(np.mean(shared_valid_fov_iou_all)), 3) if (has_foveal and shared_valid_fov_iou_all) else None,
+                "raw_mean_cle_px": round(float(np.mean(shared_valid_raw_cle_all)), 2) if shared_valid_raw_cle_all else None,
+                "kalman_mean_cle_px": round(float(np.mean(shared_valid_kf_cle_all)), 2) if shared_valid_kf_cle_all else None,
+                "foveal_mean_cle_px": round(float(np.mean(shared_valid_fov_cle_all)), 2) if (has_foveal and shared_valid_fov_cle_all) else None,
+                "raw_median_cle_px": round(float(np.median(shared_valid_raw_cle_all)), 2) if shared_valid_raw_cle_all else None,
+                "kalman_median_cle_px": round(float(np.median(shared_valid_kf_cle_all)), 2) if shared_valid_kf_cle_all else None,
+                "foveal_median_cle_px": round(float(np.median(shared_valid_fov_cle_all)), 2) if (has_foveal and shared_valid_fov_cle_all) else None,
+                "raw_precision_20px": round(float(np.mean([c <= 20.0 for c in shared_valid_raw_cle_all]) * 100.0), 2) if shared_valid_raw_cle_all else None,
+                "kalman_precision_20px": round(float(np.mean([c <= 20.0 for c in shared_valid_kf_cle_all]) * 100.0), 2) if shared_valid_kf_cle_all else None,
+                "foveal_precision_20px": round(float(np.mean([c <= 20.0 for c in shared_valid_fov_cle_all]) * 100.0), 2) if (has_foveal and shared_valid_fov_cle_all) else None,
+                "raw_precision_50px": round(float(np.mean([c <= 50.0 for c in shared_valid_raw_cle_all]) * 100.0), 2) if shared_valid_raw_cle_all else None,
+                "kalman_precision_50px": round(float(np.mean([c <= 50.0 for c in shared_valid_kf_cle_all]) * 100.0), 2) if shared_valid_kf_cle_all else None,
+                "foveal_precision_50px": round(float(np.mean([c <= 50.0 for c in shared_valid_fov_cle_all]) * 100.0), 2) if (has_foveal and shared_valid_fov_cle_all) else None,
             }
         }
 
@@ -634,8 +701,13 @@ def generate_benchmark_figures(
     has_shared = "shared_frame_jitter" in dropout_analysis and "per_video" in dropout_analysis["shared_frame_jitter"]
 
     for idx, cfg in enumerate(configs):
-        if has_shared and cfg in ["raw_yolo", "kalman_tuned"]:
-            key = "raw_jitter_mean" if cfg == "raw_yolo" else "kalman_jitter_mean"
+        if has_shared and cfg in ["raw_yolo", "kalman_tuned", "kalman_tuned_foveal"]:
+            if cfg == "raw_yolo":
+                key = "raw_jitter_mean"
+            elif cfg == "kalman_tuned":
+                key = "kalman_jitter_mean"
+            else:
+                key = "foveal_jitter_mean"
             jitters = [dropout_analysis["shared_frame_jitter"]["per_video"][v][key] for v in videos]
         else:
             jitters = [
@@ -649,8 +721,8 @@ def generate_benchmark_figures(
             ax.annotate(f"{h:.1f}px", xy=(bar.get_x() + bar.get_width() / 2, h),
                         xytext=(0, 3), textcoords="offset points", ha="center", va="bottom", fontsize=8.5, weight="bold")
 
-    ax.set_ylabel("Shared-Frame Jitter (px/frame²)", fontsize=11, weight="bold")
-    ax.set_title("Actuator Set-Point Jitter Suppression: Raw YOLO vs Kalman Filter", fontsize=12, weight="bold", pad=12)
+    ax.set_ylabel("Shared-Frame Jerk (px/frame²)", fontsize=11, weight="bold")
+    ax.set_title("Spatial Jerk Suppression: Raw YOLO vs Kalman Filter vs Foveal Zoom", fontsize=12, weight="bold", pad=12)
     ax.set_xticks(x)
     ax.set_xticklabels([f"{v}\n({next(r['total_frames'] for r in results if r['video'] == v)} frames)" for v in videos], fontsize=10)
     ax.legend(frameon=True, facecolor="#F8FAFC", edgecolor="#CBD5E1")
@@ -785,20 +857,30 @@ def generate_benchmark_figures(
         ax_c.set_title(f"Panel C: Dropout Suppression ({pct_drop:.1f}% Reduction in Lost Frames)", fontsize=11, weight="bold")
         ax_c.grid(axis="y", linestyle="--", alpha=0.4)
 
-        # Panel D: Set-Point Jitter Suppression (Shared-Frame)
+        # Panel D: Spatial Jerk Suppression (Shared-Frame Identical Triplets)
         ax_d = axes[1, 1]
-        raw_jit = dropout_analysis["shared_frame_jitter"]["overall_raw_jitter_mean"] or aggregate_summaries["raw_yolo"]["unconstrained_jitter_px"]
-        kf_jit = dropout_analysis["shared_frame_jitter"]["overall_kalman_jitter_mean"] or aggregate_summaries["kalman_tuned"]["unconstrained_jitter_px"]
-        jitter_bars = [raw_jit, kf_jit]
-        bars_d = ax_d.bar(cfgs_c, jitter_bars, color=c_colors, width=0.45, alpha=0.9)
+        raw_jit = dropout_analysis["shared_frame_jitter"].get("overall_raw_jitter_mean") or aggregate_summaries["raw_yolo"]["unconstrained_jitter_px"]
+        kf_jit = dropout_analysis["shared_frame_jitter"].get("overall_kalman_jitter_mean") or aggregate_summaries["kalman_tuned"]["unconstrained_jitter_px"]
+        fov_jit = dropout_analysis["shared_frame_jitter"].get("overall_foveal_jitter_mean")
+
+        if fov_jit is not None and "kalman_tuned_foveal" in aggregate_summaries:
+            cfgs_d = ["Raw YOLO\n(Memoryless)", "YOLO + Kalman\n(Tuned)", "Kalman + Zoom\n(Foveal)"]
+            jitter_bars = [raw_jit, kf_jit, fov_jit]
+            c_colors_d = ["#EF4444", "#10B981", "#8B5CF6"]
+        else:
+            cfgs_d = ["Raw YOLO\n(Memoryless)", "YOLO + Kalman\n(Tuned)"]
+            jitter_bars = [raw_jit, kf_jit]
+            c_colors_d = ["#EF4444", "#10B981"]
+
+        bars_d = ax_d.bar(cfgs_d, jitter_bars, color=c_colors_d, width=0.45, alpha=0.9)
         for b in bars_d:
             h = b.get_height()
             ax_d.annotate(f"{h:.2f} px/f²", xy=(b.get_x() + b.get_width() / 2, h),
                           xytext=(0, 4), textcoords="offset points", ha="center", va="bottom", fontsize=9.5, weight="bold")
         diff_jit = raw_jit - kf_jit
         pct_jit = (diff_jit / max(1e-4, raw_jit)) * 100.0
-        ax_d.set_ylabel("Spatial Jitter Index (px/frame²)", fontsize=10, weight="bold")
-        ax_d.set_title(f"Panel D: Actuator Jitter Suppression ({pct_jit:.1f}% Jerk Reduction)", fontsize=11, weight="bold")
+        ax_d.set_ylabel("Spatial Jerk Index (px/frame²)", fontsize=10, weight="bold")
+        ax_d.set_title(f"Panel D: Spatial Jerk Suppression ({pct_jit:.1f}% Reduction vs Raw)", fontsize=11, weight="bold")
         ax_d.grid(axis="y", linestyle="--", alpha=0.4)
 
         plt.suptitle("Anti-UAV Test Set: YOLOv8 + Kalman Filter Evaluation & Dropout Quality", fontsize=13, weight="bold", y=0.99)
@@ -827,11 +909,21 @@ def write_markdown_report(
     drift_k = dropout_analysis.get("drift_by_horizon_k", {})
     reacq = dropout_analysis.get("reacquisition_events", {})
     jitter_data = dropout_analysis.get("shared_frame_jitter", {})
+    shared_valid = dropout_analysis.get("shared_valid_evaluation", {})
 
     missing_reduction = ((raw_agg.get("missing_frames", 0) - kf_agg.get("missing_frames", 0)) / max(1, raw_agg.get("missing_frames", 1))) * 100.0
     jitter_reduction = jitter_data.get("jitter_suppression_percent", 0.0)
 
     has_foveal = fov_agg is not None
+
+    raw_jit_val = jitter_data.get('overall_raw_jitter_mean')
+    raw_jit_str = f"{raw_jit_val:.2f} px/f²" if raw_jit_val is not None else f"{raw_agg.get('unconstrained_jitter_px', 0.0):.2f} px/f²"
+
+    kf_jit_val = jitter_data.get('overall_kalman_jitter_mean')
+    kf_jit_str = f"{kf_jit_val:.2f} px/f²" if kf_jit_val is not None else f"{kf_agg.get('unconstrained_jitter_px', 0.0):.2f} px/f²"
+
+    fov_jit_val = jitter_data.get('overall_foveal_jitter_mean')
+    fov_jit_str = f"{fov_jit_val:.2f} px/f²" if fov_jit_val is not None else (f"{fov_agg.get('unconstrained_jitter_px', 0.0):.2f} px/f²" if has_foveal else "N/A")
 
     md = f"""# Anti-UAV Test Set Evaluation: Raw YOLOv8 vs Kalman Filter vs Foveal Zoom
 
@@ -850,40 +942,78 @@ A comprehensive empirical evaluation was conducted comparing the memoryless base
 
     if has_foveal:
         md += f"""
-| Metric | Raw YOLOv8 | YOLOv8 + Tuned Kalman | **YOLOv8 + Kalman + Foveal Zoom ({max_zoom:.1f}x)** | Operational Impact |
+| Metric | Raw YOLOv8 | YOLOv8 + Tuned Kalman | **YOLOv8 + Kalman + Foveal Zoom ({max_zoom:.1f}x)** | Operational Meaning |
 | :--- | :---: | :---: | :---: | :--- |
-| **Missing Frames (Blind Spots)** | **{raw_agg.get('missing_frames')}** ({raw_agg.get('missing_rate_percent')}%) | **{kf_agg.get('missing_frames')}** ({kf_agg.get('missing_rate_percent')}%) | **{fov_agg.get('missing_frames')}** ({fov_agg.get('missing_rate_percent')}%) | Active optical acuity eliminates dropout frames |
-| **Tracking Continuity (Locked + Coasting)** | {raw_agg.get('tracking_continuity_percent')}% | {kf_agg.get('tracking_continuity_percent')}% | **{fov_agg.get('tracking_continuity_percent')}%** | Continuous closed-loop visual servoing availability |
-| **Shared-Frame Spatial Jitter** | {jitter_data.get('overall_raw_jitter_mean', raw_agg.get('unconstrained_jitter_px')):.2f} px/f² | **{jitter_data.get('overall_kalman_jitter_mean', kf_agg.get('unconstrained_jitter_px')):.2f} px/f²** | **{fov_agg.get('unconstrained_jitter_px'):.2f} px/f²** | Actuator chatter and gimbal motor stabilization |
-| **Tracking Success Rate @ 20px (TSR@20px)** | **{raw_agg.get('tsr_20px', raw_agg.get('precision_20px'))}%** | {kf_agg.get('tsr_20px', kf_agg.get('precision_20px'))}% | **{fov_agg.get('tsr_20px', fov_agg.get('precision_20px'))}%** | Tracking success over all visible frames |
-| **Precision @ 20px (CLP, Valid Frames)** | **{raw_agg.get('precision_20px')}%** | {kf_agg.get('precision_20px')}% | **{fov_agg.get('precision_20px')}%** | Centroid localization accuracy within boresight |
-| **Precision @ 50px (Valid Frames)** | **{raw_agg.get('precision_50px')}%** | {kf_agg.get('precision_50px')}% | **{fov_agg.get('precision_50px')}%** | Capture cone envelope alignment |
-| **Mean IoU (Valid Frames)** | **{raw_agg.get('mean_iou'):.3f}** | {kf_agg.get('mean_iou'):.3f} | **{fov_agg.get('mean_iou'):.3f}** | Bounding box spatial fidelity with true drone body |
-| **Mean Center Location Error** | **{raw_agg.get('mean_cle_px')} px** | {kf_agg.get('mean_cle_px')} px | **{fov_agg.get('mean_cle_px')} px** | Absolute spatial error relative to ground truth |
-| **Median Center Location Error** | **{raw_agg.get('median_cle_px')} px** | {kf_agg.get('median_cle_px')} px | **{fov_agg.get('median_cle_px')} px** | Central tracking error under normal pursuit |
+| **Missing Frames (Blind Spots)** | **{raw_agg.get('missing_frames')}** ({raw_agg.get('missing_rate_percent')}%) | **{kf_agg.get('missing_frames')}** ({kf_agg.get('missing_rate_percent')}%) | **{fov_agg.get('missing_frames')}** ({fov_agg.get('missing_rate_percent')}%) | Visible frames where no track estimate was produced |
+| **Tracking Continuity (Locked + Coasting)** | {raw_agg.get('tracking_continuity_percent')}% | {kf_agg.get('tracking_continuity_percent')}% | **{fov_agg.get('tracking_continuity_percent')}%** | Availability of active trajectory estimate (locked or coasting) |
+| **Tracking Success Rate @ 20px (TSR@20px)** | **{raw_agg.get('tsr_20px', raw_agg.get('precision_20px'))}%** | {kf_agg.get('tsr_20px', kf_agg.get('precision_20px'))}% | **{fov_agg.get('tsr_20px', fov_agg.get('precision_20px'))}%** | Fraction of all visible frames with CLE ≤ 20px |
+| **Tracking Success Rate @ 50px (TSR@50px)** | **{raw_agg.get('tsr_50px', raw_agg.get('precision_50px'))}%** | {kf_agg.get('tsr_50px', kf_agg.get('precision_50px'))}% | **{fov_agg.get('tsr_50px', fov_agg.get('precision_50px'))}%** | Fraction of all visible frames with CLE ≤ 50px |
+| **Shared-Frame Spatial Jerk** | {raw_jit_str} | **{kf_jit_str}** | **{fov_jit_str}** | Second-order centroid acceleration on identical frame triplets |
+| **Precision @ 20px (CLP, Valid Frames)** | **{raw_agg.get('precision_20px')}%** | {kf_agg.get('precision_20px')}% | **{fov_agg.get('precision_20px')}%** | Conditional accuracy when prediction exists (CLE ≤ 20px) |
+| **Precision @ 50px (Valid Frames)** | **{raw_agg.get('precision_50px')}%** | {kf_agg.get('precision_50px')}% | **{fov_agg.get('precision_50px')}%** | Conditional coarse accuracy when prediction exists (CLE ≤ 50px) |
+| **Mean IoU (Valid Frames)** | **{raw_agg.get('mean_iou'):.3f}** | {kf_agg.get('mean_iou'):.3f} | **{fov_agg.get('mean_iou'):.3f}** | Bounding box overlap conditional on prediction |
+| **Mean Center Location Error** | **{raw_agg.get('mean_cle_px')} px** | {kf_agg.get('mean_cle_px')} px | **{fov_agg.get('mean_cle_px')} px** | Conditional pixel error on valid prediction frames |
+| **Median Center Location Error** | **{raw_agg.get('median_cle_px')} px** | {kf_agg.get('median_cle_px')} px | **{fov_agg.get('median_cle_px')} px** | Central tracking error on valid prediction frames |
 """
     else:
         md += f"""
-| Metric | Raw YOLOv8 | YOLOv8 + Tuned Kalman | Operational Delta / Impact |
+| Metric | Raw YOLOv8 | YOLOv8 + Tuned Kalman | Operational Delta / Meaning |
 | :--- | :---: | :---: | :---: |
 | **Missing Frames (Blind Spots)** | **{raw_agg.get('missing_frames')}** ({raw_agg.get('missing_rate_percent')}%) | **{kf_agg.get('missing_frames')}** ({kf_agg.get('missing_rate_percent')}%) | **-{missing_reduction:.1f}% reduction** in tracking dropouts |
-| **Tracking Continuity (Locked + Coasting)** | {raw_agg.get('tracking_continuity_percent')}% | **{kf_agg.get('tracking_continuity_percent')}%** | **+{kf_agg.get('tracking_continuity_percent', 0) - raw_agg.get('tracking_continuity_percent', 0):.1f} pp** visual servoing continuous set-point availability |
-| **Shared-Frame Spatial Jitter** | {jitter_data.get('overall_raw_jitter_mean', raw_agg.get('unconstrained_jitter_px')):.2f} px/f² | **{jitter_data.get('overall_kalman_jitter_mean', kf_agg.get('unconstrained_jitter_px')):.2f} px/f²** | **-{jitter_reduction:.1f}% jerk suppression** (stabilizes gimbal/flight control) |
-| **Precision @ 20px (Valid Frames)** | **{raw_agg.get('precision_20px')}%** | {kf_agg.get('precision_20px')}% | {kf_agg.get('precision_20px', 0) - raw_agg.get('precision_20px', 0):+.2f} pp |
-| **Precision @ 50px (Valid Frames)** | **{raw_agg.get('precision_50px')}%** | {kf_agg.get('precision_50px')}% | {kf_agg.get('precision_50px', 0) - raw_agg.get('precision_50px', 0):+.2f} pp |
-| **Mean IoU (Valid Frames)** | **{raw_agg.get('mean_iou'):.3f}** | {kf_agg.get('mean_iou'):.3f} | {kf_agg.get('mean_iou', 0) - raw_agg.get('mean_iou', 0):+.3f} |
-| **Mean Center Location Error** | **{raw_agg.get('mean_cle_px')} px** | {kf_agg.get('mean_cle_px')} px | {kf_agg.get('mean_cle_px', 0) - raw_agg.get('mean_cle_px', 0):+.1f} px |
-| **Median Center Location Error** | **{raw_agg.get('median_cle_px')} px** | {kf_agg.get('median_cle_px')} px | {kf_agg.get('median_cle_px', 0) - raw_agg.get('median_cle_px', 0):+.1f} px |
+| **Tracking Continuity (Locked + Coasting)** | {raw_agg.get('tracking_continuity_percent')}% | **{kf_agg.get('tracking_continuity_percent')}%** | **+{kf_agg.get('tracking_continuity_percent', 0) - raw_agg.get('tracking_continuity_percent', 0):.1f} pp** active state estimate availability |
+| **Tracking Success Rate @ 20px (TSR@20px)** | **{raw_agg.get('tsr_20px')}%** | {kf_agg.get('tsr_20px')}% | Tracking success over all visible frames |
+| **Shared-Frame Spatial Jerk** | {raw_jit_str} | **{kf_jit_str}** | **-{jitter_reduction:.1f}% jerk suppression** on identical frame triplets |
+| **Precision @ 20px (Valid Frames)** | **{raw_agg.get('precision_20px')}%** | {kf_agg.get('precision_20px')}% | Conditional accuracy when prediction exists |
+| **Precision @ 50px (Valid Frames)** | **{raw_agg.get('precision_50px')}%** | {kf_agg.get('precision_50px')}% | Conditional coarse accuracy when prediction exists |
+| **Mean IoU (Valid Frames)** | **{raw_agg.get('mean_iou'):.3f}** | {kf_agg.get('mean_iou'):.3f} | Bounding box overlap conditional on prediction |
+| **Mean Center Location Error** | **{raw_agg.get('mean_cle_px')} px** | {kf_agg.get('mean_cle_px')} px | Conditional pixel error on valid prediction frames |
+| **Median Center Location Error** | **{raw_agg.get('median_cle_px')} px** | {kf_agg.get('median_cle_px')} px | Central tracking error on valid prediction frames |
 """
 
     md += f"""
 > [!IMPORTANT]
-> **Methodological Note on Accuracy vs. Continuity Trade-off:**  
-> Raw YOLO's apparent slight advantage in IoU and Precision is an artifact of **selective sampling**: Raw YOLO only computes error on frames where the target is easily detected, omitting all occlusions and motion blur. The Kalman Filter successfully bridges **{bridged.get('total_bridged_frames', 0)} blind frames**, maintaining **{kf_agg.get('tracking_continuity_percent')}% continuity** while dramatically cutting actuator jerk by **{jitter_reduction:.1f}%**.
+> **Interpreting Tracking Continuity vs. Tracking Success Rate (TSR):**  
+> **Tracking Continuity** measures tracker lifecycle presence—specifically, the percentage of frames where the tracker outputs an active position estimate (either locked via detector measurements or coasting via linear dead reckoning) instead of terminating or dropping track.  
+> However, **continuity measures estimate availability, not spatial correctness**. A tracker could maintain 100% continuity while drifting away from the true target. Therefore, Continuity must be interpreted in conjunction with **Tracking Success Rate (TSR@20px and TSR@50px)**, which benchmarks spatial error against ground truth over all visible frames.
+> 
+> Furthermore, Raw YOLO's apparent slight advantage in conditional Mean IoU and Precision is an artifact of **selective sampling**: Raw YOLO only computes error on frames where the target is easily detected, omitting all occlusions and motion blur.
 
 ---
 
-## 2. Detailed Dropout & Coasting Quality Analysis
+## 2. Supplementary Controlled Evaluation: Shared Valid Frames Cohort
+
+In Section 1, standard Mean IoU, CLE, and Precision metrics are computed conditionally on frames where each configuration produced a valid prediction. Because Raw YOLO fails on difficult occlusions and fast target maneuvers (missing {raw_agg.get('missing_frames')} frames), its conditional metrics are subject to survival bias—evaluating only on frames where detection was relatively easy.
+
+To eliminate this sampling disparity and directly evaluate whether Kalman filtering and Foveal Zoom alter spatial localization accuracy, all configurations were evaluated on the **exact same shared subset of frames where all active configurations produced valid predictions** (N = {shared_valid.get('total_shared_valid_frames', 0)} mutual frames):
+"""
+
+    if has_foveal and shared_valid:
+        md += f"""
+| Metric on Shared Valid Frames | Raw YOLOv8 | YOLOv8 + Tuned Kalman | YOLOv8 + Kalman + Foveal Zoom | Controlled Evaluation Finding |
+| :--- | :---: | :---: | :---: | :--- |
+| **Shared-Frame Mean IoU** | **{shared_valid.get('raw_mean_iou', 0.0):.3f}** | {shared_valid.get('kalman_mean_iou', 0.0):.3f} | **{shared_valid.get('foveal_mean_iou', 0.0):.3f}** | Direct bounding box overlap on identical mutual frames |
+| **Shared-Frame Mean CLE** | **{shared_valid.get('raw_mean_cle_px', 0.0):.2f} px** | {shared_valid.get('kalman_mean_cle_px', 0.0):.2f} px | **{shared_valid.get('foveal_mean_cle_px', 0.0):.2f} px** | Direct centroid error on identical mutual frames |
+| **Shared-Frame Median CLE** | **{shared_valid.get('raw_median_cle_px', 0.0):.2f} px** | {shared_valid.get('kalman_median_cle_px', 0.0):.2f} px | **{shared_valid.get('foveal_median_cle_px', 0.0):.2f} px** | Central tracking error on identical mutual frames |
+| **Shared-Frame Precision @ 20px** | **{shared_valid.get('raw_precision_20px', 0.0):.2f}%** | {shared_valid.get('kalman_precision_20px', 0.0):.2f}% | **{shared_valid.get('foveal_precision_20px', 0.0):.2f}%** | CLE ≤ 20px on identical mutual frames |
+| **Shared-Frame Precision @ 50px** | **{shared_valid.get('raw_precision_50px', 0.0):.2f}%** | {shared_valid.get('kalman_precision_50px', 0.0):.2f}% | **{shared_valid.get('foveal_precision_50px', 0.0):.2f}%** | CLE ≤ 50px on identical mutual frames |
+| **Shared-Triplet Spatial Jerk** | {raw_jit_str} | **{kf_jit_str}** | **{fov_jit_str}** | Second-order centroid jerk on identical (f-1, f, f+1) triplets |
+"""
+    elif shared_valid:
+        md += f"""
+| Metric on Shared Valid Frames | Raw YOLOv8 | YOLOv8 + Tuned Kalman | Controlled Evaluation Finding |
+| :--- | :---: | :---: | :--- |
+| **Shared-Frame Mean IoU** | **{shared_valid.get('raw_mean_iou', 0.0):.3f}** | {shared_valid.get('kalman_mean_iou', 0.0):.3f} | Direct bounding box overlap on identical mutual frames |
+| **Shared-Frame Mean CLE** | **{shared_valid.get('raw_mean_cle_px', 0.0):.2f} px** | {shared_valid.get('kalman_mean_cle_px', 0.0):.2f} px | Direct centroid error on identical mutual frames |
+| **Shared-Frame Median CLE** | **{shared_valid.get('raw_median_cle_px', 0.0):.2f} px** | {shared_valid.get('kalman_median_cle_px', 0.0):.2f} px | Central tracking error on identical mutual frames |
+| **Shared-Frame Precision @ 20px** | **{shared_valid.get('raw_precision_20px', 0.0):.2f}%** | {shared_valid.get('kalman_precision_20px', 0.0):.2f}% | CLE ≤ 20px on identical mutual frames |
+| **Shared-Frame Precision @ 50px** | **{shared_valid.get('raw_precision_50px', 0.0):.2f}%** | {shared_valid.get('kalman_precision_50px', 0.0):.2f}% | CLE ≤ 50px on identical mutual frames |
+| **Shared-Triplet Spatial Jerk** | {raw_jit_str} | **{kf_jit_str}** | Second-order centroid jerk on identical (f-1, f, f+1) triplets |
+"""
+
+    md += f"""
+---
+
+## 3. Detailed Dropout & Coasting Quality Analysis
 
 When the raw detector experiences intermittent misses due to motion blur, low contrast, or agile maneuvers, the Kalman Filter predicts target position via linear constant-velocity dead reckoning.
 
@@ -896,13 +1026,12 @@ When the raw detector experiences intermittent misses due to motion blur, low co
 
 ### Localization Drift vs. Coasting Horizon $k$
 
-| Horizon $k$ | Duration ($30\\text{{ FPS}}$) | Frame Count | Median CLE | Target Containment | Control Sign Agreement | Operational Status |
-| :---: | :---: | :---: | :---: | :---: | :---: | :--- |
+| Horizon $k$ | Duration ($30\\text{{ FPS}}$) | Frame Count | Median CLE | Target Containment | Control Sign Agreement |
+| :---: | :---: | :---: | :---: | :---: | :---: |
 """
     for k, v in sorted(drift_k.items()):
         dur_ms = int(k * 33.3)
-        status = "High-Precision Pursuit" if v["median_cle_px"] <= 35.0 else ("Viable Dead-Reckoning" if v["median_cle_px"] <= 75.0 else "Linear Drift")
-        md += f"| $k = {k}$ | {dur_ms} ms | {v['count']} | {v['median_cle_px']} px | {v['containment_percent']}% | {v['sign_agreement_percent']}% | {status} |\n"
+        md += f"| $k = {k}$ | {dur_ms} ms | {v['count']} | {v['median_cle_px']} px | {v['containment_percent']}% | {v['sign_agreement_percent']}% |\n"
 
     md += f"""
 ### Track Re-acquisition vs. Expiration
@@ -912,12 +1041,12 @@ When the raw detector experiences intermittent misses due to motion blur, low co
 
 ---
 
-## 3. Sequence-by-Sequence Breakdown
+## 4. Sequence-by-Sequence Breakdown
 """
     if has_foveal:
         md += """
-| Sequence | Frames | Raw Missing | Kalman Missing | Foveal Missing | Prec@20 (Raw / KF / Fov) | Mean IoU (Raw / KF / Fov) |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| Sequence | Frames | Raw Missing | Kalman Missing | Foveal Missing | Prec@20 (Raw / KF / Fov) | Mean IoU (Raw / KF / Fov) | Shared Jerk (Raw / KF / Fov) |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 """
         for vid in TEST_VIDEOS:
             r_vid = next(r for r in results if r["video"] == vid and r["config"] == "raw_yolo")
@@ -927,11 +1056,16 @@ When the raw detector experiences intermittent misses due to motion blur, low co
             f_p20 = f"{f_vid['precision_20px']*100:.1f}%" if f_vid else "N/A"
             f_iou = f"{f_vid['mean_iou']:.3f}" if f_vid else "N/A"
 
-            md += f"| **{vid}** | {r_vid['total_frames']} | {r_vid['missing_frames']} ({r_vid['missing_rate']*100:.1f}%) | {k_vid['missing_frames']} ({k_vid['missing_rate']*100:.1f}%) | {f_miss} | {r_vid['precision_20px']*100:.1f}% / {k_vid['precision_20px']*100:.1f}% / {f_p20} | {r_vid['mean_iou']:.3f} / {k_vid['mean_iou']:.3f} / {f_iou} |\n"
+            j_sh = jitter_data.get("per_video", {}).get(vid, {})
+            r_j = j_sh.get("raw_jitter_mean", 0.0)
+            k_j = j_sh.get("kalman_jitter_mean", 0.0)
+            f_j = j_sh.get("foveal_jitter_mean", 0.0)
+
+            md += f"| **{vid}** | {r_vid['total_frames']} | {r_vid['missing_frames']} ({r_vid['missing_rate']*100:.1f}%) | {k_vid['missing_frames']} ({k_vid['missing_rate']*100:.1f}%) | {f_miss} | {r_vid['precision_20px']*100:.1f}% / {k_vid['precision_20px']*100:.1f}% / {f_p20} | {r_vid['mean_iou']:.3f} / {k_vid['mean_iou']:.3f} / {f_iou} | {r_j:.2f} / {k_j:.2f} / {f_j:.2f} px/f² |\n"
     else:
         md += """
-| Sequence | Frames | Raw YOLO Missing | Kalman Missing | Raw Jitter | Kalman Jitter (Shared) | Prec@20 (Raw / KF) | Mean IoU (Raw / KF) |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| Sequence | Frames | Raw YOLO Missing | Kalman Missing | Prec@20 (Raw / KF) | Mean IoU (Raw / KF) | Shared Jerk (Raw / KF) |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
 """
         for vid in TEST_VIDEOS:
             r_vid = next(r for r in results if r["video"] == vid and r["config"] == "raw_yolo")
@@ -940,21 +1074,21 @@ When the raw detector experiences intermittent misses due to motion blur, low co
             r_jit = j_sh.get("raw_jitter_mean", r_vid["spatial_jitter_index"])
             k_jit = j_sh.get("kalman_jitter_mean", k_vid["spatial_jitter_index"])
 
-            md += f"| **{vid}** | {r_vid['total_frames']} | {r_vid['missing_frames']} ({r_vid['missing_rate']*100:.1f}%) | {k_vid['missing_frames']} ({k_vid['missing_rate']*100:.1f}%) | {r_jit:.2f} px | **{k_jit:.2f} px** | {r_vid['precision_20px']*100:.1f}% / {k_vid['precision_20px']*100:.1f}% | {r_vid['mean_iou']:.3f} / {k_vid['mean_iou']:.3f} |\n"
+            md += f"| **{vid}** | {r_vid['total_frames']} | {r_vid['missing_frames']} ({r_vid['missing_rate']*100:.1f}%) | {k_vid['missing_frames']} ({k_vid['missing_rate']*100:.1f}%) | {r_vid['precision_20px']*100:.1f}% / {k_vid['precision_20px']*100:.1f}% | {r_vid['mean_iou']:.3f} / {k_vid['mean_iou']:.3f} | {r_jit:.2f} / {k_jit:.2f} px/f² |\n"
 
-    md += """
+    md += f"""
 ---
 
-## 4. Key Engineering Insights
+## 5. Key Engineering Insights
 
-1. **Massive Actuator Jitter Suppression:**  
-   Raw YOLO introduces high-frequency frame-to-frame bounding box flickering ($10\\text{--}15\\text{ px/frame}^2$), causing erratic control commands and motor overheating. The Kalman Filter acts as a second-order low-pass filter, reducing spatial jitter by **~50%** while maintaining sharp phase response.
+1. **Spatial Jerk Suppression via Kinematic Filtering:**  
+   Raw YOLO detections exhibit frame-to-frame centroid jitter ({raw_jit_str} on mutual frame triplets). The Kalman Filter acts as a second-order smoother, reducing spatial jerk to {kf_jit_str} (a {jitter_reduction:.1f}% reduction) without sacrificing responsiveness. When paired with Foveal Zoom, spatial jerk remains well controlled ({fov_jit_str}) while simultaneously recovering lost frames.
 
-2. **Crucial Intermittent Occlusion Bridging:**  
-   In high-speed drone chases, detectors fail momentarily during camera vibration or rapid target aspect changes. The Kalman Filter maintains a **high pursuit sign agreement (>75%)** across short horizons ($k \\le 3$), allowing continuous closed-loop control without abrupt failsafe aborts.
+2. **Intermittent Occlusion Bridging:**  
+   During detector dropouts, linear dead-reckoning maintains valid pursuit directional gradients (steering sign agreement ≥ 80% across horizons $k \\le 10$ frames), preventing complete loss of tracking state during brief dropouts.
 
-3. **Optimal Horizon Limit:**  
-   At $k \\ge 6$ ($> 200\\text{ ms}$), unmodeled target acceleration causes linear dead-reckoning drift. Restricting `max_lost_frames` to $5\\text{--}6$ frames prevents ghost tracks while capturing $>90\\%$ of re-acquisition opportunities.
+3. **Dead-Reckoning Error Accumulation:**  
+   Center location error increases monotonically with dead-reckoning horizon $k$ (median CLE rises from ~10 px at $k = 1$ to ~50 px at $k = 19$). While short horizons ($k \\le 3$) maintain close spatial alignment with the target, extended dead-reckoning without measurement updates gradually accumulates error as target maneuvers diverge from constant velocity. The selection of `max_lost_frames` represents an engineering trade-off between re-acquisition opportunity and tolerance for dead-reckoning drift.
 """
 
     with open(report_path, "w") as f:
@@ -1003,8 +1137,8 @@ def main():
     parser.add_argument(
         "--min-crop-size",
         type=int,
-        default=768,
-        help="Minimum crop dimension floor in native sensor pixels (default: 768)"
+        default=0,
+        help="Minimum crop dimension floor in native sensor pixels (default: 0 for dynamic crop)"
     )
     parser.add_argument(
         "--zoom-lost-threshold",

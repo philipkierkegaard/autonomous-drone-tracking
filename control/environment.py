@@ -227,15 +227,17 @@ class DronePursuitEnv(gym.Env):
         defaults = {
             "r_arrival": 140.0,
             "tau_arrival": 3.5,
+            "min_arrival_dwell_s": 0.5,
             "dist_peak": 8.0,
-            "dist_sigma": 1.5,
+            "dist_sigma": 1.0,
             "dist_pull": 0.35,
-            "blast_base": 25.0,
-            "dwell_scale": 10.0,
-            "p_collision": 0.0,
+            "blast_base": 6.0,
+            "dwell_scale": 2.0,
+            "p_collision": -20.0,
             "p_ground": -20.0,
-            "pn_lead_weight": 3.5,
-            "collision_dist": 0.9,
+            "p_lost_fov": -1.5,
+            "pn_lead_weight": 2.5,
+            "collision_dist": 0.5,
             "sprint_weight": 3.5,
         }
         if cfg_path.exists():
@@ -267,12 +269,7 @@ class DronePursuitEnv(gym.Env):
         else:
             target_vx = self.standoff_nominal + a[0] * (self.standoff_nominal + self.max_rev_vel)
 
-        # Forward collision proximity barrier: inhibit excess forward surge if dangerously close (distance < 2.2m)
-        if hasattr(self, "last_distance") and self.last_distance < 2.2:
-            max_safe_vx = float(max(0.0, (self.last_distance - 1.3) / 0.9 * self.standoff_nominal))
-            target_vx = min(target_vx, max_safe_vx)
-
-        # a1: Lateral strafe setpoint [-1, 1] -> [-self.max_lat_vel, +self.max_lat_vel] (-2.5 to +2.5 m/s)
+        # a1: Lateral strafe setpoint [-1, 1] -> [-self.max_lat_vel, +self.max_lat_vel]
         target_vy = a[1] * self.max_lat_vel
 
         # a2: Vertical velocity setpoint [-1, 1] (NED: negative is climb, positive is descend)
@@ -967,14 +964,18 @@ class DronePursuitEnv(gym.Env):
                 self.first_contact_awarded = True
                 r_first_contact = 40.0 * time_decay_arrival
 
-        # Term 2C: Expressive Reverse-Exponential Fast-Arrival Jackpot
+        # Term 2C: Expressive Reverse-Exponential Fast-Arrival Jackpot (0.5s dwell-gated)
         r_first_bucket = 0.0
-        if in_basket and not self.first_bucket_awarded:
-            self.first_bucket_awarded = True
+        if in_basket and self.bucket_entry_time is None:
             self.bucket_entry_time = float(t_sim)
-            tau = float(self.expressive_cfg.get("tau_arrival", 4.5))
-            r_arr = float(self.expressive_cfg.get("r_arrival", 120.0))
-            r_first_bucket = r_arr * float(np.exp(-t_sim / max(0.5, tau)))
+
+        min_arrival_dwell = float(self.expressive_cfg.get("min_arrival_dwell_s", 0.5))
+        if in_basket and self.continuous_lock_dwell_s >= min_arrival_dwell and not self.first_bucket_awarded:
+            self.first_bucket_awarded = True
+            entry_t = self.bucket_entry_time if self.bucket_entry_time is not None else float(t_sim)
+            tau = float(self.expressive_cfg.get("tau_arrival", 3.5))
+            r_arr = float(self.expressive_cfg.get("r_arrival", 140.0))
+            r_first_bucket = r_arr * float(np.exp(-entry_t / max(0.5, tau)))
 
         if in_basket:
             self.cumulative_firing_window_s += self.dt
@@ -1004,6 +1005,8 @@ class DronePursuitEnv(gym.Env):
         else:
             # Grace decay (soft leaky integrator: decays only 0.5s per second outside basket to tolerate momentary visual dropouts)
             self.continuous_lock_dwell_s = max(0.0, self.continuous_lock_dwell_s - 0.5 * self.dt)
+            if self.continuous_lock_dwell_s <= 0.0 and not self.first_bucket_awarded:
+                self.bucket_entry_time = None
             if self.continuous_lock_dwell_s < 1.0:
                 self.milestone_1s_awarded = False
             if self.continuous_lock_dwell_s < 2.0:
@@ -1023,13 +1026,13 @@ class DronePursuitEnv(gym.Env):
             if self.reward_mode.startswith("expressive"):
                 terminal_reward = 120.0 + 100.0 * float(np.exp(-t_sim / 6.0))
 
-        # Physical Collision Breach (d < 1.2m) — True physical collision radius
+        # Physical Collision Breach (d < collision_dist)
         elif dist < self.collision_dist:
             terminated = True
             termination_reason = "collision"
             terminal_reward = 0.0
             if self.reward_mode.startswith("expressive"):
-                terminal_reward = float(self.expressive_cfg.get("p_collision", -1.0))
+                terminal_reward = float(self.expressive_cfg.get("p_collision", -20.0))
 
         # Altitude Floor Breach (z > -1.0m in NED means altitude < 1.0m AGL)
         elif self.sim.pos[2] > -self.min_altitude_agl:
@@ -1419,22 +1422,24 @@ class DronePursuitEnv(gym.Env):
             # Expressive Goal-Directed: Fast arrival + 3.5m continuous pull + bucket reward blast
             r_alive = 0.50 if (raw_in_view and dist <= 6.0) else 0.0
             dist_err_m = abs(dist - self.standoff_nominal)
-            sig = float(self.expressive_cfg.get("dist_sigma", 1.5))
+            sig = float(self.expressive_cfg.get("dist_sigma", 1.0))
             peak = float(self.expressive_cfg.get("dist_peak", 8.0))
-            pull = float(self.expressive_cfg.get("dist_pull", 0.30))
+            pull = float(self.expressive_cfg.get("dist_pull", 0.35))
 
             if raw_in_view:
                 r_dist = peak * float(np.exp(-0.5 * (dist_err_m / sig)**2)) - pull * float(max(0.0, dist - self.standoff_max))
             else:
                 r_dist = 1.0 * float(np.exp(-0.5 * (dist_err_m / 3.0)**2)) - 0.20 * float(max(0.0, dist - self.standoff_max))
 
-            # Bucket reward blast (base + quadratic dwell acceleration)
-            blast_b = float(self.expressive_cfg.get("blast_base", 15.0))
-            dwell_s = float(self.expressive_cfg.get("dwell_scale", 6.0))
-            r_basket_dwell = (blast_b + dwell_s * float(self.continuous_lock_dwell_s**2)) if in_basket else 0.0
+            # Bucket reward blast: dense step reward inside bucket, larger closer to 3.5m center
+            blast_b = float(self.expressive_cfg.get("blast_base", 6.0))
+            dwell_s = float(self.expressive_cfg.get("dwell_scale", 2.0))
+            bucket_center_err = abs(dist - self.standoff_nominal)
+            center_bell = float(np.exp(-0.5 * (bucket_center_err / 0.6)**2))
+            r_basket_dwell = (blast_b * center_bell + dwell_s * float(self.continuous_lock_dwell_s)) if in_basket else 0.0
 
             # Proportional Navigation velocity vector alignment
-            pn_w = float(self.expressive_cfg.get("pn_lead_weight", 2.0))
+            pn_w = float(self.expressive_cfg.get("pn_lead_weight", 2.5))
             v_c = self.sim.vel[:2]
             v_t = target_vel_w[:2]
             nc = float(np.linalg.norm(v_c))
@@ -1553,8 +1558,12 @@ class DronePursuitEnv(gym.Env):
         self.prev_trail_error = d_trail
         self.prev_distance_error = dist_err
 
-        # Total Composite Step Reward (Guaranteed strictly non-negative for all non-terminal steps!)
-        step_reward = max(0.05, r_positive * q_fov * q_smooth * q_alt * q_pitch * q_speed - p_effort) + terminal_reward
+        # Total Composite Step Reward (Guaranteed strictly non-negative for in-FOV non-terminal steps; FOV loss incurs step penalty)
+        if self.reward_mode.startswith("expressive") and not raw_in_view:
+            p_lost = float(self.expressive_cfg.get("p_lost_fov", -1.5))
+            step_reward = p_lost + terminal_reward
+        else:
+            step_reward = max(0.05, r_positive * q_fov * q_smooth * q_alt * q_pitch * q_speed - p_effort) + terminal_reward
 
         info = {
             "dist_m": float(dist),

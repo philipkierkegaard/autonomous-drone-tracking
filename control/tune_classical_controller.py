@@ -3,9 +3,10 @@
 Automated Parameter Tuning for Classical Kinematic Visual Servoing Controller.
 DTU Bachelor Thesis — Autonomous Drone Pursuit & Interception.
 
-Optimizes 6 key kinematic visual servoing parameters against the user-specified dual objective:
+Optimizes 7 key kinematic visual servoing parameters against the user-specified dual objective:
     1. Distance to desired standoff: (d - 3.5m)^2
     2. Image plane tracking error: (e_x^2 + e_y^2) with smooth unclipped off-screen projection
+    3. Cornering deceleration & speed retention floor: min_centering_factor + centering_damping
 """
 
 import sys
@@ -29,12 +30,12 @@ from control.dataset_generator import PursuitDatasetGenerator, EncounterType, Pu
 
 def create_tuning_suite(
     suite_path: Path,
-    base_seed: int = 50_000,
+    base_seed: int = 60_000,
     duration: float = 18.0
 ) -> List[Dict[str, Any]]:
     """
-    Creates a dedicated, independent 24-scenario tuning dataset with diverse encounters
-    and evasion maneuvers (separate seed space from validation_suite_30 to avoid test leakage).
+    Creates a dedicated, independent 36-scenario tuning dataset with balanced distribution
+    across Cruising, Evasive, and Hyper-Evasive regimes and all 4 encounter geometries.
     """
     if suite_path.exists():
         print(f"[TUNING] Loading existing tuning suite from: {suite_path}")
@@ -42,24 +43,24 @@ def create_tuning_suite(
             data = json.load(f)
             return data["scenarios"]
 
-    print(f"[TUNING] Generating new 24-scenario tuning dataset (base_seed={base_seed})...")
+    print(f"[TUNING] Generating balanced 36-scenario tuning dataset (base_seed={base_seed})...")
     gen = PursuitDatasetGenerator()
     scenarios = []
     
-    # 8 Evasive, 8 Hyper-Evasive, 4 Cruising, 4 Sprint-Break
+    # 12 Cruising, 12 Evasive, 12 Hyper-Evasive across 4 encounter types
     distribution = [
-        ("evasive", EncounterType.TAIL_CHASE, 2),
-        ("evasive", EncounterType.CROSSING_RIGHT, 2),
-        ("evasive", EncounterType.CROSSING_LEFT, 2),
-        ("evasive", EncounterType.OBLIQUE_AWAY, 2),
-        ("hyper_evasive", EncounterType.TAIL_CHASE, 2),
-        ("hyper_evasive", EncounterType.CROSSING_RIGHT, 2),
-        ("hyper_evasive", EncounterType.CROSSING_LEFT, 2),
-        ("hyper_evasive", EncounterType.OBLIQUE_AWAY, 2),
-        ("cruising", EncounterType.TAIL_CHASE, 2),
-        ("cruising", EncounterType.CROSSING_RIGHT, 2),
-        ("sprint_break", EncounterType.TAIL_CHASE, 2),
-        ("sprint_break", EncounterType.CROSSING_LEFT, 2),
+        ("cruising", EncounterType.TAIL_CHASE, 3),
+        ("cruising", EncounterType.CROSSING_RIGHT, 3),
+        ("cruising", EncounterType.CROSSING_LEFT, 3),
+        ("cruising", EncounterType.OBLIQUE_AWAY, 3),
+        ("evasive", EncounterType.TAIL_CHASE, 3),
+        ("evasive", EncounterType.CROSSING_RIGHT, 3),
+        ("evasive", EncounterType.CROSSING_LEFT, 3),
+        ("evasive", EncounterType.OBLIQUE_AWAY, 3),
+        ("hyper_evasive", EncounterType.TAIL_CHASE, 3),
+        ("hyper_evasive", EncounterType.CROSSING_RIGHT, 3),
+        ("hyper_evasive", EncounterType.CROSSING_LEFT, 3),
+        ("hyper_evasive", EncounterType.OBLIQUE_AWAY, 3),
     ]
 
     scen_idx = 1
@@ -79,7 +80,7 @@ def create_tuning_suite(
 
     suite_path.parent.mkdir(parents=True, exist_ok=True)
     with open(suite_path, "w", encoding="utf-8") as f:
-        json.dump({"name": "pid_tuning_suite_24", "num_scenarios": len(scenarios), "scenarios": scenarios}, f, indent=2)
+        json.dump({"name": suite_path.stem, "num_scenarios": len(scenarios), "scenarios": scenarios}, f, indent=2)
 
     print(f"[TUNING] Successfully saved {len(scenarios)} tuning scenarios to: {suite_path}")
     return scenarios
@@ -95,7 +96,7 @@ def simulate_scenario(
     Simulates a flight scenario under given candidate PID parameters and computes
     the composite cost: Standoff Error + lambda * Image Plane Tracking Error.
     """
-    kp_fwd, centering_damp, kp_lat, kd_lat, kp_yaw, kd_yaw = params
+    kp_fwd, centering_damp, min_centering, kp_lat, kd_lat, kp_yaw, kd_yaw = params
 
     c_init = scenario.get("initial_chaser_pos", [0.0, 0.0, -2.5])
     c_yaw = float(scenario.get("initial_chaser_yaw", 0.0))
@@ -123,6 +124,7 @@ def simulate_scenario(
         enable_lateral_strafe=True,
         kp_forward=float(kp_fwd),
         centering_damping=float(centering_damp),
+        min_centering_factor=float(min_centering),
         kp_lat=float(kp_lat),
         kd_lat=float(kd_lat),
         kp_yaw=float(kp_yaw),
@@ -254,38 +256,46 @@ def evaluate_candidate(params: np.ndarray, scenarios: List[Dict[str, Any]], lamb
 def run_tuning_optimization(
     scenarios: List[Dict[str, Any]],
     output_weights_path: Path,
-    lambda_image: float = 15.0
+    lambda_image: float = 15.0,
+    workers: int = 8
 ) -> Dict[str, Any]:
     """Runs global differential evolution followed by Nelder-Mead polishing."""
     
-    # 6 Tunable Parameters: [kp_fwd, centering_damp, kp_lat, kd_lat, kp_yaw, kd_yaw]
+    # 7 Tunable Parameters: [kp_fwd, centering_damp, min_centering_factor, kp_lat, kd_lat, kp_yaw, kd_yaw]
     bounds = [
-        (0.6, 2.5),    # kp_fwd (default: 1.2)
-        (0.05, 0.40),  # centering_damp (default: 0.15)
-        (1.0, 5.0),    # kp_lat (default: 2.5)
-        (0.1, 1.0),    # kd_lat (default: 0.35)
-        (80.0, 280.0), # kp_yaw (default: 180.0)
-        (8.0, 45.0),   # kd_yaw (default: 20.0)
+        (0.6, 2.2),     # kp_fwd (default: 1.2)
+        (0.15, 1.20),   # centering_damp (cornering deceleration factor per unit |e_x|)
+        (0.20, 0.65),   # min_centering_factor (speed retention floor during sharp turns)
+        (1.0, 4.5),     # kp_lat (default: 2.5)
+        (0.1, 1.2),     # kd_lat (default: 0.35)
+        (120.0, 320.0), # kp_yaw (default: 180.0)
+        (15.0, 65.0),   # kd_yaw (default: 20.0)
     ]
 
-    baseline_params = np.array([1.2, 0.15, 2.5, 0.35, 180.0, 20.0], dtype=np.float64)
-    print(f"\n[EVAL] Evaluating baseline parameters on tuning suite: {baseline_params.round(3)}...")
+    baseline_params = np.array([1.2, 0.25, 0.35, 2.5, 0.35, 180.0, 20.0], dtype=np.float64)
+    print(f"\n[EVAL] Evaluating baseline parameters on tuning suite ({len(scenarios)} scenarios):")
+    print(f"       Gains: {baseline_params.round(3)}...")
     t0 = time.time()
     baseline_cost = evaluate_candidate(baseline_params, scenarios, lambda_image=lambda_image)
     print(f"       Baseline Mean Cost: {baseline_cost:.4f} (evaluated in {time.time()-t0:.2f}s)")
 
-    print(f"\n[OPTIM] Launching Differential Evolution Global Optimization (population=8, maxiter=12)...")
+    # Evaluate previous uncalibrated tuned gains (with min_centering_factor=0.85) for reference
+    prev_uncalibrated = np.array([0.863, 0.186, 0.850, 1.865, 0.736, 222.97, 47.84], dtype=np.float64)
+    prev_cost = evaluate_candidate(prev_uncalibrated, scenarios, lambda_image=lambda_image)
+    print(f"       Prior Tuned Gains (min_centering=0.85): Cost = {prev_cost:.4f}")
+
+    print(f"\n[OPTIM] Launching Differential Evolution Global Optimization (population=6, maxiter=12, workers={workers})...")
     t_start = time.time()
     
     eval_counter = [0]
-    best_seen = [baseline_cost]
+    best_seen = [min(baseline_cost, prev_cost)]
 
     def callback_fn(xk, convergence=None):
         cost = evaluate_candidate(xk, scenarios, lambda_image=lambda_image)
         if cost < best_seen[0]:
             best_seen[0] = cost
         eval_counter[0] += 1
-        print(f"  Iteration {eval_counter[0]:2d} | Best Cost: {best_seen[0]:.4f} | Current: {cost:.4f}")
+        print(f"  DE Gen {eval_counter[0]:2d} | Best Cost: {best_seen[0]:.4f} | Current Gen Best: {cost:.4f}", flush=True)
 
     de_res = differential_evolution(
         func=evaluate_candidate,
@@ -293,20 +303,23 @@ def run_tuning_optimization(
         args=(scenarios, lambda_image),
         strategy="best1bin",
         maxiter=12,
-        popsize=8,
+        popsize=6,
         tol=0.01,
         mutation=(0.5, 1.0),
         recombination=0.7,
         seed=42,
+        workers=workers,
+        updating="deferred",
+        polish=False,
         callback=callback_fn,
         disp=False
     )
 
-    print(f"\n[OPTIM] Global optimization complete in {time.time()-t_start:.1f}s. Cost: {de_res.fun:.4f}")
-    print(f"        Intermediate candidate: {de_res.x.round(3)}")
+    print(f"\n[OPTIM] Global optimization complete in {time.time()-t_start:.1f}s. Cost: {de_res.fun:.4f}", flush=True)
+    print(f"        Intermediate candidate: {de_res.x.round(3)}", flush=True)
 
     # Local Simplex Polish
-    print("\n[OPTIM] Polishing with Nelder-Mead simplex search...")
+    print("\n[OPTIM] Polishing with Nelder-Mead simplex search...", flush=True)
     nm_res = minimize(
         fun=evaluate_candidate,
         x0=de_res.x,
@@ -319,11 +332,14 @@ def run_tuning_optimization(
     opt_cost = nm_res.fun
     elapsed = time.time() - t_start
 
+    ref_cost = min(baseline_cost, prev_cost)
+    pct_gain = (ref_cost - opt_cost) / ref_cost * 100.0
+
     print(f"[OPTIM] Optimization finished in {elapsed:.1f}s.")
     print(f"        Tuned Parameters:   {opt_params.round(3)}")
-    print(f"        Final Tuned Cost:   {opt_cost:.4f} (Baseline: {baseline_cost:.4f}, Improvement: {(baseline_cost - opt_cost)/baseline_cost*100:+.1f}%)")
+    print(f"        Final Tuned Cost:   {opt_cost:.4f} (Baseline: {baseline_cost:.4f}, Prev Tuned: {prev_cost:.4f}, Improvement: {pct_gain:+.1f}%)")
 
-    param_names = ["kp_forward", "centering_damping", "kp_lat", "kd_lat", "kp_yaw", "kd_yaw"]
+    param_names = ["kp_forward", "centering_damping", "min_centering_factor", "kp_lat", "kd_lat", "kp_yaw", "kd_yaw"]
     tuned_dict = {name: float(val) for name, val in zip(param_names, opt_params)}
     baseline_dict = {name: float(val) for name, val in zip(param_names, baseline_params)}
 
@@ -331,9 +347,11 @@ def run_tuning_optimization(
         "status": "SUCCESS",
         "optimization_time_s": round(elapsed, 1),
         "lambda_image": lambda_image,
+        "num_scenarios": len(scenarios),
         "baseline_cost": round(baseline_cost, 4),
+        "previous_tuned_cost": round(prev_cost, 4),
         "tuned_cost": round(opt_cost, 4),
-        "cost_reduction_pct": round((baseline_cost - opt_cost) / baseline_cost * 100, 2),
+        "cost_reduction_pct": round(pct_gain, 2),
         "baseline_parameters": baseline_dict,
         "tuned_parameters": tuned_dict,
     }
@@ -393,21 +411,24 @@ def validate_on_held_out(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Tune Kinematic Controller for Standoff and Image Tracking")
-    parser.add_argument("--suite", type=str, default="outputs/benchmarks/datasets/pid_tuning_suite_24.json")
+    parser.add_argument("--suite", type=str, default="outputs/benchmarks/datasets/pid_tuning_suite_36.json")
     parser.add_argument("--val-suite", type=str, default="outputs/benchmarks/datasets/validation_suite_30.json")
     parser.add_argument("--out", type=str, default="control/weights/tuned_pid_gains.json")
     parser.add_argument("--lambda-image", type=float, default=15.0, help="Weight for image plane error vs standoff error")
+    parser.add_argument("--workers", type=int, default=8, help="Number of parallel CPU workers")
     args = parser.parse_args()
 
     suite_scenarios = create_tuning_suite(Path(args.suite))
     res = run_tuning_optimization(
         scenarios=suite_scenarios,
         output_weights_path=Path(args.out),
-        lambda_image=args.lambda_image
+        lambda_image=args.lambda_image,
+        workers=args.workers
     )
 
-    baseline_vec = np.array([res["baseline_parameters"][k] for k in ["kp_forward", "centering_damping", "kp_lat", "kd_lat", "kp_yaw", "kd_yaw"]])
-    tuned_vec = np.array([res["tuned_parameters"][k] for k in ["kp_forward", "centering_damping", "kp_lat", "kd_lat", "kp_yaw", "kd_yaw"]])
+    param_keys = ["kp_forward", "centering_damping", "min_centering_factor", "kp_lat", "kd_lat", "kp_yaw", "kd_yaw"]
+    baseline_vec = np.array([res["baseline_parameters"][k] for k in param_keys])
+    tuned_vec = np.array([res["tuned_parameters"][k] for k in param_keys])
 
     validate_on_held_out(
         val_suite_path=Path(args.val_suite),

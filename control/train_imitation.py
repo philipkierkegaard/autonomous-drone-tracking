@@ -135,11 +135,12 @@ def collect_expert_demonstrations(
             kp_lat=2.5,
             kd_lat=0.35,
             max_lat_vel=4.0,
-            max_lat_accel=5.0,
+            max_lat_accel=6.0,
             max_accel=6.0,
             max_decel=6.0,
+            max_accel_yaw=240.0,
             min_limits=np.array([-0.5, -4.0, -3.0, -120.0]),
-            max_limits=np.array([14.0, 4.0, 2.0, 120.0])
+            max_limits=np.array([15.0, 4.0, 2.0, 120.0])
         )
         ctrl.prev_cmd = np.array([init_chaser_vel, 0.0, 0.0, 0.0])
         
