@@ -108,8 +108,8 @@ def evaluate_policy_on_hyper_evasive(model_path: Path) -> dict:
             c, s = np.cos(sim.yaw), np.sin(sim.yaw)
             vx_b = c * sim.vel[0] + s * sim.vel[1]
             vy_b = -s * sim.vel[0] + c * sim.vel[1]
-            vz_b = sim.vel[2]
-            cmd = ctrl.compute_cmd(telem, drone_pitch=sim.pitch, drone_roll=sim.roll, dt=0.02, vehicle_vel=np.array([vx_b, vy_b, vz_b]), vehicle_yaw_rate=sim.yaw_rate, current_alt_m=-sim.pos[2])
+            telem_clean = {k: v for k, v in telem.items() if k != "distance"}
+            cmd = ctrl.compute_cmd(telem_clean, drone_pitch=sim.pitch, drone_roll=sim.roll, dt=0.02, vehicle_vel=np.array([vx_b, vy_b, vz_b]), vehicle_yaw_rate=sim.yaw_rate, current_alt_m=-sim.pos[2])
             sim.step(cmd)
             sc_dists.append(telem["distance"])
             sc_fov.append(telem["in_view"])

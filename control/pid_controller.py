@@ -57,7 +57,7 @@ class KinematicVisualServoController:
         vfov_deg: float = 38.0,
         desired_bbox_size: float = 110.0,    # Desired target bounding box width (pixels, 110px corresponds to w_norm=0.0859 on 1280x720)
         desired_standoff_dist: float = 3.5,  # Target standoff distance in meters (3.5m)
-        use_bbox_size: bool = False,         # If False, regulates direct metric distance (3.5m)
+        use_bbox_size: bool = True,          # Strictly regulates optical bounding box visual scale
         scale_mode: str = "width",           # Scale definition: 'width' (w_bbox, matches PPO), 'max' (legacy max(w, h)), or 'height'
         deadband_dist: float = 0.35,         # Deadband cushion in meters (+/- 0.35m around standoff)
         # 3D/4D PID Gains: [Forward (X), Lateral (Y), Vertical (Z), Yaw (Psi)]
@@ -194,11 +194,11 @@ class KinematicVisualServoController:
             if len(int_limits) == 4:
                 self.int_limits = np.array(int_limits, dtype=np.float64)
             elif len(int_limits) == 3:
-                self.int_limits = np.array([3.0, 2.0, int_limits[1], int_limits[2]], dtype=np.float64)
+                self.int_limits = np.array([20.0, 2.0, int_limits[1], int_limits[2]], dtype=np.float64)
             else:
-                self.int_limits = np.array([3.0, 2.0, 1.2, 25.0], dtype=np.float64)
+                self.int_limits = np.array([20.0, 2.0, 1.2, 25.0], dtype=np.float64)
         else:
-            self.int_limits = np.array([3.0, 2.0, 1.2, 25.0], dtype=np.float64)
+            self.int_limits = np.array([20.0, 2.0, 1.2, 25.0], dtype=np.float64)
 
         self.filter_tau = filter_tau
 
@@ -208,11 +208,13 @@ class KinematicVisualServoController:
         self.max_accel_yaw = float(max_accel_yaw)
         self.max_lat_vel = lat_limit
         self.max_lat_accel = float(max_lat_accel)
-        self.prev_cmd = np.array([4.0, 0.0, 0.0, 0.0], dtype=np.float64)
-        self.prev_cmd_vx = 4.0
+        self.prev_cmd = np.zeros(4, dtype=np.float64)
+        self.prev_cmd_vx = 0.0
         self.prev_cmd_vy = 0.0
         self.last_seen_ex = 0.0
         self.last_seen_ey = 0.0
+        self.prev_bbox_w = None
+        self.filtered_dw = 0.0
 
         # Vectorized internal state (shape: (4,))
         self.integral = np.zeros(4, dtype=np.float64)
@@ -225,11 +227,13 @@ class KinematicVisualServoController:
         self.integral = np.zeros(4, dtype=np.float64)
         self.prev_error = np.zeros(4, dtype=np.float64)
         self.filtered_deriv = np.zeros(4, dtype=np.float64)
-        self.prev_cmd = np.array([4.0, 0.0, 0.0, 0.0], dtype=np.float64)
-        self.prev_cmd_vx = 4.0
+        self.prev_cmd = np.zeros(4, dtype=np.float64)
+        self.prev_cmd_vx = 0.0
         self.prev_cmd_vy = 0.0
         self.last_seen_ex = 0.0
         self.last_seen_ey = 0.0
+        self.prev_bbox_w = None
+        self.filtered_dw = 0.0
         self.initialized = False
         self.lost_time = 0.0
 
@@ -260,6 +264,18 @@ class KinematicVisualServoController:
             np.ndarray of shape (4,): [v_forward (m/s), v_right (m/s), v_down (m/s), yaw_rate (deg/s)]
             Directly corresponds to MAVSDK VelocityBodyYawspeed.
         """
+        # Strictly sanitize telemetry: KinematicVisualServoController is 100% optical and must never receive ground-truth distance
+        telemetry = {k: v for k, v in telemetry.items() if k != "distance"}
+
+        # Seed previous commanded velocity from measured vehicle velocity on first step
+        # to ensure bumpless transfer and prevent slew-rate limiter from forcing an artificial brake
+        if not self.initialized and vehicle_vel is not None and len(vehicle_vel) >= 3:
+            self.prev_cmd[0] = float(vehicle_vel[0])
+            self.prev_cmd[1] = float(vehicle_vel[1])
+            self.prev_cmd[2] = float(vehicle_vel[2])
+            self.prev_cmd_vx = float(vehicle_vel[0])
+            self.prev_cmd_vy = float(vehicle_vel[1])
+
         status = telemetry.get("status", "SEARCHING")
         if status == "SEARCHING":
             self.lost_time += dt
@@ -271,9 +287,10 @@ class KinematicVisualServoController:
                 # when target transiently drops out during sharp maneuvers.
                 self.integral.fill(0.0)
                 if self.lost_time < 2.5:
-                    cruise_speed = max(3.5, min(8.0, self.prev_cmd_vx))
-                    sweep_dir = 1.0 if self.last_seen_ex >= 0.0 else -1.0
-                    cmd_yaw = float(sweep_dir * min(60.0, max(25.0, abs(self.prev_cmd[3]))))
+                    # Hold last commanded pursuit speed decaying smoothly without artificial speed floor
+                    decay_factor = max(0.0, 1.0 - (self.lost_time / 2.5))
+                    cruise_speed = max(0.0, min(self.max_limits[0], self.prev_cmd_vx * decay_factor))
+                    cmd_yaw = float(np.clip(self.prev_cmd[3] * decay_factor, -60.0, 60.0))
                 else:
                     cruise_speed = max(0.0, self.prev_cmd_vx - 3.0 * dt)
                     cmd_yaw = 0.0
@@ -363,7 +380,9 @@ class KinematicVisualServoController:
             half_vfov=self.half_vfov,
         )
 
-        # 2. Scale / Range Error (Bounding Box Pixels vs Metric Meters)
+        # 2. Scale / Range Error (Strictly Optical Bounding Box Scale - Zero Ground Truth Distance)
+        # Bounding box width/height or error_range is the ONLY information source for range error.
+        # Any ground-truth distance passed in telemetry is strictly ignored to prevent unfair advantages.
         if self.use_bbox_size:
             if "error_range" in telemetry:
                 # Direct normalized scale error [-1.0 (too close), +1.0 (far)] from track_pipeline.py
@@ -396,15 +415,52 @@ class KinematicVisualServoController:
                     range_err = 0.0
             range_term = float(np.clip(range_err, -1.0, 1.0))
         else:
-            if "distance" in telemetry:
-                dist = telemetry["distance"]
-                dist_err = dist - self.standoff_dist
+            # When use_bbox_size is False, estimate metric distance error purely via pinhole geometry:
+            #   d_est = d_nominal * (s_nominal / s_measured)
+            # Never reads ground-truth Euclidean distance from simulation.
+            if "error_range" in telemetry:
+                scale_err = float(telemetry["error_range"])
+                denom = max(0.05, 1.0 - scale_err) if scale_err < 1.0 else 0.05
+                range_term = self.standoff_dist * (scale_err / denom)
             else:
-                dist_err = telemetry.get("error_range", 0.0) * 10.0
-            range_term = dist_err
+                current_sz = telemetry.get("bbox_w", telemetry.get("target_size", 0.0))
+                if current_sz > 0.0:
+                    est_dist = self.standoff_dist * (self.desired_bbox_size / max(5.0, float(current_sz)))
+                    range_term = est_dist - self.standoff_dist
+                else:
+                    range_term = 0.0
 
-        # Optional target forward velocity feedforward (e.g. from Kalman filter)
+        # Optical Looming Target Velocity Feedforward:
+        #   v_target_hat = v_drone - d_hat * (dw / w)
+        # Directly estimates target forward velocity along viewing axis from optical looming,
+        # ensuring exact speed-matching with zero distance error without hardcoding any constant.
+        if vehicle_vel is not None and len(vehicle_vel) > 0 and np.isfinite(vehicle_vel[0]):
+            v_drone_fwd = float(vehicle_vel[0])
+        else:
+            v_drone_fwd = float(self.prev_cmd_vx)
+
+        current_w = float(telemetry.get("bbox_w", telemetry.get("target_size", 0.0)))
+        if current_w > 1.0 and not is_coasting and telemetry.get("in_view", True):
+            if self.prev_bbox_w is not None and dt > 1e-4:
+                raw_dw = (current_w - self.prev_bbox_w) / dt
+                alpha_w = dt / (dt + 0.08)  # 80ms low-pass filter against bounding box pixel jitter
+                self.filtered_dw += alpha_w * (raw_dw - self.filtered_dw)
+            self.prev_bbox_w = current_w
+
+            # Distance estimate from pinhole geometry: d_hat = d* * (w* / w)
+            d_hat = float(np.clip(self.standoff_dist * (self.desired_bbox_size / max(5.0, current_w)), 1.5, 25.0))
+            loom_rate = float(self.filtered_dw / max(5.0, current_w))
+            d_dot_rel = -d_hat * loom_rate
+            est_v_target = float(np.clip(v_drone_fwd + d_dot_rel, 0.0, self.max_limits[0]))
+        else:
+            # During dropout / coasting, decay loom derivative and hold drone's forward velocity
+            self.filtered_dw *= max(0.0, 1.0 - 2.0 * dt)
+            est_v_target = float(np.clip(v_drone_fwd, 0.0, self.max_limits[0]))
+
+        # Target forward velocity feedforward (uses optical looming estimate unless external is provided)
         target_vx_ff = float(telemetry.get("target_vx", telemetry.get("target_vel_x", 0.0)))
+        if target_vx_ff <= 0.0:
+            target_vx_ff = est_v_target
 
         # Verify all derived error terms are finite before proceeding
         if not (np.isfinite(range_term) and np.isfinite(target_vx_ff) and np.isfinite(err_x_horizon) and np.isfinite(elevation_horizon) and np.isfinite(azimuth_horizon)):
@@ -467,6 +523,26 @@ class KinematicVisualServoController:
         else:
             e = raw_e.copy()
 
+        # Convert Axis 0 range error into physical metric distance error (meters)
+        if self.use_bbox_size:
+            scale_err = e[0]  # normalized scale error: (s* - s) / s*
+            denom = max(0.05, 1.0 - scale_err) if scale_err < 1.0 else 0.05
+            ratio = scale_err / denom
+            approx_dist_err = self.standoff_dist * ratio
+            dist_signal = approx_dist_err
+        else:
+            dist_signal = e[0]
+
+        if dist_signal > self.deadband_dist:
+            eff_err = dist_signal - self.deadband_dist
+        elif dist_signal < -self.deadband_dist:
+            eff_err = dist_signal + self.deadband_dist
+        else:
+            eff_err = 0.0
+
+        # Axis 0 works in metric distance space: e[0] = eff_err (meters)
+        e[0] = eff_err
+
         # ----------------------------------------------------------------------
         # 2. Vectorized Proportional Term
         # ----------------------------------------------------------------------
@@ -512,31 +588,11 @@ class KinematicVisualServoController:
         # ----------------------------------------------------------------------
         raw_output = p_term + i_term + d_term
 
-        # Scale / Range Error Conversion to Metric Distance Signal (Axis 0)
-        if self.use_bbox_size:
-            scale_err = e[0]  # normalized scale error: (s* - s) / s*
-            denom = max(0.05, 1.0 - scale_err) if scale_err < 1.0 else 0.05
-            ratio = scale_err / denom
-            approx_dist_err = self.standoff_dist * ratio
-            dist_signal = approx_dist_err
-        else:
-            dist_err = e[0]
-            dist_signal = dist_err
-
-        # Pursuit Speed-Matching Guidance Law on Axis 0 (Forward Velocity):
-        # Match moving target cruise velocity and modulate forward throttle with normal PID:
-        #   v_fwd = v_target_cruise + Kp * eff_err + Ki * integral + Kd * deriv
-        nominal_cruise_speed = target_vx_ff if target_vx_ff > 0.5 else 3.5
-        kp_forward = self.kp[0]
-
-        if dist_signal > self.deadband_dist:
-            eff_err = dist_signal - self.deadband_dist
-        elif dist_signal < -self.deadband_dist:
-            eff_err = dist_signal + self.deadband_dist
-        else:
-            eff_err = 0.0
-
-        v_pid = nominal_cruise_speed + kp_forward * eff_err + i_term[0] + d_term[0]
+        # Pure Visual Servoing Guidance Law on Axis 0 (Forward Velocity):
+        # When no external velocity feedforward is provided, forward throttle is 100% error-driven:
+        #   v_fwd = v_target_ff + raw_output[0]
+        nominal_cruise_speed = float(target_vx_ff) if target_vx_ff > 0.0 else 0.0
+        v_pid = nominal_cruise_speed + raw_output[0]
         raw_output[0] = np.clip(v_pid, self.min_limits[0], self.max_limits[0])
 
         # Centering damping: gently trim excess surge during sharp lateral maneuvers without killing pursuit momentum
@@ -545,15 +601,19 @@ class KinematicVisualServoController:
             raw_output[0] *= centering_factor
 
         # COASTING behavior governance:
-        # Hold forward cruise velocity through short dropouts to preserve closing momentum
+        # Decays forward velocity smoothly toward 0 without artificial speed floor
         if is_coasting and self.coast_mode == "decay":
-            decayed_vx = max(3.5, self.prev_cmd_vx - 1.5 * dt)
+            decayed_vx = max(0.0, self.prev_cmd_vx - 1.5 * dt)
             raw_output[0] = min(raw_output[0], decayed_vx)
             raw_output[1] *= 0.75
 
-        # Ground proximity safety barrier: inhibit descent when below 1.4m AGL
-        if current_alt_m is not None and current_alt_m < 1.4 and raw_output[2] > 0.0:
-            raw_output[2] = float(raw_output[2] * max(0.0, (current_alt_m - 0.9) / 0.5))
+        # Ground proximity safety barrier: inhibit descent below 1.4m and push up below 1.1m
+        if current_alt_m is not None and current_alt_m < 1.4:
+            if raw_output[2] > 0.0:
+                raw_output[2] = float(raw_output[2] * max(0.0, (current_alt_m - 0.9) / 0.5))
+            if current_alt_m < 1.1:
+                climb_cmd = -float(np.clip((1.1 - current_alt_m) * 3.0, 0.0, 2.5))
+                raw_output[2] = min(raw_output[2], climb_cmd)
 
         # ----------------------------------------------------------------------
         # 6. Slew-Rate Limiting Across All 4 Flight Axes
@@ -689,7 +749,10 @@ def run_simulation_and_plot():
             scale_mode="width"
         )
 
-        # 2. Compute 3D Control Vector using bounding box pixel errors
+        # True distance for evaluation logging only
+        true_dist = float(telemetry.pop("distance", np.linalg.norm(sim.pos - target_world)))
+
+        # 2. Compute 3D Control Vector using bounding box pixel errors (strictly zero ground-truth distance)
         cmd_3d = controller.compute_cmd(telemetry, drone_pitch=sim.pitch, dt=dt)
 
         # 3. Advance drone simulation
@@ -700,7 +763,7 @@ def run_simulation_and_plot():
         chaser_pos_history.append(sim.pos.copy())
         target_pos_history.append(target_world.copy())
         chaser_yaw_history.append(sim.yaw)
-        dist_history.append(telemetry["distance"])
+        dist_history.append(true_dist)
         target_size_history.append(telemetry["target_size"])
         err_x_history.append(telemetry["error_x"])
         err_y_history.append(telemetry["error_y"])

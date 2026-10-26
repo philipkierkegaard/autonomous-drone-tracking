@@ -16,14 +16,14 @@ A comprehensive empirical evaluation was conducted comparing the memoryless base
 | :--- | :---: | :---: | :---: | :--- |
 | **Missing Frames (Blind Spots)** | **248** (7.2%) | **99** (2.9%) | **67** (2.0%) | Visible frames where no track estimate was produced |
 | **Tracking Continuity (Locked + Coasting)** | 89.2% | 94.3% | **95.2%** | Availability of active trajectory estimate (locked or coasting) |
-| **Tracking Success Rate @ 20px (TSR@20px)** | **92.38%** | 88.31% | **91.15%** | Fraction of all visible frames with CLE ≤ 20px |
-| **Tracking Success Rate @ 50px (TSR@50px)** | **92.38%** | 95.85% | **97.05%** | Fraction of all visible frames with CLE ≤ 50px |
-| **Shared-Frame Spatial Jerk** | 2.92 px/f² | **0.95 px/f²** | **1.03 px/f²** | Second-order centroid acceleration on identical frame triplets |
-| **Precision @ 20px (CLP, Valid Frames)** | **99.59%** | 90.94% | **92.97%** | Conditional accuracy when prediction exists (CLE ≤ 20px) |
-| **Precision @ 50px (Valid Frames)** | **99.59%** | 98.71% | **98.99%** | Conditional coarse accuracy when prediction exists (CLE ≤ 50px) |
-| **Mean IoU (Valid Frames)** | **0.684** | 0.610 | **0.625** | Bounding box overlap conditional on prediction |
-| **Mean Center Location Error** | **3.94 px** | 11.52 px | **10.5 px** | Conditional pixel error on valid prediction frames |
-| **Median Center Location Error** | **2.34 px** | 4.45 px | **4.42 px** | Central tracking error on valid prediction frames |
+| **Tracking Success Rate @ 20px (TSR@20px)** | **92.38%** | 89.89% | **92.0%** | Fraction of all visible frames with CLE ≤ 20px |
+| **Tracking Success Rate @ 50px (TSR@50px)** | **92.38%** | 95.88% | **96.99%** | Fraction of all visible frames with CLE ≤ 50px |
+| **Shared-Frame Spatial Jerk** | 2.92 px/f² | **0.93 px/f²** | **1.06 px/f²** | Second-order centroid acceleration on identical frame triplets |
+| **Precision @ 20px (CLP, Valid Frames)** | **99.59%** | 92.57% | **93.83%** | Conditional accuracy when prediction exists (CLE ≤ 20px) |
+| **Precision @ 50px (Valid Frames)** | **99.59%** | 98.74% | **98.93%** | Conditional coarse accuracy when prediction exists (CLE ≤ 50px) |
+| **Mean IoU (Valid Frames)** | **0.684** | 0.612 | **0.626** | Bounding box overlap conditional on prediction |
+| **Mean Center Location Error** | **3.94 px** | 11.38 px | **10.39 px** | Conditional pixel error on valid prediction frames |
+| **Median Center Location Error** | **2.34 px** | 4.44 px | **4.37 px** | Central tracking error on valid prediction frames |
 
 > [!IMPORTANT]
 > **Interpreting Tracking Continuity vs. Tracking Success Rate (TSR):**  
@@ -42,12 +42,12 @@ To eliminate this sampling disparity and directly evaluate whether Kalman filter
 
 | Metric on Shared Valid Frames | Raw YOLOv8 | YOLOv8 + Tuned Kalman | YOLOv8 + Kalman + Foveal Zoom | Controlled Evaluation Finding |
 | :--- | :---: | :---: | :---: | :--- |
-| **Shared-Frame Mean IoU** | **0.685** | 0.625 | **0.638** | Direct bounding box overlap on identical mutual frames |
-| **Shared-Frame Mean CLE** | **3.93 px** | 10.24 px | **9.66 px** | Direct centroid error on identical mutual frames |
-| **Shared-Frame Median CLE** | **2.34 px** | 4.28 px | **4.31 px** | Central tracking error on identical mutual frames |
-| **Shared-Frame Precision @ 20px** | **99.62%** | 93.18% | **94.16%** | CLE ≤ 20px on identical mutual frames |
-| **Shared-Frame Precision @ 50px** | **99.62%** | 99.24% | **99.40%** | CLE ≤ 50px on identical mutual frames |
-| **Shared-Triplet Spatial Jerk** | 2.92 px/f² | **0.95 px/f²** | **1.03 px/f²** | Second-order centroid jerk on identical (f-1, f, f+1) triplets |
+| **Shared-Frame Mean IoU** | **0.685** | 0.627 | **0.640** | Direct bounding box overlap on identical mutual frames |
+| **Shared-Frame Mean CLE** | **3.93 px** | 10.10 px | **9.52 px** | Direct centroid error on identical mutual frames |
+| **Shared-Frame Median CLE** | **2.34 px** | 4.23 px | **4.27 px** | Central tracking error on identical mutual frames |
+| **Shared-Frame Precision @ 20px** | **99.62%** | 94.82% | **95.17%** | CLE ≤ 20px on identical mutual frames |
+| **Shared-Frame Precision @ 50px** | **99.62%** | 99.27% | **99.37%** | CLE ≤ 50px on identical mutual frames |
+| **Shared-Triplet Spatial Jerk** | 2.92 px/f² | **0.93 px/f²** | **1.06 px/f²** | Second-order centroid jerk on identical (f-1, f, f+1) triplets |
 
 ---
 
@@ -57,7 +57,7 @@ When the raw detector experiences intermittent misses due to motion blur, low co
 
 ### Bridged Dropout Cohort
 - **Total Dropout Frames Rescued:** **156 frames**
-- **Median CLE during Dead-Reckoning:** **21.6 px**
+- **Median CLE during Dead-Reckoning:** **21.8 px**
 - **Precision @ 50px during Coasting:** **87.8%**
 - **Target Containment Rate:** **57.7%** of bridged frames have the true target center within the predicted bounding box.
 - **Pursuit Flight Control Sign Agreement:** **100.0%** of bridged frames generate a steering gradient with the correct pursuit direction.
@@ -66,26 +66,26 @@ When the raw detector experiences intermittent misses due to motion blur, low co
 
 | Horizon $k$ | Duration ($30\text{ FPS}$) | Frame Count | Median CLE | Target Containment | Control Sign Agreement |
 | :---: | :---: | :---: | :---: | :---: | :---: |
-| $k = 1$ | 33 ms | 32 | 10.7 px | 68.8% | 100.0% |
-| $k = 2$ | 66 ms | 18 | 13.4 px | 77.8% | 100.0% |
-| $k = 3$ | 99 ms | 15 | 19.1 px | 73.3% | 100.0% |
+| $k = 1$ | 33 ms | 32 | 10.9 px | 68.8% | 100.0% |
+| $k = 2$ | 66 ms | 18 | 13.2 px | 77.8% | 100.0% |
+| $k = 3$ | 99 ms | 15 | 18.4 px | 73.3% | 100.0% |
 | $k = 4$ | 133 ms | 9 | 17.6 px | 77.8% | 100.0% |
-| $k = 5$ | 166 ms | 9 | 22.1 px | 55.6% | 88.9% |
-| $k = 6$ | 199 ms | 8 | 23.7 px | 50.0% | 87.5% |
-| $k = 7$ | 233 ms | 7 | 21.1 px | 57.1% | 85.7% |
-| $k = 8$ | 266 ms | 7 | 21.2 px | 57.1% | 85.7% |
-| $k = 9$ | 299 ms | 7 | 24.3 px | 42.9% | 85.7% |
-| $k = 10$ | 333 ms | 7 | 28.2 px | 42.9% | 85.7% |
-| $k = 11$ | 366 ms | 6 | 24.5 px | 50.0% | 83.3% |
-| $k = 12$ | 399 ms | 6 | 27.3 px | 50.0% | 83.3% |
-| $k = 13$ | 432 ms | 6 | 32.2 px | 33.3% | 83.3% |
-| $k = 14$ | 466 ms | 6 | 34.6 px | 33.3% | 83.3% |
-| $k = 15$ | 499 ms | 6 | 37.4 px | 16.7% | 83.3% |
-| $k = 16$ | 532 ms | 6 | 38.2 px | 16.7% | 83.3% |
-| $k = 17$ | 566 ms | 6 | 39.3 px | 16.7% | 83.3% |
-| $k = 18$ | 599 ms | 5 | 43.3 px | 0.0% | 80.0% |
-| $k = 19$ | 632 ms | 5 | 50.7 px | 0.0% | 80.0% |
-| $k = 20$ | 666 ms | 5 | 49.6 px | 0.0% | 80.0% |
+| $k = 5$ | 166 ms | 9 | 22.0 px | 55.6% | 88.9% |
+| $k = 6$ | 199 ms | 8 | 23.6 px | 50.0% | 87.5% |
+| $k = 7$ | 233 ms | 7 | 22.0 px | 57.1% | 85.7% |
+| $k = 8$ | 266 ms | 7 | 21.9 px | 57.1% | 85.7% |
+| $k = 9$ | 299 ms | 7 | 25.0 px | 42.9% | 85.7% |
+| $k = 10$ | 333 ms | 7 | 28.8 px | 42.9% | 85.7% |
+| $k = 11$ | 366 ms | 6 | 24.8 px | 50.0% | 83.3% |
+| $k = 12$ | 399 ms | 6 | 27.7 px | 50.0% | 83.3% |
+| $k = 13$ | 432 ms | 6 | 31.8 px | 33.3% | 83.3% |
+| $k = 14$ | 466 ms | 6 | 34.9 px | 33.3% | 83.3% |
+| $k = 15$ | 499 ms | 6 | 37.2 px | 16.7% | 83.3% |
+| $k = 16$ | 532 ms | 6 | 37.7 px | 16.7% | 83.3% |
+| $k = 17$ | 566 ms | 6 | 38.4 px | 16.7% | 83.3% |
+| $k = 18$ | 599 ms | 5 | 42.5 px | 0.0% | 80.0% |
+| $k = 19$ | 632 ms | 5 | 49.7 px | 0.0% | 80.0% |
+| $k = 20$ | 666 ms | 5 | 48.6 px | 0.0% | 80.0% |
 
 ### Track Re-acquisition vs. Expiration
 - **Total Re-acquisitions after Coasting:** **27**
@@ -98,16 +98,16 @@ When the raw detector experiences intermittent misses due to motion blur, low co
 
 | Sequence | Frames | Raw Missing | Kalman Missing | Foveal Missing | Prec@20 (Raw / KF / Fov) | Mean IoU (Raw / KF / Fov) | Shared Jerk (Raw / KF / Fov) |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **video05** | 450 | 23 (5.1%) | 14 (3.1%) | 14 (3.1%) | 99.3% / 97.2% / 97.2% | 0.819 / 0.779 / 0.740 | 1.53 / 0.50 / 0.65 px/f² |
-| **video12** | 1485 | 199 (14.9%) | 84 (6.3%) | 52 (3.9%) | 99.4% / 91.8% / 94.6% | 0.648 / 0.583 / 0.580 | 2.14 / 1.38 / 1.72 px/f² |
-| **video20** | 1635 | 26 (1.6%) | 1 (0.1%) | 1 (0.1%) | 99.8% / 88.6% / 90.6% | 0.675 / 0.586 / 0.629 | 3.83 / 0.76 / 0.64 px/f² |
+| **video05** | 450 | 23 (5.1%) | 14 (3.1%) | 14 (3.1%) | 99.3% / 97.2% / 97.2% | 0.819 / 0.779 / 0.741 | 1.53 / 0.50 / 0.64 px/f² |
+| **video12** | 1485 | 199 (14.9%) | 84 (6.3%) | 52 (3.9%) | 99.4% / 91.9% / 94.3% | 0.648 / 0.583 / 0.581 | 2.14 / 1.37 / 1.74 px/f² |
+| **video20** | 1635 | 26 (1.6%) | 1 (0.1%) | 1 (0.1%) | 99.8% / 91.9% / 92.5% | 0.675 / 0.590 / 0.631 | 3.83 / 0.74 / 0.70 px/f² |
 
 ---
 
 ## 5. Key Engineering Insights
 
 1. **Spatial Jerk Suppression via Kinematic Filtering:**  
-   Raw YOLO detections exhibit frame-to-frame centroid jitter (2.92 px/f² on mutual frame triplets). The Kalman Filter acts as a second-order smoother, reducing spatial jerk to 0.95 px/f² (a 67.6% reduction) without sacrificing responsiveness. When paired with Foveal Zoom, spatial jerk remains well controlled (1.03 px/f²) while simultaneously recovering lost frames.
+   Raw YOLO detections exhibit frame-to-frame centroid jitter (2.92 px/f² on mutual frame triplets). The Kalman Filter acts as a second-order smoother, reducing spatial jerk to 0.93 px/f² (a 68.0% reduction) without sacrificing responsiveness. When paired with Foveal Zoom, spatial jerk remains well controlled (1.06 px/f²) while simultaneously recovering lost frames.
 
 2. **Intermittent Occlusion Bridging:**  
    During detector dropouts, linear dead-reckoning maintains valid pursuit directional gradients (steering sign agreement ≥ 80% across horizons $k \le 10$ frames), preventing complete loss of tracking state during brief dropouts.

@@ -35,6 +35,7 @@ for step in range(total_duration):
 
     # projekter target til kamera -> giver telemetry / errors
     telemetry = simulator.get_camera_telemetry(target_pos)
+    telemetry.pop("distance", None)
 
     cmd = controller.compute_cmd(telemetry)
 

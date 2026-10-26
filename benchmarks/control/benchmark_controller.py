@@ -81,6 +81,7 @@ def create_pid_controller(
                 kp_fwd = float(params.get("kp_forward", kp_fwd))
                 ki_fwd = float(params.get("ki_forward", ki_fwd))
                 kd_fwd = float(params.get("kd_forward", kd_fwd))
+                max_decel = float(params.get("max_decel", max_decel))
                 cent_damp = float(params.get("centering_damping", cent_damp))
                 min_cent = float(params.get("min_centering_factor", min_cent))
                 kp_lat = float(params.get("kp_lat", kp_lat))
@@ -92,7 +93,12 @@ def create_pid_controller(
                 kp_yaw = float(params.get("kp_yaw", kp_yaw))
                 ki_yaw = float(params.get("ki_yaw", ki_yaw))
                 kd_yaw = float(params.get("kd_yaw", kd_yaw))
-                print(f"[PID] Loaded tuned gains from {p_path.name}: kp_fwd={kp_fwd:.3f}, cent_damp={cent_damp:.3f}, min_cent={min_cent:.3f}")
+                print(f"[PID] Loaded tuned gains from {p_path.name}: "
+                      f"Fwd(kp={kp_fwd:.3f}, ki={ki_fwd:.3f}, kd={kd_fwd:.3f}), "
+                      f"Lat(kp={kp_lat:.3f}, ki={ki_lat:.3f}, kd={kd_lat:.3f}), "
+                      f"Z(kp={kp_z:.3f}, ki={ki_z:.3f}, kd={kd_z:.3f}), "
+                      f"Yaw(kp={kp_yaw:.1f}, ki={ki_yaw:.2f}, kd={kd_yaw:.1f}), "
+                      f"max_decel={max_decel:.2f}, cent_damp={cent_damp:.3f}, min_cent={min_cent:.3f}")
             except Exception as e:
                 print(f"[WARN] Failed to load PID gains from {p_path}: {e}")
 
@@ -154,6 +160,7 @@ def evaluate_single_run(
     camera_fps: float = 30.0,
     return_history: bool = False,
     enable_ego_compensation: bool = True,
+    collision_dist_m: float = 0.5,
 ) -> Dict[str, Any]:
     """
     Executes a single closed-loop pursuit simulation run and computes performance metrics.
@@ -172,7 +179,8 @@ def evaluate_single_run(
         sim = FastPixhawkQuadSim(**sim_kwargs)
         c_yaw = scenario.initial_chaser_yaw
         c, s = np.cos(c_yaw), np.sin(c_yaw)
-        v_init = np.array([c * 4.0, s * 4.0, 0.0], dtype=np.float64)
+        c_speed = float(getattr(scenario, "initial_chaser_speed", 4.0))
+        v_init = np.array([c * c_speed, s * c_speed, 0.0], dtype=np.float64)
         sim.reset(initial_pos=scenario.initial_chaser_pos, initial_yaw=c_yaw, initial_vel=v_init)
         profile = scenario.profile
         seed = scenario.seed
@@ -375,7 +383,6 @@ def evaluate_single_run(
                     "bbox_h": float(bh),
                     "w_norm": float(bw / img_w) if img_w > 0 else 0.0,
                     "scale_mode": "width",
-                    "distance": true_telem["distance"]
                 }
             else:
                 ctrl_telem = {
@@ -389,7 +396,6 @@ def evaluate_single_run(
                     "bbox_h": 0.0,
                     "w_norm": 0.0,
                     "scale_mode": "width",
-                    "distance": true_telem["distance"]
                 }
         elif use_kalman:
             # Legacy Bernoulli / Kalman mode
@@ -444,7 +450,6 @@ def evaluate_single_run(
                     "bbox_h": float(bh),
                     "w_norm": float(bw / img_w) if img_w > 0 else 0.0,
                     "scale_mode": "width",
-                    "distance": true_telem["distance"]
                 }
             else:
                 ctrl_telem = {
@@ -458,7 +463,6 @@ def evaluate_single_run(
                     "bbox_h": 0.0,
                     "w_norm": 0.0,
                     "scale_mode": "width",
-                    "distance": true_telem["distance"]
                 }
         else:
             # Raw Mode (Zero-Order Hold / Stale lock on drops)
@@ -467,6 +471,7 @@ def evaluate_single_run(
 
             if measured_bbox is not None:
                 last_valid_raw_telem = true_telem.copy()
+                last_valid_raw_telem.pop("distance", None)
                 raw_time_since_valid = 0
             else:
                 raw_time_since_valid += 1
@@ -486,28 +491,29 @@ def evaluate_single_run(
                     "bbox_h": 0.0,
                     "w_norm": 0.0,
                     "scale_mode": "width",
-                    "distance": true_telem["distance"]
                 }
+
+        # Strictly sanitize telemetry: no controller may ever receive ground-truth metric distance
+        ctrl_telem.pop("distance", None)
 
         # -------------------------------------------------------------
         # Flight Control Step
         # -------------------------------------------------------------
-        if controller_type.lower() == "rl":
-            c, s = np.cos(sim.yaw), np.sin(sim.yaw)
-            vx_b = c * sim.vel[0] + s * sim.vel[1]
-            vy_b = -s * sim.vel[0] + c * sim.vel[1]
-            vz_b = sim.vel[2]
-            cmd = controller.compute_cmd(
-                ctrl_telem,
-                drone_pitch=sim.pitch,
-                drone_roll=sim.roll,
-                dt=dt,
-                vehicle_vel=np.array([vx_b, vy_b, vz_b]),
-                vehicle_yaw_rate=sim.yaw_rate,
-                current_alt_m=-sim.pos[2]
-            )
-        else:
-            cmd = controller.compute_cmd(ctrl_telem, drone_pitch=sim.pitch, drone_roll=sim.roll, dt=dt)
+        c, s = np.cos(sim.yaw), np.sin(sim.yaw)
+        vx_b = c * sim.vel[0] + s * sim.vel[1]
+        vy_b = -s * sim.vel[0] + c * sim.vel[1]
+        vz_b = sim.vel[2]
+        v_body = np.array([vx_b, vy_b, vz_b], dtype=np.float64)
+
+        cmd = controller.compute_cmd(
+            ctrl_telem,
+            drone_pitch=sim.pitch,
+            drone_roll=sim.roll,
+            dt=dt,
+            vehicle_vel=v_body,
+            vehicle_yaw_rate=sim.yaw_rate,
+            current_alt_m=-sim.pos[2]
+        )
         sim.step(cmd)
 
         # -------------------------------------------------------------
@@ -565,7 +571,7 @@ def evaluate_single_run(
         "firing_window_s": cumulative_firing_time,
         "firing_window_pct": (cumulative_firing_time / duration) * 100.0,
         "min_distance": min_dist,
-        "collision_breach": bool(min_dist < 1.2),
+        "collision_breach": bool(min_dist < collision_dist_m),
         "path_length": total_path_length,
         "control_effort": control_effort
     }

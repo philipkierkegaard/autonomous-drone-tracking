@@ -59,7 +59,7 @@ def collect_expert_demonstrations(
     rng = np.random.default_rng(seed_offset)
     
     # Load tuned kinematic controller as expert once
-    ctrl = create_pid_controller(max_decel=6.0)
+    ctrl = create_pid_controller()
     
     for ep in range(num_episodes):
         prof = rng.choice(profiles, p=profile_weights)
@@ -156,6 +156,7 @@ def collect_expert_demonstrations(
         # Reset kinematic controller for episode
         ctrl.reset()
         ctrl.prev_cmd = np.array([init_chaser_vel, 0.0, 0.0, 0.0])
+        ctrl.prev_cmd_vx = float(init_chaser_vel)
         
         # Optical filtering state
         prev_ex, prev_ey, prev_w = 0.0, 0.0, 0.0859
@@ -183,14 +184,26 @@ def collect_expert_demonstrations(
             # Synthetic visual dropouts (simulates occlusion or frame loss)
             in_view_real = bool(telem["in_view"])
             is_dropped = (rng.random() < dropout_prob)
+            telem_ctrl = {k: v for k, v in telem.items() if k != "distance"}
             if is_dropped or not in_view_real:
-                telem_ctrl = dict(telem)
                 telem_ctrl["status"] = "COASTING"
                 telem_ctrl["in_view"] = False
-            else:
-                telem_ctrl = telem
-                
-            cmd = ctrl.compute_cmd(telem_ctrl, drone_pitch=sim.pitch, drone_roll=sim.roll, dt=dt)
+
+            c_yaw, s_yaw = np.cos(sim.yaw), np.sin(sim.yaw)
+            vx_b = c_yaw * sim.vel[0] + s_yaw * sim.vel[1]
+            vy_b = -s_yaw * sim.vel[0] + c_yaw * sim.vel[1]
+            vz_b = sim.vel[2]
+            v_body = np.array([vx_b, vy_b, vz_b], dtype=np.float64)
+
+            cmd = ctrl.compute_cmd(
+                telem_ctrl,
+                drone_pitch=sim.pitch,
+                drone_roll=sim.roll,
+                dt=dt,
+                vehicle_vel=v_body,
+                vehicle_yaw_rate=sim.yaw_rate,
+                current_alt_m=-sim.pos[2]
+            )
             sim.step(cmd)
             # DAgger-style recovery perturbation: nudges heading so PID demonstrates corrective turns
             if step > 20 and rng.random() < 0.025:
@@ -341,8 +354,9 @@ def evaluate_policy(
         c, s = np.cos(sim.yaw), np.sin(sim.yaw)
         v_body = np.array([c * sim.vel[0] + s * sim.vel[1], -s * sim.vel[0] + c * sim.vel[1], sim.vel[2]])
         
+        telem_clean = {k: v for k, v in telem.items() if k != "distance"}
         cmd = ctrl.compute_cmd(
-            telem,
+            telem_clean,
             drone_pitch=sim.pitch,
             drone_roll=sim.roll,
             dt=dt,

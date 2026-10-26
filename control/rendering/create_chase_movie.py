@@ -365,7 +365,6 @@ def simulate_pursuit(
                     "error_x": ex_est,
                     "error_y": ey_est,
                     "target_size": bw_est,
-                    "distance": dist,
                     "in_view": True,
                     "status": "TRACKING" if not is_coasting else "COASTING",
                     "is_coasting": is_coasting,
@@ -385,7 +384,6 @@ def simulate_pursuit(
                     "error_x": last_seen_ex,
                     "error_y": last_seen_ey,
                     "target_size": 32.33,
-                    "distance": dist,
                     "in_view": False,
                     "status": "SEARCHING",
                     "is_coasting": True,
@@ -423,7 +421,8 @@ def simulate_pursuit(
             telem["coasting_ms"] = 0
             telem["history"] = []
 
-        # 2. Compute 4-DOF velocity setpoint
+        # 2. Compute 4-DOF velocity setpoint (strictly sanitize distance so controller receives zero ground truth)
+        telem.pop("distance", None)
         if RecurrentVisualServoController is not None and isinstance(controller, RecurrentVisualServoController):
             c, s = np.cos(sim.yaw), np.sin(sim.yaw)
             vx_b = c * sim.vel[0] + s * sim.vel[1]
@@ -456,7 +455,7 @@ def simulate_pursuit(
         chaser_roll.append(sim.roll)
         chaser_cam_pitch.append(sim.cam_pitch)
         target_pos.append(p_target.copy())
-        dist_history.append(telem["distance"])
+        dist_history.append(float(dist))
         err_x_history.append(telem["error_x"])
         err_y_history.append(telem["error_y"])
         in_view_history.append(telem["in_view"])

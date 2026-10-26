@@ -231,7 +231,6 @@ def render_empirical_fpv(
                 "error_x": ex_est,
                 "error_y": ey_est,
                 "target_size": bw_est,
-                "distance": dist,
                 "in_view": True,
                 "status": "TRACKING" if not kalman_is_coasting else "COASTING"
             }
@@ -240,7 +239,6 @@ def render_empirical_fpv(
                 "error_x": 0.0,
                 "error_y": 0.0,
                 "target_size": 32.33,
-                "distance": 6.0,
                 "in_view": False,
                 "status": "SEARCHING"
             }

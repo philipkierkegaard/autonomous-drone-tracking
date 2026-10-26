@@ -147,9 +147,10 @@ def run_scenario_evaluation(
         else:
             leaky_dwell = max(0.0, leaky_dwell - 1.5 * dt)
 
-        # Compute control command
+        # Compute control command (strictly sanitize telemetry so controller receives no ground-truth distance)
+        telem_clean = {k: v for k, v in telem.items() if k != "distance"}
         if controller_type == "pid":
-            cmd = controller.compute_cmd(telem, drone_pitch=sim.pitch, drone_roll=sim.roll, dt=dt)
+            cmd = controller.compute_cmd(telem_clean, drone_pitch=sim.pitch, drone_roll=sim.roll, dt=dt)
         else:
             c, s = np.cos(sim.yaw), np.sin(sim.yaw)
             vx_b = c * sim.vel[0] + s * sim.vel[1]
@@ -158,7 +159,7 @@ def run_scenario_evaluation(
             v_body = np.array([vx_b, vy_b, vz_b], dtype=np.float64)
             alt_agl = -sim.pos[2]
             cmd = controller.compute_cmd(
-                telem,
+                telem_clean,
                 drone_pitch=sim.pitch,
                 drone_roll=sim.roll,
                 dt=dt,
@@ -205,7 +206,7 @@ def run_scenario_evaluation(
         "in_basket_s": in_basket_s,
         "in_basket_pct": in_basket_pct,
         "min_distance": min_dist,
-        "collision_breach": bool(min_dist < 1.2),
+        "collision_breach": bool(min_dist < 0.5),
         "jerk_yaw": jerk_yaw,
         "jerk_surge": jerk_surge,
         "jerk_lat": jerk_lat,

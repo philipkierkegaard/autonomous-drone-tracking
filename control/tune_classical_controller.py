@@ -44,11 +44,12 @@ from control.spatial import compute_ego_motion_compensation
 def create_tuning_suite(
     suite_path: Path,
     base_seed: int = 60_000,
-    duration: float = 18.0
+    duration: float = 18.0,
+    scenarios_per_group: Tuple[int, int, int] = (4, 6, 6)
 ) -> List[Dict[str, Any]]:
     """
-    Creates a dedicated, independent 40-scenario tuning dataset with balanced distribution
-    across Cruising, Evasive, and Hyper-Evasive regimes and all 5 encounter geometries.
+    Creates a dedicated, independent 80-scenario tuning dataset with balanced distribution
+    across Cruising (20), Evasive (30), and Hyper-Evasive (30) regimes across all 5 encounter geometries.
     """
     if suite_path.exists():
         print(f"[TUNING] Loading existing tuning suite from: {suite_path}")
@@ -56,27 +57,28 @@ def create_tuning_suite(
             data = json.load(f)
             return data["scenarios"]
 
-    print(f"[TUNING] Generating balanced 40-scenario realistic tuning dataset (base_seed={base_seed})...")
+    c_cnt, e_cnt, h_cnt = scenarios_per_group
+    total_expected = 5 * c_cnt + 5 * e_cnt + 5 * h_cnt
+    print(f"[TUNING] Generating balanced {total_expected}-scenario realistic tuning dataset (base_seed={base_seed})...")
     gen = PursuitDatasetGenerator()
     scenarios = []
     
-    # 10 Cruising (2 each), 15 Evasive (3 each), 15 Hyper-Evasive (3 each) across 5 encounters
     distribution = [
-        ("cruising", EncounterType.TAIL_CHASE, 2),
-        ("cruising", EncounterType.CROSSING_RIGHT, 2),
-        ("cruising", EncounterType.CROSSING_LEFT, 2),
-        ("cruising", EncounterType.HEAD_ON, 2),
-        ("cruising", EncounterType.OBLIQUE_AWAY, 2),
-        ("evasive", EncounterType.TAIL_CHASE, 3),
-        ("evasive", EncounterType.CROSSING_RIGHT, 3),
-        ("evasive", EncounterType.CROSSING_LEFT, 3),
-        ("evasive", EncounterType.HEAD_ON, 3),
-        ("evasive", EncounterType.OBLIQUE_AWAY, 3),
-        ("hyper_evasive", EncounterType.TAIL_CHASE, 3),
-        ("hyper_evasive", EncounterType.CROSSING_RIGHT, 3),
-        ("hyper_evasive", EncounterType.CROSSING_LEFT, 3),
-        ("hyper_evasive", EncounterType.HEAD_ON, 3),
-        ("hyper_evasive", EncounterType.OBLIQUE_AWAY, 3),
+        ("cruising", EncounterType.TAIL_CHASE, c_cnt),
+        ("cruising", EncounterType.CROSSING_RIGHT, c_cnt),
+        ("cruising", EncounterType.CROSSING_LEFT, c_cnt),
+        ("cruising", EncounterType.HEAD_ON, c_cnt),
+        ("cruising", EncounterType.OBLIQUE_AWAY, c_cnt),
+        ("evasive", EncounterType.TAIL_CHASE, e_cnt),
+        ("evasive", EncounterType.CROSSING_RIGHT, e_cnt),
+        ("evasive", EncounterType.CROSSING_LEFT, e_cnt),
+        ("evasive", EncounterType.HEAD_ON, e_cnt),
+        ("evasive", EncounterType.OBLIQUE_AWAY, e_cnt),
+        ("hyper_evasive", EncounterType.TAIL_CHASE, h_cnt),
+        ("hyper_evasive", EncounterType.CROSSING_RIGHT, h_cnt),
+        ("hyper_evasive", EncounterType.CROSSING_LEFT, h_cnt),
+        ("hyper_evasive", EncounterType.HEAD_ON, h_cnt),
+        ("hyper_evasive", EncounterType.OBLIQUE_AWAY, h_cnt),
     ]
 
     scen_idx = 1
@@ -119,7 +121,13 @@ def simulate_scenario(
       - SO(3) gyroscopic ego-motion compensation
       - Momentum cruise search recovery dynamics
     """
-    kp_fwd, centering_damp, min_centering, kp_lat, kd_lat, kp_yaw, kd_yaw = params
+    (
+        kp_fwd, ki_fwd, kd_fwd,
+        max_decel, centering_damp, min_centering,
+        kp_lat, ki_lat, kd_lat,
+        kp_z, ki_z, kd_z,
+        kp_yaw, ki_yaw, kd_yaw
+    ) = params
 
     c_init = scenario.get("initial_chaser_pos", [0.0, 0.0, -2.5])
     c_yaw = float(scenario.get("initial_chaser_yaw", 0.0))
@@ -146,23 +154,23 @@ def simulate_scenario(
         use_bbox_size=True,
         enable_lateral_strafe=True,
         kp_forward=float(kp_fwd),
-        ki_forward=0.0,
-        kd_forward=0.15,
+        ki_forward=float(ki_fwd),
+        kd_forward=float(kd_fwd),
         centering_damping=float(centering_damp),
         min_centering_factor=float(min_centering),
         kp_lat=float(kp_lat),
-        ki_lat=0.0,
+        ki_lat=float(ki_lat),
         kd_lat=float(kd_lat),
-        kp_z=6.0,
-        ki_z=0.0,
-        kd_z=1.0,
+        kp_z=float(kp_z),
+        ki_z=float(ki_z),
+        kd_z=float(kd_z),
         kp_yaw=float(kp_yaw),
-        ki_yaw=0.0,
+        ki_yaw=float(ki_yaw),
         kd_yaw=float(kd_yaw),
         max_lat_vel=4.0,
         max_lat_accel=6.0,
         max_accel=6.0,
-        max_decel=6.0,
+        max_decel=float(max_decel),
         max_accel_yaw=240.0,
         min_limits=np.array([-0.5, -4.0, -3.0, -120.0]),
         max_limits=np.array([15.0,  4.0,  2.0,  120.0]),
@@ -356,7 +364,6 @@ def simulate_scenario(
                 "bbox_h": float(bh),
                 "w_norm": float(bw / 1280.0),
                 "scale_mode": "width",
-                "distance": true_telem["distance"]
             }
         else:
             ctrl_telem = {
@@ -370,11 +377,23 @@ def simulate_scenario(
                 "bbox_h": 0.0,
                 "w_norm": 0.0,
                 "scale_mode": "width",
-                "distance": true_telem["distance"]
             }
 
+        # Strictly sanitize telemetry: no controller may ever receive ground-truth metric distance
+        ctrl_telem.pop("distance", None)
+
         # Compute command and step simulator
-        cmd = ctrl.compute_cmd(ctrl_telem, drone_pitch=sim.pitch, drone_roll=sim.roll, dt=dt)
+        c_y, s_y = np.cos(sim.yaw), np.sin(sim.yaw)
+        v_body = np.array([c_y * sim.vel[0] + s_y * sim.vel[1], -s_y * sim.vel[0] + c_y * sim.vel[1], sim.vel[2]], dtype=np.float64)
+        cmd = ctrl.compute_cmd(
+            ctrl_telem,
+            drone_pitch=sim.pitch,
+            drone_roll=sim.roll,
+            dt=dt,
+            vehicle_vel=v_body,
+            vehicle_yaw_rate=sim.yaw_rate,
+            current_alt_m=-sim.pos[2]
+        )
         sim.step(cmd)
 
     mean_standoff = float(np.mean(standoff_costs))
@@ -436,7 +455,9 @@ def run_tuning_optimization(
     scenarios: List[Dict[str, Any]],
     output_weights_path: Path,
     lambda_image: float = 15.0,
-    workers: int = 8
+    workers: int = 8,
+    popsize: int = 3,
+    maxiter: int = 10
 ) -> Dict[str, Any]:
     """Runs global differential evolution followed by Nelder-Mead polishing under realistic observations."""
     global _GLOBAL_POOL
@@ -445,34 +466,55 @@ def run_tuning_optimization(
         _GLOBAL_POOL = ctx.Pool(workers)
         print(f"[TUNING] Initialized parallel worker pool with {workers} cores.")
     
-    # 7 Tunable Parameters: [kp_fwd, centering_damp, min_centering_factor, kp_lat, kd_lat, kp_yaw, kd_yaw]
+    # 15 Tunable Parameters: [kp_fwd, ki_fwd, kd_fwd, max_decel, centering_damp, min_centering_factor,
+    #                         kp_lat, ki_lat, kd_lat, kp_z, ki_z, kd_z, kp_yaw, ki_yaw, kd_yaw]
+    # Note: 0.0 is explicitly a valid lower bound for all integral gains.
     bounds = [
-        (0.5, 2.5),     # kp_fwd (nominal: 1.2)
-        (0.10, 1.20),   # centering_damp (cornering deceleration factor per unit |e_x|)
-        (0.20, 0.75),   # min_centering_factor (speed retention floor during sharp turns)
-        (0.5, 4.0),     # kp_lat (nominal: 2.5)
-        (0.05, 1.0),    # kd_lat (nominal: 0.35)
-        (120.0, 320.0), # kp_yaw (nominal: 180.0)
-        (10.0, 65.0),   # kd_yaw (nominal: 20.0)
+        (0.5, 3.5),     # 0: kp_fwd (forward proportional gain)
+        (0.0, 0.80),    # 1: ki_fwd (forward integral gain, 0 is valid!)
+        (0.05, 0.40),   # 2: kd_fwd (forward derivative closing velocity damping)
+        (2.0, 4.5),     # 3: max_decel (m/s² braking limit to prevent pitch-up blinding)
+        (0.10, 1.20),   # 4: centering_damp (cornering deceleration factor per unit |e_x|)
+        (0.20, 0.75),   # 5: min_centering_factor (speed retention floor during sharp turns)
+        (0.5, 4.0),     # 6: kp_lat (lateral proportional gain)
+        (0.0, 0.80),    # 7: ki_lat (lateral integral gain, 0 is valid!)
+        (0.05, 1.0),    # 8: kd_lat (lateral derivative gain)
+        (3.0, 9.0),     # 9: kp_z (vertical proportional gain)
+        (0.0, 1.50),    # 10: ki_z (vertical integral gain, 0 is valid!)
+        (0.3, 2.5),     # 11: kd_z (vertical derivative gain)
+        (120.0, 320.0), # 12: kp_yaw (yaw proportional gain)
+        (0.0, 35.0),    # 13: ki_yaw (yaw integral gain, 0 is valid!)
+        (10.0, 65.0),   # 14: kd_yaw (yaw derivative gain)
     ]
 
-    baseline_params = np.array([1.2, 0.25, 0.35, 2.5, 0.35, 180.0, 20.0], dtype=np.float64)
+    baseline_params = np.array([
+        1.2,    # kp_fwd
+        0.35,   # ki_fwd
+        0.20,   # kd_fwd
+        3.0,    # max_decel
+        0.70,   # centering_damp
+        0.35,   # min_centering_factor
+        2.0,    # kp_lat
+        0.15,   # ki_lat
+        0.40,   # kd_lat
+        6.0,    # kp_z
+        0.20,   # ki_z
+        1.0,    # kd_z
+        200.0,  # kp_yaw
+        5.0,    # ki_yaw
+        35.0,   # kd_yaw
+    ], dtype=np.float64)
     print(f"\n[EVAL] Evaluating baseline parameters on realistic observation suite ({len(scenarios)} scenarios):")
     print(f"       Gains: {baseline_params.round(3)}...")
     t0 = time.time()
     baseline_cost = evaluate_candidate(baseline_params, scenarios, lambda_image=lambda_image)
     print(f"       Baseline Mean Cost: {baseline_cost:.4f} (evaluated in {time.time()-t0:.2f}s)")
 
-    # Evaluate previous tuned gains (which were tuned without realistic observations)
-    prev_gains = np.array([0.824, 0.811, 0.290, 1.062, 0.471, 218.68, 37.64], dtype=np.float64)
-    prev_cost = evaluate_candidate(prev_gains, scenarios, lambda_image=lambda_image)
-    print(f"       Prior Tuned Gains (unobserved): Cost = {prev_cost:.4f}")
-
-    print(f"\n[OPTIM] Launching Differential Evolution Global Optimization (popsize=6, maxiter=12)...")
+    print(f"\n[OPTIM] Launching Differential Evolution Global Optimization (popsize={popsize}, maxiter={maxiter})...")
     t_start = time.time()
     
     eval_counter = [0]
-    best_seen = [min(baseline_cost, prev_cost)]
+    best_seen = [baseline_cost]
 
     def callback_fn(xk, convergence=None):
         cost = evaluate_candidate(xk, scenarios, lambda_image=lambda_image)
@@ -486,8 +528,8 @@ def run_tuning_optimization(
         bounds=bounds,
         args=(scenarios, lambda_image),
         strategy="best1bin",
-        maxiter=12,
-        popsize=6,
+        maxiter=maxiter,
+        popsize=popsize,
         tol=0.01,
         mutation=(0.5, 1.0),
         recombination=0.7,
@@ -516,44 +558,46 @@ def run_tuning_optimization(
     opt_cost = nm_res.fun
     elapsed = time.time() - t_start
 
-    ref_cost = min(baseline_cost, prev_cost)
+    ref_cost = baseline_cost
     pct_gain = (ref_cost - opt_cost) / ref_cost * 100.0
 
     print(f"[OPTIM] Optimization finished in {elapsed:.1f}s.")
     print(f"        Tuned Parameters:   {opt_params.round(3)}")
-    print(f"        Final Tuned Cost:   {opt_cost:.4f} (Baseline: {baseline_cost:.4f}, Prev: {prev_cost:.4f}, Improvement: {pct_gain:+.1f}%)")
+    print(f"        Final Tuned Cost:   {opt_cost:.4f} (Baseline: {baseline_cost:.4f}, Improvement: {pct_gain:+.1f}%)")
 
     tuned_dict = {
         "kp_forward": float(opt_params[0]),
-        "ki_forward": 0.0,
-        "kd_forward": 0.15,
-        "centering_damping": float(opt_params[1]),
-        "min_centering_factor": float(opt_params[2]),
-        "kp_lat": float(opt_params[3]),
-        "ki_lat": 0.0,
-        "kd_lat": float(opt_params[4]),
-        "kp_z": 6.0,
-        "ki_z": 0.0,
-        "kd_z": 1.0,
-        "kp_yaw": float(opt_params[5]),
-        "ki_yaw": 0.0,
-        "kd_yaw": float(opt_params[6]),
+        "ki_forward": float(opt_params[1]),
+        "kd_forward": float(opt_params[2]),
+        "max_decel": float(opt_params[3]),
+        "centering_damping": float(opt_params[4]),
+        "min_centering_factor": float(opt_params[5]),
+        "kp_lat": float(opt_params[6]),
+        "ki_lat": float(opt_params[7]),
+        "kd_lat": float(opt_params[8]),
+        "kp_z": float(opt_params[9]),
+        "ki_z": float(opt_params[10]),
+        "kd_z": float(opt_params[11]),
+        "kp_yaw": float(opt_params[12]),
+        "ki_yaw": float(opt_params[13]),
+        "kd_yaw": float(opt_params[14]),
     }
     baseline_dict = {
         "kp_forward": float(baseline_params[0]),
-        "ki_forward": 0.0,
-        "kd_forward": 0.15,
-        "centering_damping": float(baseline_params[1]),
-        "min_centering_factor": float(baseline_params[2]),
-        "kp_lat": float(baseline_params[3]),
-        "ki_lat": 0.0,
-        "kd_lat": float(baseline_params[4]),
-        "kp_z": 6.0,
-        "ki_z": 0.0,
-        "kd_z": 1.0,
-        "kp_yaw": float(baseline_params[5]),
-        "ki_yaw": 0.0,
-        "kd_yaw": float(baseline_params[6]),
+        "ki_forward": float(baseline_params[1]),
+        "kd_forward": float(baseline_params[2]),
+        "max_decel": float(baseline_params[3]),
+        "centering_damping": float(baseline_params[4]),
+        "min_centering_factor": float(baseline_params[5]),
+        "kp_lat": float(baseline_params[6]),
+        "ki_lat": float(baseline_params[7]),
+        "kd_lat": float(baseline_params[8]),
+        "kp_z": float(baseline_params[9]),
+        "ki_z": float(baseline_params[10]),
+        "kd_z": float(baseline_params[11]),
+        "kp_yaw": float(baseline_params[12]),
+        "ki_yaw": float(baseline_params[13]),
+        "kd_yaw": float(baseline_params[14]),
     }
 
     results = {
@@ -562,7 +606,6 @@ def run_tuning_optimization(
         "lambda_image": lambda_image,
         "num_scenarios": len(scenarios),
         "baseline_cost": round(baseline_cost, 4),
-        "previous_tuned_cost": round(prev_cost, 4),
         "tuned_cost": round(opt_cost, 4),
         "cost_reduction_pct": round(pct_gain, 2),
         "baseline_parameters": baseline_dict,
@@ -629,11 +672,13 @@ def validate_on_held_out(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Tune Kinematic Controller Under Realistic Observations")
-    parser.add_argument("--suite", type=str, default="outputs/benchmarks/datasets/pid_realistic_tuning_suite_40.json")
+    parser.add_argument("--suite", type=str, default="outputs/benchmarks/datasets/pid_realistic_tuning_suite_80.json")
     parser.add_argument("--val-suite", type=str, default="outputs/benchmarks/datasets/validation_suite_30.json")
     parser.add_argument("--out", type=str, default="control/weights/tuned_pid_gains.json")
     parser.add_argument("--lambda-image", type=float, default=15.0, help="Weight for image plane error vs standoff error")
-    parser.add_argument("--workers", type=int, default=8, help="Number of parallel CPU workers")
+    parser.add_argument("--workers", type=int, default=10, help="Number of parallel CPU workers")
+    parser.add_argument("--popsize", type=int, default=3, help="Differential evolution population size factor")
+    parser.add_argument("--maxiter", type=int, default=10, help="Maximum differential evolution generations")
     args = parser.parse_args()
 
     suite_scenarios = create_tuning_suite(Path(args.suite))
@@ -641,10 +686,18 @@ if __name__ == "__main__":
         scenarios=suite_scenarios,
         output_weights_path=Path(args.out),
         lambda_image=args.lambda_image,
-        workers=args.workers
+        workers=args.workers,
+        popsize=args.popsize,
+        maxiter=args.maxiter
     )
 
-    param_keys = ["kp_forward", "centering_damping", "min_centering_factor", "kp_lat", "kd_lat", "kp_yaw", "kd_yaw"]
+    param_keys = [
+        "kp_forward", "ki_forward", "kd_forward", "max_decel",
+        "centering_damping", "min_centering_factor",
+        "kp_lat", "ki_lat", "kd_lat",
+        "kp_z", "ki_z", "kd_z",
+        "kp_yaw", "ki_yaw", "kd_yaw"
+    ]
     baseline_vec = np.array([res["baseline_parameters"][k] for k in param_keys])
     tuned_vec = np.array([res["tuned_parameters"][k] for k in param_keys])
 

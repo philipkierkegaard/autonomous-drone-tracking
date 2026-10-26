@@ -132,6 +132,10 @@ def render_simple_chase_video(
         kd_z = 1.0
         kp_yaw = 180.0
         kd_yaw = 20.0
+        ki_fwd = 0.0
+        ki_lat = 0.0
+        ki_z = 0.0
+        ki_yaw = 0.0
         is_tuned = False
         default_tuned = PROJECT_ROOT / "control" / "weights" / "tuned_pid_gains.json"
         if default_tuned.exists():
@@ -140,14 +144,18 @@ def render_simple_chase_video(
                     g_data = json.load(f)
                 params = g_data.get("tuned_parameters", g_data)
                 kp_fwd = float(params.get("kp_forward", kp_fwd))
+                ki_fwd = float(params.get("ki_forward", ki_fwd))
                 kd_fwd = float(params.get("kd_forward", kd_fwd))
                 cent_damp = float(params.get("centering_damping", cent_damp))
                 min_cent = float(params.get("min_centering_factor", min_cent))
                 kp_lat = float(params.get("kp_lat", kp_lat))
+                ki_lat = float(params.get("ki_lat", ki_lat))
                 kd_lat = float(params.get("kd_lat", kd_lat))
                 kp_z = float(params.get("kp_z", kp_z))
+                ki_z = float(params.get("ki_z", ki_z))
                 kd_z = float(params.get("kd_z", kd_z))
                 kp_yaw = float(params.get("kp_yaw", kp_yaw))
+                ki_yaw = float(params.get("ki_yaw", ki_yaw))
                 kd_yaw = float(params.get("kd_yaw", kd_yaw))
                 is_tuned = True
             except Exception as e:
@@ -194,14 +202,18 @@ def render_simple_chase_video(
             use_bbox_size=True,
             enable_lateral_strafe=True,
             kp_forward=kp_fwd,
+            ki_forward=ki_fwd,
             kd_forward=kd_fwd,
             centering_damping=cent_damp,
             min_centering_factor=min_cent,
             kp_lat=kp_lat,
+            ki_lat=ki_lat,
             kd_lat=kd_lat,
             kp_z=kp_z,
+            ki_z=ki_z,
             kd_z=kd_z,
             kp_yaw=kp_yaw,
+            ki_yaw=ki_yaw,
             kd_yaw=kd_yaw,
             max_lat_vel=4.0,
             max_lat_accel=6.0,
@@ -271,6 +283,7 @@ def render_simple_chase_video(
         in_basket_all.append(in_basket)
         catch_t_all.append(catch_t)
 
+        telem_clean = {k: v for k, v in telemetry.items() if k != "distance"}
         if is_rl:
             c, s = np.cos(sim.yaw), np.sin(sim.yaw)
             vx_b = c * sim.vel[0] + s * sim.vel[1]
@@ -278,7 +291,7 @@ def render_simple_chase_video(
             vz_b = sim.vel[2]
             v_body = np.array([vx_b, vy_b, vz_b], dtype=np.float64)
             cmd = controller.compute_cmd(
-                telemetry,
+                telem_clean,
                 drone_pitch=sim.pitch,
                 drone_roll=sim.roll,
                 dt=dt_sim,
@@ -287,7 +300,7 @@ def render_simple_chase_video(
                 current_alt_m=-sim.pos[2]
             )
         else:
-            cmd = controller.compute_cmd(telemetry, drone_pitch=sim.pitch, drone_roll=sim.roll, dt=dt_sim)
+            cmd = controller.compute_cmd(telem_clean, drone_pitch=sim.pitch, drone_roll=sim.roll, dt=dt_sim)
         sim.step(cmd)
 
         times.append(t)
@@ -739,7 +752,8 @@ def render_dual_chase_video(
 
         # PID step
         telem_p = sim_pid.get_camera_telemetry(tgt_world, target_w_m=0.35, target_h_m=0.20, img_w=1280, img_h=720, desired_target_size=110.0)
-        cmd_p = ctrl_pid.compute_cmd(telem_p, drone_pitch=sim_pid.pitch, drone_roll=sim_pid.roll, dt=dt_sim)
+        telem_p_clean = {k: v for k, v in telem_p.items() if k != "distance"}
+        cmd_p = ctrl_pid.compute_cmd(telem_p_clean, drone_pitch=sim_pid.pitch, drone_roll=sim_pid.roll, dt=dt_sim)
         sim_pid.step(cmd_p)
 
         in_b_p = bool((2.5 <= telem_p["distance"] <= 4.5) and telem_p["in_view"])
@@ -753,12 +767,13 @@ def render_dual_chase_video(
 
         # RL step
         telem_r = sim_rl.get_camera_telemetry(tgt_world, target_w_m=0.35, target_h_m=0.20, img_w=1280, img_h=720, desired_target_size=110.0)
+        telem_r_clean = {k: v for k, v in telem_r.items() if k != "distance"}
         c, s = np.cos(sim_rl.yaw), np.sin(sim_rl.yaw)
         vx_b = c * sim_rl.vel[0] + s * sim_rl.vel[1]
         vy_b = -s * sim_rl.vel[0] + c * sim_rl.vel[1]
         vz_b = sim_rl.vel[2]
         cmd_r = ctrl_rl.compute_cmd(
-            telem_r,
+            telem_r_clean,
             drone_pitch=sim_rl.pitch,
             drone_roll=sim_rl.roll,
             dt=dt_sim,
@@ -1132,14 +1147,15 @@ def compute_shared_bounds(
             all_e.append(tgt[1])
             all_n.append(tgt[0])
             telem = sim.get_camera_telemetry(tgt, target_w_m=0.35, target_h_m=0.20, img_w=1280, img_h=720, desired_target_size=110.0)
+            telem_clean = {k: v for k, v in telem.items() if k != "distance"}
             if ctype == "pid":
-                cmd = ctrl.compute_cmd(telem, drone_pitch=sim.pitch, drone_roll=sim.roll, dt=dt_sim)
+                cmd = ctrl.compute_cmd(telem_clean, drone_pitch=sim.pitch, drone_roll=sim.roll, dt=dt_sim)
             else:
                 c, s = np.cos(sim.yaw), np.sin(sim.yaw)
                 vx_b = c * sim.vel[0] + s * sim.vel[1]
                 vy_b = -s * sim.vel[0] + c * sim.vel[1]
                 vz_b = sim.vel[2]
-                cmd = ctrl.compute_cmd(telem, drone_pitch=sim.pitch, drone_roll=sim.roll, dt=dt_sim,
+                cmd = ctrl.compute_cmd(telem_clean, drone_pitch=sim.pitch, drone_roll=sim.roll, dt=dt_sim,
                                        vehicle_vel=np.array([vx_b, vy_b, vz_b]), vehicle_yaw_rate=sim.yaw_rate, current_alt_m=-sim.pos[2])
             sim.step(cmd)
             all_e.append(sim.pos[1])

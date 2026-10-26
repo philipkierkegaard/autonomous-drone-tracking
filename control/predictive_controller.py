@@ -287,6 +287,9 @@ class RecurrentVisualServoController:
         Returns:
             np.ndarray of shape (4,): [v_forward (m/s), v_right (m/s), v_down (m/s), yaw_rate (deg/s)]
         """
+        # Strictly sanitize telemetry: RecurrentVisualServoController is 100% optical and must never receive ground-truth distance
+        telemetry = {k: v for k, v in telemetry.items() if k != "distance"}
+
         status = telemetry.get("status", "SEARCHING")
         if status in ("TRACKING", "LOCKED"):
             flag = 1.0
@@ -431,15 +434,11 @@ class RecurrentVisualServoController:
         # Forward velocity target
         target_vy = float(a[1] * self.max_lat_vel)
 
-        # a2 in NED: negative is climb, positive is descend
+        # a2 in NED: negative is climb, positive is descend (100% learned from policy)
         if a[2] <= 0:
             target_vz = float(a[2] * self.max_vel_up)
         else:
             target_vz = float(a[2] * self.max_vel_down)
-
-        # Ground proximity safety barrier: inhibit descent when below 1.4m AGL
-        if current_alt_m is not None and current_alt_m < 1.4 and target_vz > 0.0:
-            target_vz = float(target_vz * max(0.0, (current_alt_m - 0.9) / 0.5))
 
         target_yaw = float(a[3] * self.max_yaw_rate)
 
