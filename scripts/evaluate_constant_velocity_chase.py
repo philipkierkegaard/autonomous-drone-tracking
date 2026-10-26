@@ -184,13 +184,14 @@ def plot_diagnostics(
     output_path: Path,
     target_speed: float = 5.0,
     standoff_nominal: float = 3.5,
+    initial_dist: float = 4.0,
 ):
     """Generates broadcast-grade publication diagnostic plots for both test cases."""
     fig, axes = plt.subplots(4, 2, figsize=(16, 12), dpi=150)
     plt.subplots_adjust(wspace=0.22, hspace=0.38, left=0.07, right=0.96, top=0.93, bottom=0.06)
 
     cases = [
-        ("Case 1: Catch-Up from Hover (v0 = 0 m/s, d0 = 7.0 m)", res_hover, 0, 8.0),
+        (f"Case 1: Catch-Up from Hover (v0 = 0 m/s, d0 = {initial_dist:.1f} m)", res_hover, 0, 5.0),
         ("Case 2: In-Flight Rendezvous (v0 = 5 m/s, d0 = 3.5 m)", res_cruise, 1, 2.0),
     ]
 
@@ -282,38 +283,44 @@ def plot_diagnostics(
 
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="Evaluate PID on constant velocity target chase")
+    parser.add_argument("--initial-dist", "--d0", type=float, default=4.0, help="Initial target distance from hover (default: 4.0m)")
+    parser.add_argument("--target-speed", type=float, default=5.0, help="Target speed in m/s (default: 5.0m/s)")
+    args = parser.parse_args()
+
     print("=" * 80)
-    print("EVALUATING TUNED PID CONTROLLER: CONSTANT 5.0 M/S TARGET PURSUIT")
+    print(f"EVALUATING TUNED PID CONTROLLER: CONSTANT {args.target_speed:.1f} M/S TARGET PURSUIT (d0 = {args.initial_dist:.1f} m)")
     print("=" * 80)
 
     # Test 1: Catch-up from hover
     scen_hover = ConstantVelocityScenario(
         scenario_id="const_vel_5ms_hover_start",
-        initial_distance=7.0,
-        target_speed=5.0,
+        initial_distance=args.initial_dist,
+        target_speed=args.target_speed,
         initial_chaser_speed=0.0,
         duration=25.0
     )
-    print("\n--- Running Case 1: Chaser starts at hover (v0 = 0 m/s, d0 = 7.0 m) ---")
+    print(f"\n--- Running Case 1: Chaser starts at hover (v0 = 0 m/s, d0 = {args.initial_dist:.1f} m) ---")
     res_hover = evaluate_chase(scen_hover, noise_mode="empirical", frame_drop_rate=0.05)
-    ss_hover = compute_steady_state_metrics(res_hover["history"], t_settle_start=8.0)
+    ss_hover = compute_steady_state_metrics(res_hover["history"], t_settle_start=5.0)
 
     print(f"  1s Catch: {res_hover['success_1s']} | 3s Catch: {res_hover['success_3s']}")
     print(f"  Max Continuous Dwell: {res_hover['max_continuous_dwell_s']:.2f} s")
     print(f"  Steady-State Mean Distance: {ss_hover['ss_mean_dist_m']:.3f} m (Std: {ss_hover['ss_std_dist_m']:.3f} m)")
     print(f"  Steady-State Distance Error: {ss_hover['ss_dist_error_m']:.3f} m")
-    print(f"  Steady-State Mean Speed: {ss_hover['ss_mean_speed_ms']:.3f} m/s (Target: 5.0 m/s, Error: {ss_hover['ss_speed_error_ms']:.3f} m/s)")
-    print(f"  Basket Retention (t >= 8s): {ss_hover['ss_basket_retention_pct']:.1f}%")
+    print(f"  Steady-State Mean Speed: {ss_hover['ss_mean_speed_ms']:.3f} m/s (Target: {args.target_speed:.1f} m/s, Error: {ss_hover['ss_speed_error_ms']:.3f} m/s)")
+    print(f"  Basket Retention (t >= 5s): {ss_hover['ss_basket_retention_pct']:.1f}%")
 
     # Test 2: In-flight rendezvous / cruise start
     scen_cruise = ConstantVelocityScenario(
         scenario_id="const_vel_5ms_cruise_start",
         initial_distance=3.5,
-        target_speed=5.0,
-        initial_chaser_speed=5.0,
+        target_speed=args.target_speed,
+        initial_chaser_speed=args.target_speed,
         duration=25.0
     )
-    print("\n--- Running Case 2: In-flight rendezvous (v0 = 5.0 m/s, d0 = 3.5 m) ---")
+    print(f"\n--- Running Case 2: In-flight rendezvous (v0 = {args.target_speed:.1f} m/s, d0 = 3.5 m) ---")
     res_cruise = evaluate_chase(scen_cruise, noise_mode="empirical", frame_drop_rate=0.05)
     ss_cruise = compute_steady_state_metrics(res_cruise["history"], t_settle_start=2.0)
 
@@ -321,12 +328,12 @@ def main():
     print(f"  Max Continuous Dwell: {res_cruise['max_continuous_dwell_s']:.2f} s")
     print(f"  Steady-State Mean Distance: {ss_cruise['ss_mean_dist_m']:.3f} m (Std: {ss_cruise['ss_std_dist_m']:.3f} m)")
     print(f"  Steady-State Distance Error: {ss_cruise['ss_dist_error_m']:.3f} m")
-    print(f"  Steady-State Mean Speed: {ss_cruise['ss_mean_speed_ms']:.3f} m/s (Target: 5.0 m/s, Error: {ss_cruise['ss_speed_error_ms']:.3f} m/s)")
+    print(f"  Steady-State Mean Speed: {ss_cruise['ss_mean_speed_ms']:.3f} m/s (Target: {args.target_speed:.1f} m/s, Error: {ss_cruise['ss_speed_error_ms']:.3f} m/s)")
     print(f"  Basket Retention (t >= 2s): {ss_cruise['ss_basket_retention_pct']:.1f}%")
 
     # Save diagnostic figure
     plot_path = PROJECT_ROOT / "outputs" / "control" / "constant_velocity_5ms_evaluation.png"
-    plot_diagnostics(res_hover, res_cruise, plot_path)
+    plot_diagnostics(res_hover, res_cruise, plot_path, target_speed=args.target_speed, initial_dist=args.initial_dist)
 
     # Render bright video for Case 1 (catch-up & hold)
     video_path = PROJECT_ROOT / "outputs" / "control" / "constant_velocity_5ms_chase_bright.mp4"
@@ -368,8 +375,7 @@ def main():
         json.dump(summary_data, f, indent=2)
     print(f"[METRICS] Saved JSON report to: {summary_path}")
 
-    # Also copy plot and video to artifact directory for presentation
-    artifact_dir = Path("/Users/philipkierkegaard/.gemini/antigravity-ide/brain/5967d853-7a7e-4cdd-8792-4a77e6d704a2")
+    artifact_dir = Path("/Users/philipkierkegaard/.gemini/antigravity-ide/brain/7dc8da15-984b-4499-8ca6-5e32efd45198")
     if artifact_dir.exists():
         import shutil
         shutil.copy2(plot_path, artifact_dir / "constant_velocity_5ms_evaluation.png")

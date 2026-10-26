@@ -82,10 +82,12 @@ def create_tuning_suite(
     ]
 
     scen_idx = 1
+    speeds_cycle = [0.0, 4.0, 5.0, 6.5]  # 25% hover scramble, 50% cruise matching, 25% fast ingress
     for prof, enc, count in distribution:
         for c in range(count):
             seed = base_seed + scen_idx * 37
             scen_id = f"tune_{scen_idx:03d}_{prof}_{enc.value}_s{seed}"
+            init_speed = speeds_cycle[(scen_idx - 1) % len(speeds_cycle)]
             sc = gen.generate_scenario(
                 scenario_id=scen_id,
                 profile=prof,
@@ -94,7 +96,9 @@ def create_tuning_suite(
                 duration=duration,
                 chaser_alt_m=3.0
             )
-            scenarios.append(sc.to_dict())
+            sc_dict = sc.to_dict()
+            sc_dict["initial_chaser_speed"] = float(init_speed)
+            scenarios.append(sc_dict)
             scen_idx += 1
 
     suite_path.parent.mkdir(parents=True, exist_ok=True)
@@ -131,7 +135,11 @@ def simulate_scenario(
 
     c_init = scenario.get("initial_chaser_pos", [0.0, 0.0, -2.5])
     c_yaw = float(scenario.get("initial_chaser_yaw", 0.0))
-    c_vel = np.array([np.cos(c_yaw) * 4.0, np.sin(c_yaw) * 4.0, 0.0], dtype=np.float64)
+    # Diverse operational initial velocities: read from scenario or fallback to deterministic cycle
+    fallback_speeds = [0.0, 4.0, 5.0, 6.5]
+    seed_idx = int(scenario.get("seed", 0)) % len(fallback_speeds)
+    c_speed = float(scenario.get("initial_chaser_speed", fallback_speeds[seed_idx]))
+    c_vel = np.array([np.cos(c_yaw) * c_speed, np.sin(c_yaw) * c_speed, 0.0], dtype=np.float64)
 
     # 1. Quadrotor simulator matching 15 m/s physical flight envelope
     sim = FastPixhawkQuadSim(
@@ -214,8 +222,9 @@ def simulate_scenario(
     image_costs = []
     in_views = []
     dists = []
-    dwell_counter = 0.0
-    max_dwell = 0.0
+    continuous_dwell = 0.0
+    max_continuous_dwell = 0.0
+    proximity_penalty = 0.0
     collision = False
     ground_strike = False
 
@@ -255,20 +264,29 @@ def simulate_scenario(
         err_standoff = (dist - 3.5) ** 2
         standoff_costs.append(err_standoff)
 
-        # Image plane tracking error: e_x^2 + e_y^2
-        err_image = float(u_ex ** 2 + u_ey ** 2)
+        # Saturating robust visual loss (Geman-McClure / Cauchy formulation):
+        # Prevents unclipped off-screen projection errors from quadratically blowing up
+        # and dominating the engagement/dwell objectives
+        e_sq = float(u_ex ** 2 + u_ey ** 2)
+        err_image = float(e_sq / (1.0 + e_sq / 4.0))
         image_costs.append(err_image)
 
-        # Basket dwell tracking: 2.5m - 4.5m with target inside camera FOV
+        # Strict continuous dwell tracking: strictly resets to 0.0 upon any engagement departure
+        # (directly mirroring the benchmark evaluation)
         if in_view and (2.5 <= dist <= 4.5):
-            dwell_counter += dt
-            max_dwell = max(max_dwell, dwell_counter)
+            continuous_dwell += dt
+            max_continuous_dwell = max(max_continuous_dwell, continuous_dwell)
         else:
-            dwell_counter = max(0.0, dwell_counter - 0.5 * dt)
+            continuous_dwell = 0.0
 
-        # Safety checks
-        if dist < 1.2:
+        # Safety & Proximity barrier (aligned with benchmark 0.5m collision threshold)
+        if dist < 0.5:
             collision = True
+        elif dist < 1.8:
+            # Soft quadratic repulsive barrier discouraging uncomfortably close approaches
+            prox_ratio = (1.8 - dist) / (1.8 - 0.5)
+            proximity_penalty += float((prox_ratio ** 2) * 30.0 * dt)
+
         if -sim.pos[2] < 0.8:
             ground_strike = True
 
@@ -399,17 +417,19 @@ def simulate_scenario(
     mean_standoff = float(np.mean(standoff_costs))
     mean_image = float(np.mean(image_costs))
     
-    # 1.0s Basket Dwell optimization: heavily reward >= 1.0s dwell and penalize < 1.0s dwell
-    dwell_penalty = max(0.0, 1.0 - max_dwell) * 25.0
-    dwell_reward = -12.0 * min(4.0, max_dwell)
+    # Strict continuous dwell optimization: heavily reward >= 1.0s dwell
+    dwell_penalty = max(0.0, 1.0 - max_continuous_dwell) * 30.0
+    dwell_reward = -15.0 * min(3.0, max_continuous_dwell)
 
-    base_cost = mean_standoff + lambda_image * mean_image + dwell_penalty + dwell_reward
+    base_cost = mean_standoff + lambda_image * mean_image + dwell_penalty + dwell_reward + proximity_penalty
 
+    # Collision & Ground Strike Overwhelming Barrier Penalties
+    # Strictly prevents unsafe parameter sets from trading collisions for tracking score
     safety_penalty = 0.0
     if collision:
-        safety_penalty += 150.0
+        safety_penalty += 10000.0
     if ground_strike:
-        safety_penalty += 100.0
+        safety_penalty += 2000.0
 
     total_cost = base_cost + safety_penalty
 
@@ -420,7 +440,7 @@ def simulate_scenario(
         "in_view_pct": float(np.mean(in_views) * 100.0),
         "min_dist": float(min(dists)),
         "final_dist": float(dists[-1]),
-        "max_dwell_s": float(max_dwell),
+        "max_dwell_s": float(max_continuous_dwell),
         "collision": collision,
         "ground_strike": ground_strike
     }
@@ -544,20 +564,36 @@ def run_tuning_optimization(
     print(f"\n[OPTIM] Global optimization complete in {time.time()-t_start:.1f}s. Cost: {de_res.fun:.4f}", flush=True)
     print(f"        Intermediate candidate: {de_res.x.round(3)}", flush=True)
 
-    # Local Simplex Polish
-    print("\n[OPTIM] Polishing with Nelder-Mead simplex search...", flush=True)
-    nm_res = minimize(
+    # Local Bounded Refinement (L-BFGS-B with strict box bounds)
+    print("\n[OPTIM] Polishing with bounded local search (L-BFGS-B)...", flush=True)
+    lower_b = np.array([b[0] for b in bounds])
+    upper_b = np.array([b[1] for b in bounds])
+    x0_de = np.clip(de_res.x, lower_b, upper_b)
+
+    local_res = minimize(
         fun=evaluate_candidate,
-        x0=de_res.x,
+        x0=x0_de,
         args=(scenarios, lambda_image),
-        method="Nelder-Mead",
-        options={"maxiter": 35, "disp": False}
+        method="L-BFGS-B",
+        bounds=bounds,
+        options={"maxiter": 30, "disp": False, "eps": 0.02}
     )
 
-    opt_params = nm_res.x
-    opt_cost = nm_res.fun
-    elapsed = time.time() - t_start
+    x_cand = np.clip(local_res.x, lower_b, upper_b)
+    cost_cand = float(local_res.fun)
+    de_cost = float(de_res.fun)
 
+    # Verification guard: only accept candidate if it strictly improves upon global DE
+    if cost_cand < de_cost:
+        print(f"[OPTIM] Local polish strictly improved cost: {de_cost:.4f} -> {cost_cand:.4f}", flush=True)
+        opt_params = x_cand
+        opt_cost = cost_cand
+    else:
+        print(f"[OPTIM] Local polish did not improve upon DE ({cost_cand:.4f} >= {de_cost:.4f}). Retaining global DE result.", flush=True)
+        opt_params = x0_de
+        opt_cost = de_cost
+
+    elapsed = time.time() - t_start
     ref_cost = baseline_cost
     pct_gain = (ref_cost - opt_cost) / ref_cost * 100.0
 

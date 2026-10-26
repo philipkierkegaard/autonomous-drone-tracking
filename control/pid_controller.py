@@ -215,6 +215,8 @@ class KinematicVisualServoController:
         self.last_seen_ey = 0.0
         self.prev_bbox_w = None
         self.filtered_dw = 0.0
+        self.last_valid_target_vx = 0.0
+        self.coast_time = 0.0
 
         # Vectorized internal state (shape: (4,))
         self.integral = np.zeros(4, dtype=np.float64)
@@ -234,6 +236,8 @@ class KinematicVisualServoController:
         self.last_seen_ey = 0.0
         self.prev_bbox_w = None
         self.filtered_dw = 0.0
+        self.last_valid_target_vx = 0.0
+        self.coast_time = 0.0
         self.initialized = False
         self.lost_time = 0.0
 
@@ -440,7 +444,13 @@ class KinematicVisualServoController:
             v_drone_fwd = float(self.prev_cmd_vx)
 
         current_w = float(telemetry.get("bbox_w", telemetry.get("target_size", 0.0)))
-        if current_w > 1.0 and not is_coasting and telemetry.get("in_view", True):
+        if not is_coasting:
+            self.coast_time = 0.0
+        else:
+            self.coast_time += dt
+
+        # Compute optical looming relative velocity whenever bounding box is valid
+        if current_w > 1.0 and telemetry.get("in_view", True):
             if self.prev_bbox_w is not None and dt > 1e-4:
                 raw_dw = (current_w - self.prev_bbox_w) / dt
                 alpha_w = dt / (dt + 0.08)  # 80ms low-pass filter against bounding box pixel jitter
@@ -452,10 +462,12 @@ class KinematicVisualServoController:
             loom_rate = float(self.filtered_dw / max(5.0, current_w))
             d_dot_rel = -d_hat * loom_rate
             est_v_target = float(np.clip(v_drone_fwd + d_dot_rel, 0.0, self.max_limits[0]))
+            self.last_valid_target_vx = est_v_target
         else:
-            # During dropout / coasting, decay loom derivative and hold drone's forward velocity
+            # During dropout / prolonged loss, decay loom derivative and hold last known velocity for 0.5s
             self.filtered_dw *= max(0.0, 1.0 - 2.0 * dt)
-            est_v_target = float(np.clip(v_drone_fwd, 0.0, self.max_limits[0]))
+            decay = max(0.0, 1.0 - 1.5 * max(0.0, self.coast_time - 0.2))
+            est_v_target = float(self.last_valid_target_vx * decay)
 
         # Target forward velocity feedforward (uses optical looming estimate unless external is provided)
         target_vx_ff = float(telemetry.get("target_vx", telemetry.get("target_vel_x", 0.0)))
@@ -474,13 +486,14 @@ class KinematicVisualServoController:
         error_vec = np.array([range_term, err_x_horizon, elevation_optical, azimuth_horizon], dtype=np.float64)
 
         # 4. Apply 4-DOF control update (Surge vx, Sway vy, Heave vz, Yaw yawspeed)
+        # Hold feedforward across inter-frame Kalman predictions (coast_time < 0.5s)
         return self.update(
             error_vec,
             drone_pitch=drone_pitch,
             dt=dt,
             horiz_err_norm=abs(err_x),
             decoupled=True,
-            target_vx_ff=target_vx_ff if not is_coasting else 0.0,
+            target_vx_ff=target_vx_ff if self.coast_time < 0.5 else 0.0,
             is_coasting=is_coasting,
             current_alt_m=current_alt_m,
         )
@@ -567,8 +580,8 @@ class KinematicVisualServoController:
         # ----------------------------------------------------------------------
         # 4. Vectorized Integrator Update with Anti-Windup Clamping
         # ----------------------------------------------------------------------
-        # Skip integrating errors during COASTING to prevent windup on dead-reckoned predictions
-        if not is_coasting:
+        # Maintain integrator during active tracking and short 30Hz-to-50Hz inter-frame Kalman predictions
+        if not is_coasting or getattr(self, "coast_time", 0.0) < 0.15:
             tentative_out = p_term + self.ki * self.integral + d_term
             saturated_high = (tentative_out >= self.max_limits) & (e > 0)
             saturated_low  = (tentative_out <= self.min_limits) & (e < 0)
@@ -579,7 +592,7 @@ class KinematicVisualServoController:
             self.integral[self.ki == 0] = 0.0
             self.integral = np.clip(self.integral, -self.int_limits, self.int_limits)
         else:
-            # During coasting, decay existing integrals gently
+            # During prolonged target loss (> 150ms), decay existing integrals gently
             self.integral *= max(0.0, 1.0 - 0.5 * dt)
         i_term = self.ki * self.integral
 

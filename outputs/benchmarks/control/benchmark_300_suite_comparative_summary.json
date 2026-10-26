@@ -16,15 +16,15 @@
     },
     "pid": {
       "n": 300,
-      "catch_rate_1s_pct": 33.666666666666664,
-      "catch_rate_3s_pct": 16.0,
-      "mean_max_dwell_s": 1.3019333333333294,
-      "median_max_dwell_s": 0.35000000000000003,
-      "fov_retention_pct": 50.19786666666668,
-      "mean_min_dist_m": 3.252634404341321,
-      "collision_rate_pct": 3.3333333333333335,
-      "mean_time_to_lock_s": 9.141782178217822,
-      "mean_control_effort": 5485.9410594217325
+      "catch_rate_1s_pct": 63.0,
+      "catch_rate_3s_pct": 40.33333333333333,
+      "mean_max_dwell_s": 2.857733333333319,
+      "median_max_dwell_s": 2.3000000000000016,
+      "fov_retention_pct": 60.522933333333334,
+      "mean_min_dist_m": 2.781556389450588,
+      "collision_rate_pct": 0.33333333333333337,
+      "mean_time_to_lock_s": 5.473015873015872,
+      "mean_control_effort": 7131.947982809123
     }
   },
   "by_profile": {
@@ -43,15 +43,15 @@
       },
       "pid": {
         "n": 100,
-        "catch_rate_1s_pct": 48.0,
-        "catch_rate_3s_pct": 32.0,
-        "mean_max_dwell_s": 2.2107999999999906,
-        "median_max_dwell_s": 0.8900000000000005,
-        "fov_retention_pct": 61.10480000000001,
-        "mean_min_dist_m": 2.1490814648459278,
-        "collision_rate_pct": 7.000000000000001,
-        "mean_time_to_lock_s": 9.039583333333335,
-        "mean_control_effort": 4340.66614476689
+        "catch_rate_1s_pct": 76.0,
+        "catch_rate_3s_pct": 64.0,
+        "mean_max_dwell_s": 4.441199999999967,
+        "median_max_dwell_s": 4.040000000000002,
+        "fov_retention_pct": 71.5416,
+        "mean_min_dist_m": 2.41377374362971,
+        "collision_rate_pct": 1.0,
+        "mean_time_to_lock_s": 4.251842105263158,
+        "mean_control_effort": 4815.901118083179
       }
     },
     "evasive": {
@@ -69,15 +69,15 @@
       },
       "pid": {
         "n": 100,
-        "catch_rate_1s_pct": 42.0,
-        "catch_rate_3s_pct": 12.0,
-        "mean_max_dwell_s": 1.268399999999998,
-        "median_max_dwell_s": 0.5800000000000002,
-        "fov_retention_pct": 55.0104,
-        "mean_min_dist_m": 3.1807787001504435,
+        "catch_rate_1s_pct": 71.0,
+        "catch_rate_3s_pct": 45.0,
+        "mean_max_dwell_s": 2.980599999999988,
+        "median_max_dwell_s": 2.700000000000002,
+        "fov_retention_pct": 65.0072,
+        "mean_min_dist_m": 2.661024358828876,
         "collision_rate_pct": 0.0,
-        "mean_time_to_lock_s": 9.290000000000001,
-        "mean_control_effort": 7079.083306812813
+        "mean_time_to_lock_s": 4.375774647887324,
+        "mean_control_effort": 7943.501745994103
       }
     },
     "hyper_evasive": {
@@ -95,15 +95,15 @@
       },
       "pid": {
         "n": 100,
-        "catch_rate_1s_pct": 11.0,
-        "catch_rate_3s_pct": 4.0,
-        "mean_max_dwell_s": 0.4265999999999996,
-        "median_max_dwell_s": 0.0,
-        "fov_retention_pct": 34.4784,
-        "mean_min_dist_m": 4.4280430480275905,
-        "collision_rate_pct": 3.0,
-        "mean_time_to_lock_s": 9.02181818181818,
-        "mean_control_effort": 5038.073726685494
+        "catch_rate_1s_pct": 42.0,
+        "catch_rate_3s_pct": 12.0,
+        "mean_max_dwell_s": 1.1514000000000004,
+        "median_max_dwell_s": 0.5100000000000001,
+        "fov_retention_pct": 45.01999999999999,
+        "mean_min_dist_m": 3.2698710658931764,
+        "collision_rate_pct": 0.0,
+        "mean_time_to_lock_s": 9.53761904761905,
+        "mean_control_effort": 8636.441084350086
       }
     }
   },
@@ -123,15 +123,15 @@
       },
       "pid": {
         "n": 60,
-        "catch_rate_1s_pct": 33.33333333333333,
-        "catch_rate_3s_pct": 13.333333333333334,
-        "mean_max_dwell_s": 1.0903333333333312,
-        "median_max_dwell_s": 0.24999999999999994,
-        "fov_retention_pct": 50.467999999999996,
-        "mean_min_dist_m": 3.195666691099535,
-        "collision_rate_pct": 8.333333333333332,
-        "mean_time_to_lock_s": 9.779,
-        "mean_control_effort": 6147.923174710997
+        "catch_rate_1s_pct": 65.0,
+        "catch_rate_3s_pct": 38.333333333333336,
+        "mean_max_dwell_s": 3.14199999999998,
+        "median_max_dwell_s": 2.3000000000000016,
+        "fov_retention_pct": 61.571999999999996,
+        "mean_min_dist_m": 2.9146214809555544,
+        "collision_rate_pct": 0.0,
+        "mean_time_to_lock_s": 4.693846153846154,
+        "mean_control_effort": 7894.888804871595
       }
     },
     "crossing_right": {
@@ -149,15 +149,15 @@
       },
       "pid": {
         "n": 60,
-        "catch_rate_1s_pct": 43.333333333333336,
-        "catch_rate_3s_pct": 23.333333333333332,
-        "mean_max_dwell_s": 1.7346666666666601,
-        "median_max_dwell_s": 0.37000000000000005,
-        "fov_retention_pct": 52.75599999999999,
-        "mean_min_dist_m": 3.6124580284752192,
+        "catch_rate_1s_pct": 68.33333333333333,
+        "catch_rate_3s_pct": 43.333333333333336,
+        "mean_max_dwell_s": 2.86599999999999,
+        "median_max_dwell_s": 2.720000000000002,
+        "fov_retention_pct": 62.82,
+        "mean_min_dist_m": 2.9774662062915644,
         "collision_rate_pct": 0.0,
-        "mean_time_to_lock_s": 8.46923076923077,
-        "mean_control_effort": 5452.364582340673
+        "mean_time_to_lock_s": 5.137073170731707,
+        "mean_control_effort": 7804.123008806313
       }
     },
     "head_on": {
@@ -175,15 +175,15 @@
       },
       "pid": {
         "n": 60,
-        "catch_rate_1s_pct": 16.666666666666664,
-        "catch_rate_3s_pct": 5.0,
-        "mean_max_dwell_s": 0.7659999999999975,
-        "median_max_dwell_s": 0.25999999999999995,
-        "fov_retention_pct": 25.83466666666667,
-        "mean_min_dist_m": 3.1597961941907164,
-        "collision_rate_pct": 1.6666666666666667,
-        "mean_time_to_lock_s": 9.694,
-        "mean_control_effort": 4959.8029049589695
+        "catch_rate_1s_pct": 21.666666666666668,
+        "catch_rate_3s_pct": 11.666666666666666,
+        "mean_max_dwell_s": 1.0406666666666626,
+        "median_max_dwell_s": 0.32,
+        "fov_retention_pct": 22.165333333333333,
+        "mean_min_dist_m": 2.636120253433987,
+        "collision_rate_pct": 0.0,
+        "mean_time_to_lock_s": 9.14,
+        "mean_control_effort": 5135.876057181277
       }
     },
     "oblique_away": {
@@ -201,15 +201,15 @@
       },
       "pid": {
         "n": 60,
-        "catch_rate_1s_pct": 38.333333333333336,
-        "catch_rate_3s_pct": 21.666666666666668,
-        "mean_max_dwell_s": 1.6513333333333262,
-        "median_max_dwell_s": 0.5400000000000001,
-        "fov_retention_pct": 57.785333333333334,
-        "mean_min_dist_m": 3.035434002480185,
-        "collision_rate_pct": 3.3333333333333335,
-        "mean_time_to_lock_s": 7.675652173913043,
-        "mean_control_effort": 5570.483220675806
+        "catch_rate_1s_pct": 80.0,
+        "catch_rate_3s_pct": 55.00000000000001,
+        "mean_max_dwell_s": 3.5636666666666477,
+        "median_max_dwell_s": 3.2400000000000024,
+        "fov_retention_pct": 75.91333333333334,
+        "mean_min_dist_m": 2.8193035885462225,
+        "collision_rate_pct": 1.6666666666666667,
+        "mean_time_to_lock_s": 5.0408333333333335,
+        "mean_control_effort": 7549.8914112945395
       }
     },
     "tail_chase": {
@@ -227,15 +227,15 @@
       },
       "pid": {
         "n": 60,
-        "catch_rate_1s_pct": 36.666666666666664,
-        "catch_rate_3s_pct": 16.666666666666664,
-        "mean_max_dwell_s": 1.2673333333333312,
-        "median_max_dwell_s": 0.46000000000000013,
-        "fov_retention_pct": 64.14533333333334,
-        "mean_min_dist_m": 3.259817105460946,
-        "collision_rate_pct": 3.3333333333333335,
-        "mean_time_to_lock_s": 10.639090909090909,
-        "mean_control_effort": 5299.131414422216
+        "catch_rate_1s_pct": 80.0,
+        "catch_rate_3s_pct": 53.333333333333336,
+        "mean_max_dwell_s": 3.676333333333314,
+        "median_max_dwell_s": 3.0600000000000023,
+        "fov_retention_pct": 80.14399999999999,
+        "mean_min_dist_m": 2.5602704180256097,
+        "collision_rate_pct": 0.0,
+        "mean_time_to_lock_s": 5.832083333333333,
+        "mean_control_effort": 7274.960631891892
       }
     }
   },
@@ -256,15 +256,15 @@
         },
         "pid": {
           "n": 20,
-          "catch_rate_1s_pct": 55.00000000000001,
-          "catch_rate_3s_pct": 30.0,
-          "mean_max_dwell_s": 2.045999999999993,
-          "median_max_dwell_s": 1.3300000000000007,
-          "fov_retention_pct": 68.324,
-          "mean_min_dist_m": 2.2297925621148913,
-          "collision_rate_pct": 20.0,
-          "mean_time_to_lock_s": 9.916363636363636,
-          "mean_control_effort": 5768.552635755597
+          "catch_rate_1s_pct": 90.0,
+          "catch_rate_3s_pct": 70.0,
+          "mean_max_dwell_s": 5.445999999999954,
+          "median_max_dwell_s": 4.040000000000002,
+          "fov_retention_pct": 84.928,
+          "mean_min_dist_m": 2.740040252109543,
+          "collision_rate_pct": 0.0,
+          "mean_time_to_lock_s": 4.214444444444445,
+          "mean_control_effort": 6405.348453657931
         }
       },
       "crossing_right": {
@@ -282,15 +282,15 @@
         },
         "pid": {
           "n": 20,
-          "catch_rate_1s_pct": 70.0,
-          "catch_rate_3s_pct": 50.0,
-          "mean_max_dwell_s": 3.1489999999999876,
-          "median_max_dwell_s": 3.0100000000000025,
-          "fov_retention_pct": 69.58800000000001,
-          "mean_min_dist_m": 2.4223070861941802,
+          "catch_rate_1s_pct": 85.0,
+          "catch_rate_3s_pct": 70.0,
+          "mean_max_dwell_s": 4.468999999999974,
+          "median_max_dwell_s": 4.269999999999997,
+          "fov_retention_pct": 77.44800000000001,
+          "mean_min_dist_m": 2.5918213313883536,
           "collision_rate_pct": 0.0,
-          "mean_time_to_lock_s": 8.427142857142858,
-          "mean_control_effort": 4514.170789303758
+          "mean_time_to_lock_s": 3.935294117647059,
+          "mean_control_effort": 5548.223897739315
         }
       },
       "head_on": {
@@ -308,15 +308,15 @@
         },
         "pid": {
           "n": 20,
-          "catch_rate_1s_pct": 15.0,
-          "catch_rate_3s_pct": 10.0,
-          "mean_max_dwell_s": 1.034999999999996,
-          "median_max_dwell_s": 0.33,
-          "fov_retention_pct": 22.524,
-          "mean_min_dist_m": 2.106620625269172,
+          "catch_rate_1s_pct": 10.0,
+          "catch_rate_3s_pct": 0.0,
+          "mean_max_dwell_s": 0.5300000000000002,
+          "median_max_dwell_s": 0.32,
+          "fov_retention_pct": 10.156,
+          "mean_min_dist_m": 1.7117141931684716,
           "collision_rate_pct": 0.0,
-          "mean_time_to_lock_s": 8.893333333333333,
-          "mean_control_effort": 4147.138233460249
+          "mean_time_to_lock_s": 17.18,
+          "mean_control_effort": 3217.325973962173
         }
       },
       "oblique_away": {
@@ -334,15 +334,15 @@
         },
         "pid": {
           "n": 20,
-          "catch_rate_1s_pct": 60.0,
-          "catch_rate_3s_pct": 50.0,
-          "mean_max_dwell_s": 3.298999999999979,
-          "median_max_dwell_s": 2.700000000000002,
-          "fov_retention_pct": 73.012,
-          "mean_min_dist_m": 1.6076475354782889,
-          "collision_rate_pct": 10.0,
-          "mean_time_to_lock_s": 8.143333333333333,
-          "mean_control_effort": 4650.179616847058
+          "catch_rate_1s_pct": 100.0,
+          "catch_rate_3s_pct": 100.0,
+          "mean_max_dwell_s": 6.039999999999957,
+          "median_max_dwell_s": 4.959999999999982,
+          "fov_retention_pct": 92.80000000000001,
+          "mean_min_dist_m": 2.622402041428083,
+          "collision_rate_pct": 5.0,
+          "mean_time_to_lock_s": 2.446,
+          "mean_control_effort": 4855.800030730079
         }
       },
       "tail_chase": {
@@ -360,15 +360,15 @@
         },
         "pid": {
           "n": 20,
-          "catch_rate_1s_pct": 40.0,
-          "catch_rate_3s_pct": 20.0,
-          "mean_max_dwell_s": 1.5249999999999955,
-          "median_max_dwell_s": 0.5500000000000002,
-          "fov_retention_pct": 72.076,
-          "mean_min_dist_m": 2.379039515173106,
-          "collision_rate_pct": 5.0,
-          "mean_time_to_lock_s": 10.305000000000001,
-          "mean_control_effort": 2623.289448467792
+          "catch_rate_1s_pct": 95.0,
+          "catch_rate_3s_pct": 80.0,
+          "mean_max_dwell_s": 5.720999999999956,
+          "median_max_dwell_s": 5.199999999999977,
+          "fov_retention_pct": 92.376,
+          "mean_min_dist_m": 2.4028909000540994,
+          "collision_rate_pct": 0.0,
+          "mean_time_to_lock_s": 5.110526315789474,
+          "mean_control_effort": 4052.807234326402
         }
       }
     },
@@ -388,15 +388,15 @@
         },
         "pid": {
           "n": 20,
-          "catch_rate_1s_pct": 40.0,
-          "catch_rate_3s_pct": 10.0,
-          "mean_max_dwell_s": 0.9760000000000006,
-          "median_max_dwell_s": 0.15,
-          "fov_retention_pct": 46.36000000000001,
-          "mean_min_dist_m": 3.3696304635136656,
+          "catch_rate_1s_pct": 75.0,
+          "catch_rate_3s_pct": 40.0,
+          "mean_max_dwell_s": 3.233999999999984,
+          "median_max_dwell_s": 2.7500000000000018,
+          "fov_retention_pct": 64.688,
+          "mean_min_dist_m": 2.6067972653203397,
           "collision_rate_pct": 0.0,
-          "mean_time_to_lock_s": 9.477500000000001,
-          "mean_control_effort": 6110.20435780703
+          "mean_time_to_lock_s": 4.4159999999999995,
+          "mean_control_effort": 9165.741728781857
         }
       },
       "crossing_right": {
@@ -414,15 +414,15 @@
         },
         "pid": {
           "n": 20,
-          "catch_rate_1s_pct": 40.0,
-          "catch_rate_3s_pct": 15.0,
-          "mean_max_dwell_s": 1.5359999999999923,
-          "median_max_dwell_s": 0.4000000000000001,
-          "fov_retention_pct": 54.507999999999996,
-          "mean_min_dist_m": 3.4233959941959875,
+          "catch_rate_1s_pct": 70.0,
+          "catch_rate_3s_pct": 40.0,
+          "mean_max_dwell_s": 2.6719999999999926,
+          "median_max_dwell_s": 2.410000000000002,
+          "fov_retention_pct": 68.096,
+          "mean_min_dist_m": 2.793171474484473,
           "collision_rate_pct": 0.0,
-          "mean_time_to_lock_s": 8.922500000000001,
-          "mean_control_effort": 6723.397065900366
+          "mean_time_to_lock_s": 3.958571428571429,
+          "mean_control_effort": 8979.189633144164
         }
       },
       "head_on": {
@@ -441,14 +441,14 @@
         "pid": {
           "n": 20,
           "catch_rate_1s_pct": 30.0,
-          "catch_rate_3s_pct": 5.0,
-          "mean_max_dwell_s": 1.0829999999999964,
-          "median_max_dwell_s": 0.4200000000000001,
-          "fov_retention_pct": 37.52400000000001,
-          "mean_min_dist_m": 3.1960714042501364,
+          "catch_rate_3s_pct": 25.0,
+          "mean_max_dwell_s": 1.7509999999999892,
+          "median_max_dwell_s": 0.35000000000000003,
+          "fov_retention_pct": 30.232,
+          "mean_min_dist_m": 2.831343577450665,
           "collision_rate_pct": 0.0,
-          "mean_time_to_lock_s": 10.263333333333334,
-          "mean_control_effort": 7323.298875653274
+          "mean_time_to_lock_s": 4.533333333333334,
+          "mean_control_effort": 5539.4961275205105
         }
       },
       "oblique_away": {
@@ -466,15 +466,15 @@
         },
         "pid": {
           "n": 20,
-          "catch_rate_1s_pct": 45.0,
-          "catch_rate_3s_pct": 15.0,
-          "mean_max_dwell_s": 1.2620000000000002,
-          "median_max_dwell_s": 0.7100000000000003,
-          "fov_retention_pct": 63.312,
-          "mean_min_dist_m": 2.960976619086666,
+          "catch_rate_1s_pct": 90.0,
+          "catch_rate_3s_pct": 55.00000000000001,
+          "mean_max_dwell_s": 3.6069999999999864,
+          "median_max_dwell_s": 3.2900000000000027,
+          "fov_retention_pct": 78.61600000000001,
+          "mean_min_dist_m": 2.585613513479959,
           "collision_rate_pct": 0.0,
-          "mean_time_to_lock_s": 6.833333333333334,
-          "mean_control_effort": 7371.111514646439
+          "mean_time_to_lock_s": 5.054444444444444,
+          "mean_control_effort": 8242.635093414443
         }
       },
       "tail_chase": {
@@ -492,15 +492,15 @@
         },
         "pid": {
           "n": 20,
-          "catch_rate_1s_pct": 55.00000000000001,
-          "catch_rate_3s_pct": 15.0,
-          "mean_max_dwell_s": 1.4850000000000008,
-          "median_max_dwell_s": 1.2700000000000007,
-          "fov_retention_pct": 73.34799999999998,
-          "mean_min_dist_m": 2.953819019705762,
+          "catch_rate_1s_pct": 90.0,
+          "catch_rate_3s_pct": 65.0,
+          "mean_max_dwell_s": 3.6389999999999896,
+          "median_max_dwell_s": 3.5400000000000027,
+          "fov_retention_pct": 83.404,
+          "mean_min_dist_m": 2.4881959634089412,
           "collision_rate_pct": 0.0,
-          "mean_time_to_lock_s": 10.9,
-          "mean_control_effort": 7867.404720056957
+          "mean_time_to_lock_s": 3.9355555555555557,
+          "mean_control_effort": 7790.446147109533
         }
       }
     },
@@ -520,15 +520,15 @@
         },
         "pid": {
           "n": 20,
-          "catch_rate_1s_pct": 5.0,
-          "catch_rate_3s_pct": 0.0,
-          "mean_max_dwell_s": 0.24900000000000005,
-          "median_max_dwell_s": 0.07,
-          "fov_retention_pct": 36.720000000000006,
-          "mean_min_dist_m": 3.98757704767005,
-          "collision_rate_pct": 5.0,
-          "mean_time_to_lock_s": 10.68,
-          "mean_control_effort": 6565.0125305703605
+          "catch_rate_1s_pct": 30.0,
+          "catch_rate_3s_pct": 5.0,
+          "mean_max_dwell_s": 0.7460000000000004,
+          "median_max_dwell_s": 0.24999999999999994,
+          "fov_retention_pct": 35.099999999999994,
+          "mean_min_dist_m": 3.39702692543678,
+          "collision_rate_pct": 0.0,
+          "mean_time_to_lock_s": 6.826666666666667,
+          "mean_control_effort": 8113.576232174996
         }
       },
       "crossing_right": {
@@ -546,15 +546,15 @@
         },
         "pid": {
           "n": 20,
-          "catch_rate_1s_pct": 20.0,
-          "catch_rate_3s_pct": 5.0,
-          "mean_max_dwell_s": 0.5190000000000003,
-          "median_max_dwell_s": 0.0,
-          "fov_retention_pct": 34.172000000000004,
-          "mean_min_dist_m": 4.991671005035492,
+          "catch_rate_1s_pct": 50.0,
+          "catch_rate_3s_pct": 20.0,
+          "mean_max_dwell_s": 1.457000000000001,
+          "median_max_dwell_s": 0.9900000000000004,
+          "fov_retention_pct": 42.916000000000004,
+          "mean_min_dist_m": 3.547405813001864,
           "collision_rate_pct": 0.0,
-          "mean_time_to_lock_s": 7.710000000000001,
-          "mean_control_effort": 5119.525891817897
+          "mean_time_to_lock_s": 8.83,
+          "mean_control_effort": 8884.955495535458
         }
       },
       "head_on": {
@@ -572,15 +572,15 @@
         },
         "pid": {
           "n": 20,
-          "catch_rate_1s_pct": 5.0,
-          "catch_rate_3s_pct": 0.0,
-          "mean_max_dwell_s": 0.1800000000000001,
-          "median_max_dwell_s": 0.0,
-          "fov_retention_pct": 17.456000000000003,
-          "mean_min_dist_m": 4.176696553052841,
-          "collision_rate_pct": 5.0,
-          "mean_time_to_lock_s": 8.68,
-          "mean_control_effort": 3408.971605763384
+          "catch_rate_1s_pct": 25.0,
+          "catch_rate_3s_pct": 10.0,
+          "mean_max_dwell_s": 0.8409999999999991,
+          "median_max_dwell_s": 0.1,
+          "fov_retention_pct": 26.107999999999997,
+          "mean_min_dist_m": 3.3653029896828257,
+          "collision_rate_pct": 0.0,
+          "mean_time_to_lock_s": 11.452,
+          "mean_control_effort": 6650.80607006115
         }
       },
       "oblique_away": {
@@ -598,15 +598,15 @@
         },
         "pid": {
           "n": 20,
-          "catch_rate_1s_pct": 10.0,
-          "catch_rate_3s_pct": 0.0,
-          "mean_max_dwell_s": 0.39300000000000024,
-          "median_max_dwell_s": 0.05,
-          "fov_retention_pct": 37.032,
-          "mean_min_dist_m": 4.537677852875599,
+          "catch_rate_1s_pct": 50.0,
+          "catch_rate_3s_pct": 10.0,
+          "mean_max_dwell_s": 1.0440000000000005,
+          "median_max_dwell_s": 1.0600000000000005,
+          "fov_retention_pct": 56.32400000000001,
+          "mean_min_dist_m": 3.249895210730627,
           "collision_rate_pct": 0.0,
-          "mean_time_to_lock_s": 8.66,
-          "mean_control_effort": 4690.158530533925
+          "mean_time_to_lock_s": 10.206,
+          "mean_control_effort": 9551.239109739097
         }
       },
       "tail_chase": {
@@ -624,15 +624,15 @@
         },
         "pid": {
           "n": 20,
-          "catch_rate_1s_pct": 15.0,
+          "catch_rate_1s_pct": 55.00000000000001,
           "catch_rate_3s_pct": 15.0,
-          "mean_max_dwell_s": 0.7919999999999974,
-          "median_max_dwell_s": 0.0,
-          "fov_retention_pct": 47.012,
-          "mean_min_dist_m": 4.446592781503971,
-          "collision_rate_pct": 5.0,
-          "mean_time_to_lock_s": 10.573333333333332,
-          "mean_control_effort": 5406.700074741898
+          "mean_max_dwell_s": 1.669,
+          "median_max_dwell_s": 1.2900000000000007,
+          "fov_retention_pct": 64.65200000000002,
+          "mean_min_dist_m": 2.7897243906137885,
+          "collision_rate_pct": 0.0,
+          "mean_time_to_lock_s": 10.181818181818182,
+          "mean_control_effort": 9981.628514239736
         }
       }
     }

@@ -32,7 +32,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from control.dataset_generator import PursuitScenario
 from benchmarks.control.benchmark_controller import create_pid_controller, evaluate_single_run
 
-ARTIFACT_DIR = Path("/Users/philipkierkegaard/.gemini/antigravity-ide/brain/5967d853-7a7e-4cdd-8792-4a77e6d704a2")
+ARTIFACT_DIR = Path("/Users/philipkierkegaard/.gemini/antigravity-ide/brain/7dc8da15-984b-4499-8ca6-5e32efd45198")
 
 
 def render_pid_bright_video(
