@@ -17,6 +17,7 @@ import numpy as np
 from gymnasium import spaces
 
 from control.environment import DronePursuitEnv
+from control.spatial import apply_command_envelope_and_slew
 from benchmarks.control.benchmark_controller import create_pid_controller
 
 
@@ -202,44 +203,28 @@ class ResidualDronePursuitEnv(DronePursuitEnv):
 
         # 3. Add bounded RL residual
         a = np.clip(action, -1.0, 1.0)
-        if np.all(np.abs(a) < 1e-5):
-            self.last_residual_cmd.fill(0.0)
-            self.last_physical_cmd = pid_cmd.copy()
-            return pid_cmd
-
         residual = a * self.residual_scales
         self.last_residual_cmd = residual.copy()
-        total_cmd = pid_cmd + residual
+        target_cmd = pid_cmd + residual
 
-        # 4. Clip within quadrotor envelope limits
-        target_vx = float(np.clip(total_cmd[0], -self.max_rev_vel, self.max_fwd_vel))
-        target_vy = float(np.clip(total_cmd[1], -self.max_lat_vel, self.max_lat_vel))
-        target_vz = float(np.clip(total_cmd[2], -self.max_climb_vel, self.max_desc_vel))
-        target_yaw_deg = float(np.clip(total_cmd[3], -self.max_yaw_rate_deg, self.max_yaw_rate_deg))
-
-        # 5. Ground proximity safety governor
-        current_alt_m = -self.sim.pos[2]
-        if current_alt_m < 1.4 and target_vz > 0.0:
-            target_vz = float(target_vz * max(0.0, (current_alt_m - 0.9) / 0.5))
-
-        # 6. Slew-Rate Limiting across all axes
-        max_step_accel_x = self.max_accel_xy * self.dt
-        max_step_decel_x = self.max_decel_xy * self.dt
-        if target_vx < self.last_physical_cmd[0]:
-            cmd_vx = max(target_vx, self.last_physical_cmd[0] - max_step_decel_x)
-        else:
-            cmd_vx = min(target_vx, self.last_physical_cmd[0] + max_step_accel_x)
-
-        max_step_lat = self.max_accel_xy * self.dt
-        cmd_vy = float(np.clip(target_vy, self.last_physical_cmd[1] - max_step_lat, self.last_physical_cmd[1] + max_step_lat))
-
-        max_step_z = self.max_accel_z * self.dt
-        cmd_vz = float(np.clip(target_vz, self.last_physical_cmd[2] - max_step_z, self.last_physical_cmd[2] + max_step_z))
-
-        max_step_yaw = self.max_accel_yaw * self.dt
-        cmd_yaw_deg = float(np.clip(target_yaw_deg, self.last_physical_cmd[3] - max_step_yaw, self.last_physical_cmd[3] + max_step_yaw))
-
-        phys_cmd = np.array([cmd_vx, cmd_vy, cmd_vz, cmd_yaw_deg], dtype=np.float64)
+        # 4. Continuous envelope & slew limiting (identical across all actions, zero and nonzero)
+        phys_cmd = apply_command_envelope_and_slew(
+            target_cmd=target_cmd,
+            prev_cmd=self.last_physical_cmd,
+            dt=self.dt,
+            max_rev_vel=self.max_rev_vel,
+            max_fwd_vel=self.max_fwd_vel,
+            max_lat_vel=self.max_lat_vel,
+            max_vel_up=self.max_climb_vel,
+            max_vel_down=self.max_desc_vel,
+            max_yaw_rate=self.max_yaw_rate_deg,
+            max_accel_xy=self.max_accel_xy,
+            max_decel_xy=float(getattr(self.pid, "max_decel", 2.45)),
+            max_lat_accel=float(getattr(self.pid, "max_lat_accel", 6.0)),
+            max_accel_z=self.max_accel_z,
+            max_accel_yaw=self.max_accel_yaw,
+            current_alt_m=-self.sim.pos[2]
+        )
         self.last_physical_cmd = phys_cmd.copy()
         return phys_cmd
 

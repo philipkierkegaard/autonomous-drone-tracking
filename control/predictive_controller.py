@@ -27,7 +27,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from control.spatial import unproject_camera_to_horizon
+from control.spatial import unproject_camera_to_horizon, apply_command_envelope_and_slew
 
 
 class StandaloneRecurrentPolicy(torch.nn.Module):
@@ -525,6 +525,13 @@ class ResidualVisualServoController(RecurrentVisualServoController):
         vehicle_yaw_rate: Optional[float] = None,
         current_alt_m: Optional[float] = None
     ) -> np.ndarray:
+        # Bumpless transfer: synchronize prev_cmd on first step
+        if self.episode_start[0] and vehicle_vel is not None and len(vehicle_vel) >= 3:
+            self.prev_cmd[0] = float(vehicle_vel[0])
+            self.prev_cmd[1] = float(vehicle_vel[1])
+            self.prev_cmd[2] = float(vehicle_vel[2])
+            self.prev_cmd[3] = float(vehicle_yaw_rate if vehicle_yaw_rate is not None else 0.0)
+
         # 1. Base PID setpoint
         pid_cmd = self.pid.compute_cmd(
             telemetry,
@@ -536,44 +543,49 @@ class ResidualVisualServoController(RecurrentVisualServoController):
             current_alt_m=current_alt_m if current_alt_m is not None else 2.5
         )
 
-        # If no RL residual model is loaded, output exact PID baseline
-        if self.model is None:
-            self.prev_cmd = pid_cmd.copy()
-            return pid_cmd
+        # 2. Residual adjustment from learned RL policy (or zero residual if no model loaded)
+        if self.model is not None:
+            obs = self.build_obs(
+                telemetry=telemetry,
+                drone_pitch=drone_pitch,
+                drone_roll=drone_roll,
+                dt=dt,
+                vehicle_vel=vehicle_vel,
+                vehicle_yaw_rate=vehicle_yaw_rate,
+                current_alt_m=current_alt_m
+            )
+            action, self.hidden_state = self.model.predict(
+                obs,
+                state=self.hidden_state,
+                episode_start=self.episode_start,
+                deterministic=self.deterministic
+            )
+            a = np.clip(action, -1.0, 1.0)
+            residual = a * self.residual_scales
+        else:
+            residual = np.zeros(4, dtype=np.float64)
 
-        # 2. Residual adjustment from learned RL policy
-        obs = self.build_obs(
-            telemetry=telemetry,
-            drone_pitch=drone_pitch,
-            drone_roll=drone_roll,
+        self.episode_start = np.array([False], dtype=bool)
+        target_cmd = pid_cmd + residual
+
+        # 3. Standardized envelope and slew-rate limiting (strictly identical across train and eval)
+        cmd = apply_command_envelope_and_slew(
+            target_cmd=target_cmd,
+            prev_cmd=self.prev_cmd,
             dt=dt,
-            vehicle_vel=vehicle_vel,
-            vehicle_yaw_rate=vehicle_yaw_rate,
+            max_rev_vel=self.max_rev_vel,
+            max_fwd_vel=self.max_fwd_vel,
+            max_lat_vel=self.max_lat_vel,
+            max_vel_up=self.max_vel_up,
+            max_vel_down=self.max_vel_down,
+            max_yaw_rate=self.max_yaw_rate,
+            max_accel_xy=self.max_accel_xy,
+            max_decel_xy=float(getattr(self.pid, "max_decel", 2.45)),
+            max_lat_accel=float(getattr(self.pid, "max_lat_accel", 6.0)),
+            max_accel_z=self.max_accel_z,
+            max_accel_yaw=self.max_accel_yaw,
             current_alt_m=current_alt_m
         )
-        action, self.hidden_state = self.model.predict(
-            obs,
-            state=self.hidden_state,
-            episode_start=self.episode_start,
-            deterministic=self.deterministic
-        )
-        self.episode_start = np.array([False], dtype=bool)
-        a = np.clip(action, -1.0, 1.0)
-        residual = a * self.residual_scales
-
-        total_cmd = pid_cmd + residual
-
-        # 3. Clip within envelope limits
-        target_vx = float(np.clip(total_cmd[0], -self.max_rev_vel, self.max_fwd_vel))
-        target_vy = float(np.clip(total_cmd[1], -self.max_lat_vel, self.max_lat_vel))
-        target_vz = float(np.clip(total_cmd[2], -self.max_vel_up, self.max_vel_down))
-        target_yaw = float(np.clip(total_cmd[3], -self.max_yaw_rate, self.max_yaw_rate))
-
-        # Ground proximity safety governor
-        if current_alt_m is not None and current_alt_m < 1.4 and target_vz > 0.0:
-            target_vz = float(target_vz * max(0.0, (current_alt_m - 0.9) / 0.5))
-
-        cmd = np.array([target_vx, target_vy, target_vz, target_yaw], dtype=np.float64)
         self.prev_cmd = cmd.copy()
         return cmd
 

@@ -185,11 +185,17 @@ class ResidualTaskMetricEvalCallback(BaseCallback):
         mean_dwell_s = float(np.mean([r["dwell_s"] for r in results]))
         mean_reward = float(np.mean([r["reward"] for r in results]))
 
+        # Balanced task score:
+        # - Success rate: 0 to 100 pts
+        # - Continuous dwell: +5 pts per second (up to +25 pts for 5.0s max dwell)
+        # - Standoff accuracy: -5 pts per meter of MAE error
+        # - Safety penalties: -20 pts per collision/ground-strike incident (penalizes safety violations without completely obliterating 30-scenario evaluations)
         task_score = float(
-            success_rate * 100.0
-            - 15.0 * mae_standoff_error
-            - 50.0 * (collision_rate * 100.0)
-            - 50.0 * (ground_strike_rate * 100.0)
+            (success_rate * 100.0)
+            + 5.0 * min(5.0, mean_dwell_s)
+            - 5.0 * mae_standoff_error
+            - 20.0 * n_collisions
+            - 20.0 * n_ground_strikes
         )
 
         metrics = {
@@ -399,16 +405,13 @@ def train_residual_ppo(
     norm_env.save(str(output_dir / "vec_normalize.pkl"))
     print(f"[SAVE] Saved final model to: {final_model_path}")
 
-    # Export policy state dict
+    # Export final policy state dict (do NOT overwrite best_model/actor_weights.pt which was saved at the peak checkpoint!)
     try:
-        actor_weights_path = output_dir / "actor_weights.pt"
-        torch.save(model.policy.state_dict(), str(actor_weights_path))
-        print(f"[SAVE] Exported actor weights to: {actor_weights_path}")
-        best_actor_path = output_dir / "best_model" / "actor_weights.pt"
-        if best_actor_path.parent.exists():
-            torch.save(model.policy.state_dict(), str(best_actor_path))
+        final_actor_path = output_dir / "final_actor_weights.pt"
+        torch.save(model.policy.state_dict(), str(final_actor_path))
+        print(f"[SAVE] Exported final actor weights to: {final_actor_path}")
     except Exception as e:
-        print(f"[WARN] Failed to export actor weights: {e}")
+        print(f"[WARN] Failed to export final actor weights: {e}")
 
     norm_env.close()
     eval_env.close()

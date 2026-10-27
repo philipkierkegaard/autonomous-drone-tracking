@@ -9,7 +9,7 @@ to an inertial horizon-stabilized line-of-sight vector, canceling out:
 3. Body pitch (drone_pitch)
 """
 
-from typing import Tuple
+from typing import Tuple, Optional
 import numpy as np
 
 
@@ -183,4 +183,68 @@ def compute_ego_motion_compensation(
     delta_h = float(h * (scale_factor - 1.0))
 
     return delta_cx, delta_cy, delta_w, delta_h
+
+
+def apply_command_envelope_and_slew(
+    target_cmd: np.ndarray,
+    prev_cmd: np.ndarray,
+    dt: float,
+    max_rev_vel: float = 0.5,
+    max_fwd_vel: float = 15.0,
+    max_lat_vel: float = 4.0,
+    max_vel_up: float = 3.0,
+    max_vel_down: float = 2.0,
+    max_yaw_rate: float = 120.0,
+    max_accel_xy: float = 6.0,
+    max_decel_xy: float = 2.45,
+    max_lat_accel: float = 6.0,
+    max_accel_z: float = 3.0,
+    max_accel_yaw: float = 240.0,
+    current_alt_m: Optional[float] = None,
+) -> np.ndarray:
+    """
+    Standardized Quadrotor Command Envelope and Slew-Rate Limiter.
+    Enforces continuous physical velocity limits, ground proximity governors,
+    and slew-rate acceleration bounds identically across training and deployment.
+    """
+    # 1. Envelope clipping
+    target_vx = float(np.clip(target_cmd[0], -max_rev_vel, max_fwd_vel))
+    target_vy = float(np.clip(target_cmd[1], -max_lat_vel, max_lat_vel))
+    target_vz = float(np.clip(target_cmd[2], -max_vel_up, max_vel_down))
+    target_yaw = float(np.clip(target_cmd[3], -max_yaw_rate, max_yaw_rate))
+
+    # 2. Ground proximity safety barrier (inhibit descent below 1.4m, climb below 1.1m)
+    if current_alt_m is not None and current_alt_m < 1.4:
+        if target_vz > 0.0:
+            target_vz = float(target_vz * max(0.0, (current_alt_m - 0.9) / 0.5))
+        if current_alt_m < 1.1:
+            climb_cmd = -float(np.clip((1.1 - current_alt_m) * 3.0, 0.0, max_vel_up))
+            target_vz = min(target_vz, climb_cmd)
+
+    # 3. Slew-rate limiting across all 4 flight axes
+    # Axis 0: Forward surge acceleration & deceleration
+    max_step_accel_x = max_accel_xy * dt
+    max_step_decel_x = max_decel_xy * dt
+    if target_vx < prev_cmd[0]:
+        cmd_vx = max(target_vx, prev_cmd[0] - max_step_decel_x)
+    else:
+        cmd_vx = min(target_vx, prev_cmd[0] + max_step_accel_x)
+
+    # Axis 1: Lateral sway acceleration
+    max_step_lat = max_lat_accel * dt
+    cmd_vy = float(np.clip(target_vy, prev_cmd[1] - max_step_lat, prev_cmd[1] + max_step_lat))
+
+    # Axis 2: Vertical heave acceleration
+    max_step_z = max_accel_z * dt
+    cmd_vz = float(np.clip(target_vz, prev_cmd[2] - max_step_z, prev_cmd[2] + max_step_z))
+
+    # Axis 3: Yaw rate angular acceleration
+    max_step_yaw = max_accel_yaw * dt
+    cmd_yaw = float(np.clip(target_yaw, prev_cmd[3] - max_step_yaw, prev_cmd[3] + max_step_yaw))
+
+    phys_cmd = np.array([cmd_vx, cmd_vy, cmd_vz, cmd_yaw], dtype=np.float64)
+    if not np.all(np.isfinite(phys_cmd)):
+        return prev_cmd.copy()
+    return phys_cmd
+
 

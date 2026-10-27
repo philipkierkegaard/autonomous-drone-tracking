@@ -862,6 +862,15 @@ def run_dataset_benchmark(
             vfov_deg=38.0,
             w_nominal=0.0859
         )
+    elif controller_type.lower() in ["residual", "residual_rl"]:
+        from control.predictive_controller import ResidualVisualServoController
+        shared_ctrl = ResidualVisualServoController(
+            model_path=str(model_path) if model_path else None,
+            pid_gains_path=str(pid_gains) if pid_gains else "control/weights/tuned_pid_gains.json",
+            standoff_nominal=3.5,
+            desired_bbox_size=110.0,
+            w_nominal=0.0859
+        )
     else:
         shared_ctrl = create_pid_controller(gains_path=pid_gains, max_decel=max_decel)
 
@@ -948,7 +957,7 @@ def run_dataset_benchmark(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Autonomous Drone Pursuit Benchmark Suite")
     parser.add_argument("--dataset", type=str, default=None, help="Path to PursuitDataset JSON manifest to benchmark")
-    parser.add_argument("--controller", type=str, default="pid", choices=["pid", "rl", "both"], help="Controller type to benchmark ('pid', 'rl', or 'both')")
+    parser.add_argument("--controller", type=str, default="pid", choices=["pid", "rl", "residual", "both"], help="Controller type to benchmark ('pid', 'rl', 'residual', or 'both')")
     parser.add_argument("--model-path", type=str, default=None, help="Path to RL model checkpoint zip for 'rl' controller")
     parser.add_argument("--seeds", type=int, default=15, help="Number of Monte Carlo seeds per condition (default: 15)")
     parser.add_argument("--duration", type=float, default=25.0, help="Flight duration in seconds (default: 25.0)")
