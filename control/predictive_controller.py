@@ -257,35 +257,19 @@ class RecurrentVisualServoController:
         self.prev_frame_timestamp = None
         self.last_frame_time = None
 
-    def compute_cmd(
+    def build_obs(
         self,
         telemetry: Dict[str, Any],
         drone_pitch: float = 0.0,
         drone_roll: float = 0.0,
         dt: float = 0.02,
         vehicle_vel: Optional[np.ndarray] = None,
-        vehicle_yaw_rate: float = 0.0,
-        current_alt_m: float = 2.5
+        vehicle_yaw_rate: Optional[float] = None,
+        current_alt_m: Optional[float] = None
     ) -> np.ndarray:
         """
-        Drop-in replacement for KinematicVisualServoController.compute_cmd.
-
-        Args:
-            telemetry: Dict containing:
-                - 'error_x': Normalized [-1, 1] horizontal error
-                - 'error_y': Normalized [-1, 1] vertical error
-                - 'bbox_w': Bounding box width (pixels)
-                - 'bbox_h': Bounding box height (pixels)
-                - 'status': 'TRACKING', 'LOCKED', 'COASTING', or 'SEARCHING'
-            drone_pitch: Instantaneous pitch angle (+ is nose down)
-            drone_roll: Instantaneous roll angle (+ is right wing down)
-            dt: Loop timestep (default: 0.02s = 50 Hz)
-            vehicle_vel: Optional [vx, vy, vz] in body frame
-            vehicle_yaw_rate: Optional yaw rate in rad/s
-            current_alt_m: Current vehicle altitude AGL in meters
-
-        Returns:
-            np.ndarray of shape (4,): [v_forward (m/s), v_right (m/s), v_down (m/s), yaw_rate (deg/s)]
+        Constructs the canonical normalized observation vector (10D, 13D, or 15D).
+        Guarantees 100% feature and scaling equivalence between training and benchmark inference.
         """
         # Strictly sanitize telemetry: RecurrentVisualServoController is 100% optical and must never receive ground-truth distance
         telemetry = {k: v for k, v in telemetry.items() if k != "distance"}
@@ -407,7 +391,27 @@ class RecurrentVisualServoController:
             norm_roll  = float(np.clip(drone_roll  / (np.pi / 4.0), -1.0, 1.0))
             base_obs.extend([norm_pitch, norm_roll])
 
-        obs = np.array(base_obs, dtype=np.float32)
+        return np.array(base_obs, dtype=np.float32)
+
+    def compute_cmd(
+        self,
+        telemetry: Dict[str, Any],
+        drone_pitch: float = 0.0,
+        drone_roll: float = 0.0,
+        dt: float = 0.02,
+        vehicle_vel: Optional[np.ndarray] = None,
+        vehicle_yaw_rate: Optional[float] = None,
+        current_alt_m: Optional[float] = None
+    ) -> np.ndarray:
+        obs = self.build_obs(
+            telemetry=telemetry,
+            drone_pitch=drone_pitch,
+            drone_roll=drone_roll,
+            dt=dt,
+            vehicle_vel=vehicle_vel,
+            vehicle_yaw_rate=vehicle_yaw_rate,
+            current_alt_m=current_alt_m
+        )
 
         if self.model is None:
             # Fallback zero-control if no policy loaded
@@ -476,3 +480,100 @@ class RecurrentVisualServoController:
     # Dual aliases for compatibility across ArduPilot and legacy MAVSDK scripts
     to_autopilot = to_velocity_body
     to_mavsdk = to_velocity_body
+
+
+class ResidualVisualServoController(RecurrentVisualServoController):
+    """
+    Residual Visual Servoing Guidance Controller.
+    Combines calibrated Kinematic PID baseline with an optional learned recurrent residual:
+        u_total = clip(u_PID + Delta_u_RL)
+    When model_path is None or residual is zero, outputs identical control to Tuned Kinematic PID.
+    """
+    def __init__(
+        self,
+        model_path: Optional[Union[str, Path]] = None,
+        pid_gains_path: str = "control/weights/tuned_pid_gains.json",
+        residual_scales: Optional[Any] = (3.0, 2.0, 1.0, 30.0),
+        standoff_nominal: float = 3.5,
+        desired_bbox_size: float = 110.0,
+        **kwargs
+    ):
+        from benchmarks.control.benchmark_controller import create_pid_controller
+        self.pid = create_pid_controller(
+            gains_path=pid_gains_path,
+            standoff_nominal=standoff_nominal,
+            desired_bbox_size=desired_bbox_size
+        )
+        self.residual_scales = np.array(
+            residual_scales if residual_scales is not None else [3.0, 2.0, 1.0, 30.0],
+            dtype=np.float64
+        )
+        super().__init__(model_path=model_path, **kwargs)
+
+    def reset(self):
+        super().reset()
+        if hasattr(self, "pid") and self.pid is not None and hasattr(self.pid, "reset"):
+            self.pid.reset()
+
+    def compute_cmd(
+        self,
+        telemetry: Dict[str, Any],
+        drone_pitch: float = 0.0,
+        drone_roll: float = 0.0,
+        dt: float = 0.02,
+        vehicle_vel: Optional[np.ndarray] = None,
+        vehicle_yaw_rate: Optional[float] = None,
+        current_alt_m: Optional[float] = None
+    ) -> np.ndarray:
+        # 1. Base PID setpoint
+        pid_cmd = self.pid.compute_cmd(
+            telemetry,
+            drone_pitch=drone_pitch,
+            drone_roll=drone_roll,
+            dt=dt,
+            vehicle_vel=vehicle_vel,
+            vehicle_yaw_rate=vehicle_yaw_rate if vehicle_yaw_rate is not None else 0.0,
+            current_alt_m=current_alt_m if current_alt_m is not None else 2.5
+        )
+
+        # If no RL residual model is loaded, output exact PID baseline
+        if self.model is None:
+            self.prev_cmd = pid_cmd.copy()
+            return pid_cmd
+
+        # 2. Residual adjustment from learned RL policy
+        obs = self.build_obs(
+            telemetry=telemetry,
+            drone_pitch=drone_pitch,
+            drone_roll=drone_roll,
+            dt=dt,
+            vehicle_vel=vehicle_vel,
+            vehicle_yaw_rate=vehicle_yaw_rate,
+            current_alt_m=current_alt_m
+        )
+        action, self.hidden_state = self.model.predict(
+            obs,
+            state=self.hidden_state,
+            episode_start=self.episode_start,
+            deterministic=self.deterministic
+        )
+        self.episode_start = np.array([False], dtype=bool)
+        a = np.clip(action, -1.0, 1.0)
+        residual = a * self.residual_scales
+
+        total_cmd = pid_cmd + residual
+
+        # 3. Clip within envelope limits
+        target_vx = float(np.clip(total_cmd[0], -self.max_rev_vel, self.max_fwd_vel))
+        target_vy = float(np.clip(total_cmd[1], -self.max_lat_vel, self.max_lat_vel))
+        target_vz = float(np.clip(total_cmd[2], -self.max_vel_up, self.max_vel_down))
+        target_yaw = float(np.clip(total_cmd[3], -self.max_yaw_rate, self.max_yaw_rate))
+
+        # Ground proximity safety governor
+        if current_alt_m is not None and current_alt_m < 1.4 and target_vz > 0.0:
+            target_vz = float(target_vz * max(0.0, (current_alt_m - 0.9) / 0.5))
+
+        cmd = np.array([target_vx, target_vy, target_vz, target_yaw], dtype=np.float64)
+        self.prev_cmd = cmd.copy()
+        return cmd
+

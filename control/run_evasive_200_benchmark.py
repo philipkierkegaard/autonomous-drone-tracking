@@ -18,7 +18,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from control.dataset_generator import PursuitDatasetGenerator, PursuitScenario, PursuitDataset, EncounterType
-from control.predictive_controller import RecurrentVisualServoController
+from control.predictive_controller import RecurrentVisualServoController, ResidualVisualServoController
 from benchmarks.control.benchmark_controller import create_pid_controller, evaluate_single_run
 
 
@@ -196,7 +196,7 @@ def main():
     parser.add_argument("--pid-gains", type=str, default="control/weights/tuned_pid_gains.json", help="Path to tuned PID gains JSON")
     parser.add_argument("--noise-mode", type=str, default="empirical", choices=["empirical", "none", "bernoulli"], help="Perception noise model")
     parser.add_argument("--drop-rate", type=float, default=0.05, help="Frame drop rate")
-    parser.add_argument("--controller", type=str, default="both", choices=["both", "pid", "rl"], help="Controller(s) to benchmark ('both', 'pid', or 'rl')")
+    parser.add_argument("--controller", type=str, default="both", choices=["both", "pid", "rl", "residual"], help="Controller(s) to benchmark ('both', 'pid', 'rl', or 'residual')")
     args = parser.parse_args()
 
     dataset_path = Path(args.dataset)
@@ -230,6 +230,7 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
     d_tag = dataset.name
     rl_out_path = out_dir / f"benchmark_results_{d_tag}_rl_{model_tag}.json"
+    res_out_path = out_dir / f"benchmark_results_{d_tag}_residual_{model_tag}.json"
     pid_out_path = out_dir / f"benchmark_results_{d_tag}_pid_tuned.json"
 
     # 1. Evaluate Learned Controller
@@ -255,12 +256,45 @@ def main():
                 "summary": rl_summary,
                 "results": rl_runs,
             }, f, indent=2)
+    elif args.controller == "residual":
+        print(f"\n[INIT] Instantiating Residual Controller from: {rl_model_path}")
+        res_controller = ResidualVisualServoController(
+            model_path=str(rl_model_path),
+            pid_gains_path=str(pid_gains_path),
+            w_nominal=0.0859
+        )
+        rl_runs = run_evaluation(
+            dataset=dataset,
+            controller_type="residual",
+            controller_instance=res_controller,
+            noise_mode=args.noise_mode,
+            frame_drop_rate=args.drop_rate,
+        )
+        rl_summary = summarize_results(rl_runs)
+        with open(res_out_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "dataset": str(dataset_path.relative_to(PROJECT_ROOT) if dataset_path.is_relative_to(PROJECT_ROOT) else dataset_path),
+                "controller": f"residual_{model_tag}",
+                "model_path": str(rl_model_path.relative_to(PROJECT_ROOT) if rl_model_path.is_relative_to(PROJECT_ROOT) else rl_model_path),
+                "noise_mode": args.noise_mode,
+                "frame_drop_rate": args.drop_rate,
+                "summary": rl_summary,
+                "results": rl_runs,
+            }, f, indent=2)
+        rl_out_path = res_out_path
     elif rl_out_path.exists():
         print(f"\n[CACHE] Loading existing RL results from: {rl_out_path}")
         with open(rl_out_path, "r", encoding="utf-8") as f:
             cached_rl = json.load(f)
         rl_summary = cached_rl.get("summary", {})
         rl_runs = cached_rl.get("results", [])
+    elif res_out_path.exists():
+        print(f"\n[CACHE] Loading existing Residual results from: {res_out_path}")
+        with open(res_out_path, "r", encoding="utf-8") as f:
+            cached_rl = json.load(f)
+        rl_summary = cached_rl.get("summary", {})
+        rl_runs = cached_rl.get("results", [])
+        rl_out_path = res_out_path
     else:
         rl_summary = None
         rl_runs = None

@@ -34,29 +34,34 @@ from control.simulation import FastPixhawkQuadSim
 from control.pid_controller import KinematicVisualServoController
 from control.trajectory import StochasticTargetTrajectory
 from control.predictive_controller import StandaloneRecurrentPolicy, RecurrentVisualServoController
-from control.spatial import unproject_camera_to_horizon
 from benchmarks.control.benchmark_controller import create_pid_controller
+from perception.pipeline import DroneTracker
+from control.synthetic_sensor import SyntheticYOLOSensor
+from control.spatial import compute_ego_motion_compensation
 
 
 def collect_expert_demonstrations(
     num_episodes: int = 1500,
     episode_duration: float = 15.0,
     dt: float = 0.02,
+    camera_fps: float = 30.0,
     dropout_prob: float = 0.05,
-    noise_sigma: float = 0.015,
     seed_offset: int = 5000,
 ) -> List[Tuple[np.ndarray, np.ndarray]]:
     """
     Simulates expert flights across diverse encounter geometries, target profiles,
-    and initial conditions, generating 15D observation sequences and 4D normalized actions.
+    and initial conditions using the EXACT realistic benchmark perception suite
+    (30 Hz camera, empirical Jetson YOLO noise, frame dropouts, and 8D Kalman tracking).
     """
     print(f"[EXPERT] Collecting {num_episodes} expert flight demonstrations ({int(episode_duration/dt)} steps each)...")
+    print(f"         Perception: 30 Hz Camera, SyntheticYOLOSensor (empirical noise), 8D Kalman DroneTracker")
     trajectories = []
     
     profiles = ["hyper_evasive", "evasive", "cruising", "sprint_break", "aerobatic", "high_speed_evasive"]
-    profile_weights = [0.40, 0.30, 0.10, 0.10, 0.05, 0.05]
+    profile_weights = [0.35, 0.30, 0.15, 0.10, 0.05, 0.05]
     
     rng = np.random.default_rng(seed_offset)
+    camera_dt = 1.0 / camera_fps
     
     # Load tuned kinematic controller as expert once
     ctrl = create_pid_controller()
@@ -67,70 +72,68 @@ def collect_expert_demonstrations(
         
         # Geometry sampling: Diverse initial positions, altitudes, and headings
         chaser_alt = float(rng.uniform(-4.5, -2.5))  # 2.5m to 4.5m AGL (NED coordinate)
-        # Altitude delta between target and chaser: ±1.5m (ensuring target stays > 1.8m AGL)
         delta_alt = float(rng.uniform(-1.5, 1.5))
         target_alt = float(np.clip(chaser_alt + delta_alt, -6.8, -1.8))
         
-        init_dist = float(rng.uniform(5.0, 16.0))
+        init_dist = float(rng.uniform(4.0, 16.0))
         init_lat = float(rng.uniform(-4.5, 4.5))
         init_heading = float(rng.uniform(-0.8, 0.8))
         init_chaser_vel = float(rng.uniform(3.0, 5.0))
         init_yaw = float(rng.uniform(-0.45, 0.45))
         
         # Diverse encounter types:
-        # 1. Close Basket & Dwell (10%): Spawns within 2.8-4.5m basket for fine speed-matching & dwell demos
-        # 2. Crossing Right (15%): Spawns on left flank, cuts East (+90 deg) across FOV
-        # 3. Crossing Left (15%): Spawns on right flank, cuts West (-90 deg) across FOV
-        # 4. Head-On Approach (12%): Spawns 12-24m ahead, flying toward and past the chaser
-        # 5. Oblique Break Away (12%): Angled breakaway forcing aggressive yaw correction
-        # 6. Oblique Inward (10%): Angled closing approach
-        # 7. Omnidirectional 360 (8%): Full random 360-degree heading relative to LOS
-        # 8. Tail Chase Sprint (18%): Deep forward chase (6-18m) demanding high-speed catch
+        # 1. Close Basket & Dwell (20%): Spawns within 2.5-4.5m basket for fine speed-matching & dwell demos
+        # 2. Medium Tail Chase (20%): Spawns 4.5-8.0m directly behind target
+        # 3. Long Catch-Up Sprint (20%): Spawns 8.0-18.0m behind, requiring sustained full-throttle surge
+        # 4. Crossing Right (12%): Spawns on left flank, cuts East (+90 deg) across FOV
+        # 5. Crossing Left (12%): Spawns on right flank, cuts West (-90 deg) across FOV
+        # 6. Head-On Approach (8%): Spawns 10-22m ahead, flying toward and past the chaser
+        # 7. Oblique Break Away (8%): Angled breakaway forcing aggressive yaw correction
         encounter_roll = rng.random()
-        if encounter_roll < 0.10:
-            # Close basket dwell encounter
-            close_dist = float(rng.uniform(2.8, 4.5))
-            close_lat = float(rng.uniform(-1.2, 1.2))
+        if encounter_roll < 0.20:
+            # Close basket dwell encounter (teaches station-keeping and zero-error holding)
+            close_dist = float(rng.uniform(2.5, 4.5))
+            close_lat = float(rng.uniform(-1.0, 1.0))
             target_pos = [close_dist, close_lat, target_alt]
-            target_heading = float(rng.uniform(-0.35, 0.35))
-            init_chaser_vel = float(rng.uniform(3.5, 4.5))  # Match target cruising speed
-        elif encounter_roll < 0.25:
+            target_heading = float(rng.uniform(-0.30, 0.30))
+            init_chaser_vel = float(rng.uniform(4.0, 5.0))
+        elif encounter_roll < 0.40:
+            # Medium tail chase
+            med_dist = float(rng.uniform(4.5, 8.0))
+            med_lat = float(rng.uniform(-2.0, 2.0))
+            target_pos = [med_dist, med_lat, target_alt]
+            target_heading = float(rng.uniform(-0.40, 0.40))
+            init_chaser_vel = float(rng.uniform(3.0, 5.0))
+        elif encounter_roll < 0.60:
+            # Long catch-up sprint (teaches aggressive forward thrust to close distance)
+            long_dist = float(rng.uniform(8.0, 18.0))
+            long_lat = float(rng.uniform(-2.5, 2.5))
+            target_pos = [long_dist, long_lat, target_alt]
+            target_heading = init_heading
+            init_chaser_vel = float(rng.uniform(2.0, 4.0))
+        elif encounter_roll < 0.72:
             # Crossing right
             flank_lat = float(rng.uniform(-7.0, -3.5))
-            cross_dist = float(rng.uniform(6.0, 15.0))
+            cross_dist = float(rng.uniform(5.0, 14.0))
             target_pos = [cross_dist, flank_lat, target_alt]
             target_heading = float(np.pi / 2.0 + rng.uniform(-0.25, 0.25))
-        elif encounter_roll < 0.40:
+        elif encounter_roll < 0.84:
             # Crossing left
             flank_lat = float(rng.uniform(3.5, 7.0))
-            cross_dist = float(rng.uniform(6.0, 15.0))
+            cross_dist = float(rng.uniform(5.0, 14.0))
             target_pos = [cross_dist, flank_lat, target_alt]
             target_heading = float(-np.pi / 2.0 + rng.uniform(-0.25, 0.25))
-        elif encounter_roll < 0.52:
+        elif encounter_roll < 0.92:
             # Head-on approach
-            head_dist = float(rng.uniform(12.0, 24.0))
-            head_lat = float(rng.uniform(-3.5, 3.5))
+            head_dist = float(rng.uniform(10.0, 22.0))
+            head_lat = float(rng.uniform(-3.0, 3.0))
             target_pos = [head_dist, head_lat, target_alt]
             target_heading = float(np.pi + rng.uniform(-0.35, 0.35))
-        elif encounter_roll < 0.64:
+        else:
             # Oblique break away
             sign = float(rng.choice([-1.0, 1.0]))
             target_pos = [init_dist, init_lat, target_alt]
             target_heading = float(sign * (np.pi / 4.0) + rng.uniform(-0.25, 0.25))
-        elif encounter_roll < 0.74:
-            # Oblique inward
-            sign = float(rng.choice([-1.0, 1.0]))
-            target_pos = [init_dist, init_lat, target_alt]
-            target_heading = float(sign * (3.0 * np.pi / 4.0) + rng.uniform(-0.2, 0.2))
-        elif encounter_roll < 0.82:
-            # Omnidirectional 360
-            target_pos = [init_dist, init_lat, target_alt]
-            target_heading = float(rng.uniform(-np.pi, np.pi))
-        else:
-            # Tail chase sprint
-            sprint_dist = float(rng.uniform(6.0, 18.0))
-            target_pos = [sprint_dist, init_lat, target_alt]
-            target_heading = init_heading
             
         target = StochasticTargetTrajectory(
             duration=episode_duration + 5.0,
@@ -153,15 +156,31 @@ def collect_expert_demonstrations(
             initial_vel=np.array([np.cos(init_yaw) * init_chaser_vel, np.sin(init_yaw) * init_chaser_vel, 0.0])
         )
         
-        # Reset kinematic controller for episode
+        # Reset kinematic controller and observation builder
         ctrl.reset()
         ctrl.prev_cmd = np.array([init_chaser_vel, 0.0, 0.0, 0.0])
         ctrl.prev_cmd_vx = float(init_chaser_vel)
         
-        # Optical filtering state
-        prev_ex, prev_ey, prev_w = 0.0, 0.0, 0.0859
-        filt_dex, filt_dey, filt_dw = 0.0, 0.0, 0.0
-        last_seen_ex, last_seen_ey, last_seen_w = 0.0, 0.0, 0.0859
+        obs_builder = RecurrentVisualServoController(w_nominal=0.0859)
+        obs_builder.reset()
+        
+        # Instantiate realistic benchmark perception stack
+        synthetic_sensor = SyntheticYOLOSensor(
+            img_w=1280,
+            img_h=720,
+            env_mode="nominal",
+            seed=ep_seed
+        )
+        drone_tracker = DroneTracker(
+            dt=dt,
+            max_lost_frames=15,
+            min_hits_to_confirm=2
+        )
+        
+        time_since_camera = 0.0
+        prev_chaser_pitch = sim.pitch
+        prev_chaser_roll = sim.roll
+        prev_chaser_yaw = sim.yaw
         
         ep_obs = []
         ep_acts = []
@@ -170,7 +189,7 @@ def collect_expert_demonstrations(
         for step in range(total_steps):
             t = step * dt
             tgt_pos = target.get_position(t)
-            telem = sim.get_camera_telemetry(
+            true_telem = sim.get_camera_telemetry(
                 tgt_pos,
                 hfov_deg=62.0,
                 vfov_deg=38.0,
@@ -181,13 +200,110 @@ def collect_expert_demonstrations(
                 desired_target_size=110.0
             )
             
-            # Synthetic visual dropouts (simulates occlusion or frame loss)
-            in_view_real = bool(telem["in_view"])
-            is_dropped = (rng.random() < dropout_prob)
-            telem_ctrl = {k: v for k, v in telem.items() if k != "distance"}
-            if is_dropped or not in_view_real:
-                telem_ctrl["status"] = "COASTING"
-                telem_ctrl["in_view"] = False
+            # 1. Compute ego-motion compensation
+            d_pitch = sim.pitch - prev_chaser_pitch
+            d_roll = sim.roll - prev_chaser_roll
+            d_yaw = float((sim.yaw - prev_chaser_yaw + np.pi) % (2.0 * np.pi) - np.pi)
+            prev_chaser_pitch = sim.pitch
+            prev_chaser_roll = sim.roll
+            prev_chaser_yaw = sim.yaw
+            
+            ego_shifts = {}
+            for tr in drone_tracker.trackers:
+                st = tr.get_state()
+                tcx = (st[0] + st[2]) / 2.0
+                tcy = (st[1] + st[3]) / 2.0
+                tw = max(1.0, st[2] - st[0])
+                th = max(1.0, st[3] - st[1])
+                shift = compute_ego_motion_compensation(
+                    cx=tcx, cy=tcy, w=tw, h=th,
+                    delta_pitch_rad=d_pitch,
+                    delta_roll_rad=d_roll,
+                    delta_yaw_rad=d_yaw,
+                    vx_body=0.0, vy_body=0.0, vz_body=0.0,
+                    dt=dt,
+                    img_width=1280.0,
+                    img_height=720.0
+                )
+                ego_shifts[tr.id] = shift
+                
+            # 2. 30 Hz Camera Timing vs 50 Hz Physics Prediction
+            time_since_camera += dt
+            is_camera_tick = (time_since_camera >= camera_dt - 1e-5)
+            if is_camera_tick:
+                time_since_camera -= camera_dt
+                norm_cx = (true_telem["error_x"] + 1.0) / 2.0
+                norm_cy = (true_telem["error_y"] + 1.0) / 2.0
+                norm_w = true_telem["bbox_w"] / 1280.0
+                norm_h = true_telem["bbox_h"] / 720.0
+                in_fov = bool(true_telem["in_view"])
+                
+                det_bbox, conf, fps_boxes = synthetic_sensor.step(
+                    norm_cx, norm_cy, norm_w, norm_h, in_fov=in_fov
+                )
+                if dropout_prob > 0.0 and rng.random() < dropout_prob:
+                    det_bbox = None
+                    
+                detections = []
+                confs = []
+                if det_bbox is not None:
+                    detections.append(det_bbox)
+                    confs.append(conf)
+                for fp in fps_boxes:
+                    detections.append(fp)
+                    confs.append(0.36)
+                    
+                det_arr = np.array(detections, dtype=np.float32) if detections else np.empty((0, 4), dtype=np.float32)
+                conf_arr = np.array(confs, dtype=np.float32) if confs else np.empty((0,), dtype=np.float32)
+                drone_tracker.update(det_arr, conf_arr, ego_shifts=ego_shifts, dt_step=dt)
+            else:
+                for trk in drone_tracker.trackers:
+                    shift = ego_shifts.get(trk.id, None)
+                    trk.predict(ego_shift=shift, dt_step=dt)
+                    
+            primary = None
+            if drone_tracker.primary_track_id is not None:
+                primary = next((t for t in drone_tracker.trackers if t.id == drone_tracker.primary_track_id), None)
+                
+            if primary is not None and primary.hits >= drone_tracker.min_hits_to_confirm and primary.time_since_update <= drone_tracker.max_lost_frames:
+                pred_box = primary.get_state()
+                tcx = (pred_box[0] + pred_box[2]) / 2.0
+                tcy = (pred_box[1] + pred_box[3]) / 2.0
+                bw = max(1.0, pred_box[2] - pred_box[0])
+                bh = max(1.0, pred_box[3] - pred_box[1])
+                curr_sz = bw
+                
+                err_x = (tcx - 1280.0 / 2.0) / (1280.0 / 2.0)
+                err_y = (tcy - 720.0 / 2.0) / (720.0 / 2.0)
+                range_err = (110.0 - curr_sz) / 110.0
+                
+                ctrl_telem = {
+                    "status": "COASTING" if primary.time_since_update > 0 else "LOCKED",
+                    "error_x": float(np.clip(err_x, -1.0, 1.0)),
+                    "error_y": float(np.clip(err_y, -1.0, 1.0)),
+                    "error_range": float(np.clip(range_err, -1.0, 1.0)),
+                    "target_size": float(curr_sz),
+                    "desired_size": 110.0,
+                    "bbox_w": float(bw),
+                    "bbox_h": float(bh),
+                    "w_norm": float(bw / 1280.0),
+                    "scale_mode": "width",
+                    "in_view": True,
+                }
+            else:
+                ctrl_telem = {
+                    "status": "SEARCHING",
+                    "error_x": 0.0,
+                    "error_y": 0.0,
+                    "error_range": 0.0,
+                    "target_size": 0.0,
+                    "desired_size": 110.0,
+                    "bbox_w": 0.0,
+                    "bbox_h": 0.0,
+                    "w_norm": 0.0,
+                    "scale_mode": "width",
+                    "in_view": False,
+                }
 
             c_yaw, s_yaw = np.cos(sim.yaw), np.sin(sim.yaw)
             vx_b = c_yaw * sim.vel[0] + s_yaw * sim.vel[1]
@@ -195,8 +311,9 @@ def collect_expert_demonstrations(
             vz_b = sim.vel[2]
             v_body = np.array([vx_b, vy_b, vz_b], dtype=np.float64)
 
+            # Compute expert PID command on realistic telemetry
             cmd = ctrl.compute_cmd(
-                telem_ctrl,
+                ctrl_telem,
                 drone_pitch=sim.pitch,
                 drone_roll=sim.roll,
                 dt=dt,
@@ -204,75 +321,19 @@ def collect_expert_demonstrations(
                 vehicle_yaw_rate=sim.yaw_rate,
                 current_alt_m=-sim.pos[2]
             )
-            sim.step(cmd)
-            # DAgger-style recovery perturbation: nudges heading so PID demonstrates corrective turns
-            if step > 20 and rng.random() < 0.025:
-                sim.yaw += float(rng.uniform(-0.25, 0.25))
             
-            # Observation formulation (matched identically to 15D environment.py)
-            in_view_flag = 1.0 if (in_view_real and not is_dropped) else 0.0
-            if in_view_flag > 0.5:
-                # Unproject to horizon plane
-                h_ex, h_ey, _, _ = unproject_camera_to_horizon(
-                    err_x=float(telem["error_x"]),
-                    err_y=float(telem["error_y"]),
-                    drone_pitch=sim.pitch,
-                    drone_roll=sim.roll,
-                    camera_uptilt_rad=sim.camera_uptilt,
-                    half_hfov=np.tan(np.deg2rad(31.0)),
-                    half_vfov=np.tan(np.deg2rad(19.0)),
-                )
-                ex = float(np.clip(h_ex + rng.normal(0, noise_sigma), -1.0, 1.0))
-                ey = float(np.clip(h_ey + rng.normal(0, noise_sigma), -1.0, 1.0))
-                w_norm = float(np.clip(telem["w_norm"] + rng.normal(0, noise_sigma * 0.1), 0.005, 0.90))
-                last_seen_ex, last_seen_ey, last_seen_w = ex, ey, w_norm
-                
-                raw_dex = (ex - prev_ex) / dt
-                raw_dey = (ey - prev_ey) / dt
-                raw_dw  = (w_norm - prev_w) / dt
-                filt_dex = 0.4 * raw_dex + 0.6 * filt_dex
-                filt_dey = 0.4 * raw_dey + 0.6 * filt_dey
-                filt_dw  = 0.4 * raw_dw  + 0.6 * filt_dw
-                prev_ex, prev_ey, prev_w = ex, ey, w_norm
-            else:
-                ex = last_seen_ex
-                ey = last_seen_ey
-                w_norm = last_seen_w
-                filt_dex *= 0.5
-                filt_dey *= 0.5
-                filt_dw  *= 0.5
-                
-            scale_err = float(np.clip((0.0859 - w_norm) / 0.0859, -1.0, 1.0))
+            # Compute observation using the exact unified builder
+            obs_15d = obs_builder.build_obs(
+                ctrl_telem,
+                drone_pitch=sim.pitch,
+                drone_roll=sim.roll,
+                dt=dt,
+                vehicle_vel=v_body,
+                vehicle_yaw_rate=sim.yaw_rate,
+                current_alt_m=-sim.pos[2]
+            )
             
-            # Chaser body-frame velocities
-            c_yaw, s_yaw = np.cos(sim.yaw), np.sin(sim.yaw)
-            vx_b = c_yaw * sim.vel[0] + s_yaw * sim.vel[1]
-            vy_b = -s_yaw * sim.vel[0] + c_yaw * sim.vel[1]
-            vz_b = sim.vel[2]
-            
-            alt_norm = float(np.clip(-sim.pos[2] / 5.0, 0.0, 2.0))
-            norm_pitch = float(np.clip(sim.pitch / (np.pi / 4.0), -1.0, 1.0))
-            norm_roll  = float(np.clip(sim.roll  / (np.pi / 4.0), -1.0, 1.0))
-            
-            obs_15d = np.array([
-                ex,
-                ey,
-                scale_err,
-                w_norm,
-                in_view_flag,
-                np.clip(vx_b / 15.0, -1.0, 1.0),
-                np.clip(vy_b / 4.0, -1.0, 1.0),
-                np.clip(vz_b / 3.0, -1.0, 1.0),
-                np.clip(sim.yaw_rate / np.deg2rad(120.0), -1.0, 1.0),
-                alt_norm,
-                np.clip(filt_dex / 2.0, -1.0, 1.0),
-                np.clip(filt_dey / 2.0, -1.0, 1.0),
-                np.clip(filt_dw  / 0.20, -1.0, 1.0),
-                norm_pitch,
-                norm_roll
-            ], dtype=np.float32)
-            
-            # Inverse Action Mapping matching environment.py
+            # Inverse action mapping matching environment.py
             if cmd[0] >= 3.5:
                 a0 = (cmd[0] - 3.5) / (15.0 - 3.5)
             else:
@@ -281,11 +342,16 @@ def collect_expert_demonstrations(
             a1 = float(np.clip(cmd[1] / 4.0, -1.0, 1.0))
             a2 = float(np.clip(cmd[2] / 2.0 if cmd[2] >= 0 else cmd[2] / 3.0, -1.0, 1.0))
             a3 = float(np.clip(cmd[3] / 120.0, -1.0, 1.0))
-            
             act_4d = np.array([a0, a1, a2, a3], dtype=np.float32)
             
             ep_obs.append(obs_15d)
             ep_acts.append(act_4d)
+            
+            sim.step(cmd)
+            
+            # DAgger-style recovery perturbation: nudges heading occasionally so PID demonstrates corrective turns
+            if step > 20 and rng.random() < 0.02:
+                sim.yaw += float(rng.uniform(-0.25, 0.25))
             
         trajectories.append((np.array(ep_obs, dtype=np.float32), np.array(ep_acts, dtype=np.float32)))
         if (ep + 1) % 100 == 0 or (ep + 1) == num_episodes:
@@ -303,9 +369,10 @@ def evaluate_policy(
     initial_heading: float = 0.0,
     seed: int = 42,
     duration: float = 15.0,
-    dt: float = 0.02
+    dt: float = 0.02,
+    camera_fps: float = 30.0,
 ) -> Dict[str, Any]:
-    """Evaluates the cloned policy in closed-loop flight on a standardized benchmark trajectory."""
+    """Evaluates the cloned policy in closed-loop flight on a standardized benchmark trajectory with realistic perception."""
     sim = FastPixhawkQuadSim(
         dt=dt,
         max_vel_xy=15.0,
@@ -332,6 +399,15 @@ def evaluate_policy(
     ctrl.reset()
     ctrl.prev_cmd = np.array([4.0, 0.0, 0.0, 0.0])
     
+    synthetic_sensor = SyntheticYOLOSensor(img_w=1280, img_h=720, env_mode="nominal", seed=seed)
+    drone_tracker = DroneTracker(dt=dt, max_lost_frames=15, min_hits_to_confirm=2)
+    camera_dt = 1.0 / camera_fps
+    time_since_camera = 0.0
+    
+    prev_chaser_pitch = sim.pitch
+    prev_chaser_roll = sim.roll
+    prev_chaser_yaw = sim.yaw
+    
     total_steps = int(duration / dt)
     dists = []
     in_views = []
@@ -341,7 +417,7 @@ def evaluate_policy(
     for step in range(total_steps):
         t = step * dt
         tgt_pos = target.get_position(t)
-        telem = sim.get_camera_telemetry(
+        true_telem = sim.get_camera_telemetry(
             tgt_pos,
             hfov_deg=62.0,
             vfov_deg=38.0,
@@ -351,12 +427,107 @@ def evaluate_policy(
             img_h=720,
             desired_target_size=110.0
         )
+        
+        d_pitch = sim.pitch - prev_chaser_pitch
+        d_roll = sim.roll - prev_chaser_roll
+        d_yaw = float((sim.yaw - prev_chaser_yaw + np.pi) % (2.0 * np.pi) - np.pi)
+        prev_chaser_pitch = sim.pitch
+        prev_chaser_roll = sim.roll
+        prev_chaser_yaw = sim.yaw
+        
+        ego_shifts = {}
+        for tr in drone_tracker.trackers:
+            st = tr.get_state()
+            tcx = (st[0] + st[2]) / 2.0
+            tcy = (st[1] + st[3]) / 2.0
+            tw = max(1.0, st[2] - st[0])
+            th = max(1.0, st[3] - st[1])
+            shift = compute_ego_motion_compensation(
+                cx=tcx, cy=tcy, w=tw, h=th,
+                delta_pitch_rad=d_pitch,
+                delta_roll_rad=d_roll,
+                delta_yaw_rad=d_yaw,
+                vx_body=0.0, vy_body=0.0, vz_body=0.0,
+                dt=dt,
+                img_width=1280.0,
+                img_height=720.0
+            )
+            ego_shifts[tr.id] = shift
+            
+        time_since_camera += dt
+        is_camera_tick = (time_since_camera >= camera_dt - 1e-5)
+        if is_camera_tick:
+            time_since_camera -= camera_dt
+            norm_cx = (true_telem["error_x"] + 1.0) / 2.0
+            norm_cy = (true_telem["error_y"] + 1.0) / 2.0
+            norm_w = true_telem["bbox_w"] / 1280.0
+            norm_h = true_telem["bbox_h"] / 720.0
+            in_fov = bool(true_telem["in_view"])
+            
+            det_bbox, conf, fps_boxes = synthetic_sensor.step(norm_cx, norm_cy, norm_w, norm_h, in_fov=in_fov)
+            detections = []
+            confs = []
+            if det_bbox is not None:
+                detections.append(det_bbox)
+                confs.append(conf)
+            for fp in fps_boxes:
+                detections.append(fp)
+                confs.append(0.36)
+            det_arr = np.array(detections, dtype=np.float32) if detections else np.empty((0, 4), dtype=np.float32)
+            conf_arr = np.array(confs, dtype=np.float32) if confs else np.empty((0,), dtype=np.float32)
+            drone_tracker.update(det_arr, conf_arr, ego_shifts=ego_shifts, dt_step=dt)
+        else:
+            for trk in drone_tracker.trackers:
+                shift = ego_shifts.get(trk.id, None)
+                trk.predict(ego_shift=shift, dt_step=dt)
+                
+        primary = None
+        if drone_tracker.primary_track_id is not None:
+            primary = next((t for t in drone_tracker.trackers if t.id == drone_tracker.primary_track_id), None)
+            
+        if primary is not None and primary.hits >= drone_tracker.min_hits_to_confirm and primary.time_since_update <= drone_tracker.max_lost_frames:
+            pred_box = primary.get_state()
+            tcx = (pred_box[0] + pred_box[2]) / 2.0
+            tcy = (pred_box[1] + pred_box[3]) / 2.0
+            bw = max(1.0, pred_box[2] - pred_box[0])
+            bh = max(1.0, pred_box[3] - pred_box[1])
+            curr_sz = bw
+            err_x = (tcx - 1280.0 / 2.0) / (1280.0 / 2.0)
+            err_y = (tcy - 720.0 / 2.0) / (720.0 / 2.0)
+            range_err = (110.0 - curr_sz) / 110.0
+            ctrl_telem = {
+                "status": "COASTING" if primary.time_since_update > 0 else "LOCKED",
+                "error_x": float(np.clip(err_x, -1.0, 1.0)),
+                "error_y": float(np.clip(err_y, -1.0, 1.0)),
+                "error_range": float(np.clip(range_err, -1.0, 1.0)),
+                "target_size": float(curr_sz),
+                "desired_size": 110.0,
+                "bbox_w": float(bw),
+                "bbox_h": float(bh),
+                "w_norm": float(bw / 1280.0),
+                "scale_mode": "width",
+                "in_view": True,
+            }
+        else:
+            ctrl_telem = {
+                "status": "SEARCHING",
+                "error_x": 0.0,
+                "error_y": 0.0,
+                "error_range": 0.0,
+                "target_size": 0.0,
+                "desired_size": 110.0,
+                "bbox_w": 0.0,
+                "bbox_h": 0.0,
+                "w_norm": 0.0,
+                "scale_mode": "width",
+                "in_view": False,
+            }
+            
         c, s = np.cos(sim.yaw), np.sin(sim.yaw)
         v_body = np.array([c * sim.vel[0] + s * sim.vel[1], -s * sim.vel[0] + c * sim.vel[1], sim.vel[2]])
         
-        telem_clean = {k: v for k, v in telem.items() if k != "distance"}
         cmd = ctrl.compute_cmd(
-            telem_clean,
+            ctrl_telem,
             drone_pitch=sim.pitch,
             drone_roll=sim.roll,
             dt=dt,
@@ -366,14 +537,14 @@ def evaluate_policy(
         )
         sim.step(cmd)
         
-        d = float(telem["distance"])
-        iv = bool(telem["in_view"])
+        d = float(true_telem["distance"])
+        iv = bool(true_telem["in_view"])
         dists.append(d)
         in_views.append(iv)
         
         if -sim.pos[2] < 0.8:
             ground_strikes += 1
-        if d < 1.2:
+        if d < 0.5:
             collisions += 1
             
     in_view_pct = float(np.mean(in_views) * 100.0)

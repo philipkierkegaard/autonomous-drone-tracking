@@ -1,0 +1,74 @@
+=== Command: /Users/philipkierkegaard/Development/autonomous-drone-tracking/.venv/bin/python3 /Users/philipkierkegaard/Development/autonomous-drone-tracking/control/run_evasive_200_benchmark.py --dataset /Users/philipkierkegaard/Development/autonomous-drone-tracking/outputs/benchmarks/datasets/benchmark_300_suite.json --rl-model /Users/philipkierkegaard/Development/autonomous-drone-tracking/control/weights/overnight_12_campaign/run_01_potential_dwell_baseline/actor_weights.pt --controller rl ===
+
+================================================================================
+  BENCHMARK: CONTROLLER(S)=RL | LEARNED (run_01_potential_dwell_baseline) vs. KINEMATIC PID
+  Dataset: benchmark_300_suite (300 scenarios)
+  Perception: 8D Kalman Filter, EMPIRICAL Noise, 5% Random Frame Drops
+================================================================================
+
+[INIT] Instantiating Learned Controller from: /Users/philipkierkegaard/Development/autonomous-drone-tracking/control/weights/overnight_12_campaign/run_01_potential_dwell_baseline/actor_weights.pt
+[RECURRENT_CONTROLLER] Loading standalone PyTorch actor from: /Users/philipkierkegaard/Development/autonomous-drone-tracking/control/weights/overnight_12_campaign/run_01_potential_dwell_baseline/actor_weights.pt
+[RECURRENT_CONTROLLER] Successfully loaded StandaloneRecurrentPolicy (obs_dim=15, hidden=128)
+
+--- Starting Evaluation: RL (300 scenarios) ---
+[RL] Progress: 50/300 (16.7%) in 10.2s
+[RL] Progress: 100/300 (33.3%) in 20.3s
+[RL] Progress: 150/300 (50.0%) in 30.7s
+[RL] Progress: 200/300 (66.7%) in 41.1s
+[RL] Progress: 250/300 (83.3%) in 51.3s
+[RL] Progress: 300/300 (100.0%) in 61.5s
+
+[CACHE] Loading existing PID results from: /Users/philipkierkegaard/Development/autonomous-drone-tracking/outputs/benchmarks/control/benchmark_results_benchmark_300_suite_pid_tuned.json
+
+================================================================================
+  BENCHMARK COMPLETE!
+  Dataset:      /Users/philipkierkegaard/Development/autonomous-drone-tracking/outputs/benchmarks/datasets/benchmark_300_suite.json
+  RL Results:   /Users/philipkierkegaard/Development/autonomous-drone-tracking/outputs/benchmarks/control/benchmark_results_benchmark_300_suite_rl_run_01_potential_dwell_baseline.json
+  PID Results:  /Users/philipkierkegaard/Development/autonomous-drone-tracking/outputs/benchmarks/control/benchmark_results_benchmark_300_suite_pid_tuned.json
+  Comparison:   /Users/philipkierkegaard/Development/autonomous-drone-tracking/outputs/benchmarks/control/benchmark_300_suite_comparative_summary.json
+================================================================================
+
+>>> OVERALL SUMMARY (300 SCENARIOS)
+Metric                       | Learned (run_01_potential_dwell_baseline) | Kinematic (Tuned PID)  | Delta       
+------------------------------------------------------------------------------------------
+1.0s Catch Rate (%)          | 0.33                   | 63.00                  | -62.67     
+3.0s Catch Rate (%)          | 0.00                   | 40.33                  | -40.33     
+Mean Max Dwell (s)           | 0.06                   | 2.86                   | -2.80      
+FOV Retention (%)            | 9.84                   | 60.52                  | -50.69     
+Collision Rate (%)           | 0.00                   | 0.33                   | -0.33      
+Mean Min Dist (m)            | 5.85                   | 2.78                   | +3.07       
+
+>>> PROFILE BREAKDOWN
+
+--- Profile: CRUISING (100 scenarios) ---
+Metric                       | Learned (run_01_potential_dwell_baseline) | Kinematic (Tuned PID)  | Delta       
+------------------------------------------------------------------------------------------
+1.0s Catch Rate (%)          | 1.00                   | 76.00                  | -75.00     
+3.0s Catch Rate (%)          | 0.00                   | 64.00                  | -64.00     
+Mean Max Dwell (s)           | 0.11                   | 4.44                   | -4.33      
+FOV Retention (%)            | 8.65                   | 71.54                  | -62.89     
+
+--- Profile: EVASIVE (100 scenarios) ---
+Metric                       | Learned (run_01_potential_dwell_baseline) | Kinematic (Tuned PID)  | Delta       
+------------------------------------------------------------------------------------------
+1.0s Catch Rate (%)          | 0.00                   | 71.00                  | -71.00     
+3.0s Catch Rate (%)          | 0.00                   | 45.00                  | -45.00     
+Mean Max Dwell (s)           | 0.03                   | 2.98                   | -2.95      
+FOV Retention (%)            | 8.67                   | 65.01                  | -56.33     
+
+--- Profile: HYPER_EVASIVE (100 scenarios) ---
+Metric                       | Learned (run_01_potential_dwell_baseline) | Kinematic (Tuned PID)  | Delta       
+------------------------------------------------------------------------------------------
+1.0s Catch Rate (%)          | 0.00                   | 42.00                  | -42.00     
+3.0s Catch Rate (%)          | 0.00                   | 12.00                  | -12.00     
+Mean Max Dwell (s)           | 0.04                   | 1.15                   | -1.11      
+FOV Retention (%)            | 12.19                  | 45.02                  | -32.83     
+
+>>> ENCOUNTER TRAJECTORY BREAKDOWN
+Trajectory       | RL 1s Catch  | PID 1s Catch | RL FOV     | PID FOV    | RL Dwell   | PID Dwell 
+------------------------------------------------------------------------------------------
+crossing_left    |        0.0% |       65.0% |      9.1% |     61.6% |     0.03s |     3.14s
+crossing_right   |        1.7% |       68.3% |     11.1% |     62.8% |     0.13s |     2.87s
+head_on          |        0.0% |       21.7% |      7.7% |     22.2% |     0.10s |     1.04s
+oblique_away     |        0.0% |       80.0% |     10.5% |     75.9% |     0.03s |     3.56s
+tail_chase       |        0.0% |       80.0% |     10.9% |     80.1% |     0.02s |     3.68s
