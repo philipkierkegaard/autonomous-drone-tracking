@@ -315,8 +315,9 @@ def render_pid_bright_video(
     # Copy to artifacts directory if available
     if ARTIFACT_DIR.exists():
         dest = ARTIFACT_DIR / output_path.name
-        shutil.copy(output_path, dest)
-        print(f"[ARTIFACT] Copied video to artifact directory: {dest}")
+        if output_path.resolve() != dest.resolve():
+            shutil.copy(output_path, dest)
+            print(f"[ARTIFACT] Copied video to artifact directory: {dest}")
 
     return str(output_path)
 

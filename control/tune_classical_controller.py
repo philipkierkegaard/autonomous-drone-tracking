@@ -23,10 +23,11 @@ import time
 import json
 import argparse
 from pathlib import Path
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List, Tuple, Optional, Union
 import multiprocessing as mp
 import numpy as np
 from scipy.optimize import differential_evolution, minimize
+from scipy.stats.qmc import LatinHypercube, scale
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -471,77 +472,133 @@ def evaluate_candidate(
     return float(np.mean(costs))
 
 
+PARAM_KEYS = [
+    "kp_forward", "ki_forward", "kd_forward", "max_decel",
+    "centering_damping", "min_centering_factor",
+    "kp_lat", "ki_lat", "kd_lat",
+    "kp_z", "ki_z", "kd_z",
+    "kp_yaw", "ki_yaw", "kd_yaw"
+]
+
+DEFAULT_BOUNDS = [
+    (0.2, 3.5),     # 0: kp_fwd (forward proportional gain)
+    (0.0, 0.80),    # 1: ki_fwd (forward integral gain)
+    (0.05, 0.60),   # 2: kd_fwd (forward derivative closing velocity damping)
+    (1.5, 4.5),     # 3: max_decel (m/s² braking limit to prevent pitch-up blinding)
+    (0.10, 1.20),   # 4: centering_damp (cornering deceleration factor per unit |e_x|)
+    (0.20, 0.75),   # 5: min_centering_factor (speed retention floor during sharp turns)
+    (0.5, 4.5),     # 6: kp_lat (lateral proportional gain)
+    (0.0, 0.80),    # 7: ki_lat (lateral integral gain)
+    (0.05, 1.2),    # 8: kd_lat (lateral derivative gain)
+    (2.0, 9.0),     # 9: kp_z (vertical proportional gain)
+    (0.0, 1.50),    # 10: ki_z (vertical integral gain)
+    (0.2, 2.5),     # 11: kd_z (vertical derivative gain)
+    (120.0, 320.0), # 12: kp_yaw (yaw proportional gain)
+    (0.0, 35.0),    # 13: ki_yaw (yaw integral gain)
+    (5.0, 75.0),    # 14: kd_yaw (yaw derivative gain)
+]
+
+BASELINE_PARAMS = np.array([
+    1.2,    # kp_fwd
+    0.35,   # ki_fwd
+    0.20,   # kd_fwd
+    3.0,    # max_decel
+    0.70,   # centering_damp
+    0.35,   # min_centering_factor
+    2.0,    # kp_lat
+    0.15,   # ki_lat
+    0.40,   # kd_lat
+    6.0,    # kp_z
+    0.20,   # ki_z
+    1.0,    # kd_z
+    200.0,  # kp_yaw
+    5.0,    # ki_yaw
+    35.0,   # kd_yaw
+], dtype=np.float64)
+
+
 def run_tuning_optimization(
     scenarios: List[Dict[str, Any]],
     output_weights_path: Path,
+    init_weights_path: Optional[Path] = None,
     lambda_image: float = 15.0,
-    workers: int = 8,
-    popsize: int = 3,
-    maxiter: int = 10
+    workers: int = 10,
+    popsize: int = 2,
+    maxiter: int = 8
 ) -> Dict[str, Any]:
-    """Runs global differential evolution followed by Nelder-Mead polishing under realistic observations."""
+    """Runs global differential evolution followed by L-BFGS-B polishing under realistic observations and attitude dynamics."""
     global _GLOBAL_POOL
     if workers > 1:
         ctx = mp.get_context("fork")
         _GLOBAL_POOL = ctx.Pool(workers)
         print(f"[TUNING] Initialized parallel worker pool with {workers} cores.")
     
-    # 15 Tunable Parameters: [kp_fwd, ki_fwd, kd_fwd, max_decel, centering_damp, min_centering_factor,
-    #                         kp_lat, ki_lat, kd_lat, kp_z, ki_z, kd_z, kp_yaw, ki_yaw, kd_yaw]
-    # Note: 0.0 is explicitly a valid lower bound for all integral gains.
-    bounds = [
-        (0.5, 3.5),     # 0: kp_fwd (forward proportional gain)
-        (0.0, 0.80),    # 1: ki_fwd (forward integral gain, 0 is valid!)
-        (0.05, 0.40),   # 2: kd_fwd (forward derivative closing velocity damping)
-        (2.0, 4.5),     # 3: max_decel (m/s² braking limit to prevent pitch-up blinding)
-        (0.10, 1.20),   # 4: centering_damp (cornering deceleration factor per unit |e_x|)
-        (0.20, 0.75),   # 5: min_centering_factor (speed retention floor during sharp turns)
-        (0.5, 4.0),     # 6: kp_lat (lateral proportional gain)
-        (0.0, 0.80),    # 7: ki_lat (lateral integral gain, 0 is valid!)
-        (0.05, 1.0),    # 8: kd_lat (lateral derivative gain)
-        (3.0, 9.0),     # 9: kp_z (vertical proportional gain)
-        (0.0, 1.50),    # 10: ki_z (vertical integral gain, 0 is valid!)
-        (0.3, 2.5),     # 11: kd_z (vertical derivative gain)
-        (120.0, 320.0), # 12: kp_yaw (yaw proportional gain)
-        (0.0, 35.0),    # 13: ki_yaw (yaw integral gain, 0 is valid!)
-        (10.0, 65.0),   # 14: kd_yaw (yaw derivative gain)
-    ]
+    bounds = DEFAULT_BOUNDS
+    lower_b = np.array([b[0] for b in bounds])
+    upper_b = np.array([b[1] for b in bounds])
+    baseline_params = BASELINE_PARAMS.copy()
+    param_keys = PARAM_KEYS
 
-    baseline_params = np.array([
-        1.2,    # kp_fwd
-        0.35,   # ki_fwd
-        0.20,   # kd_fwd
-        3.0,    # max_decel
-        0.70,   # centering_damp
-        0.35,   # min_centering_factor
-        2.0,    # kp_lat
-        0.15,   # ki_lat
-        0.40,   # kd_lat
-        6.0,    # kp_z
-        0.20,   # ki_z
-        1.0,    # kd_z
-        200.0,  # kp_yaw
-        5.0,    # ki_yaw
-        35.0,   # kd_yaw
-    ], dtype=np.float64)
+    # Check for existing tuned weights to seed population
+    prev_tuned_params = None
+    p_init = None
+    if init_weights_path is not None and Path(init_weights_path).exists():
+        p_init = Path(init_weights_path)
+    elif output_weights_path.exists():
+        p_init = output_weights_path
+
+    if p_init is not None and p_init.exists():
+        try:
+            with open(p_init, "r", encoding="utf-8") as f:
+                d_init = json.load(f)
+            t_params = d_init.get("tuned_parameters", d_init)
+            prev_tuned_params = np.array([float(t_params[k]) for k in param_keys], dtype=np.float64)
+            prev_tuned_params = np.clip(prev_tuned_params, lower_b, upper_b)
+            print(f"[TUNING] Loaded previous tuned gains from: {p_init}")
+        except Exception as e:
+            print(f"[WARN] Failed to load previous tuned weights from {p_init}: {e}")
+
     print(f"\n[EVAL] Evaluating baseline parameters on realistic observation suite ({len(scenarios)} scenarios):")
-    print(f"       Gains: {baseline_params.round(3)}...")
+    print(f"       Baseline Gains: {baseline_params.round(3)}...")
     t0 = time.time()
     baseline_cost = evaluate_candidate(baseline_params, scenarios, lambda_image=lambda_image)
     print(f"       Baseline Mean Cost: {baseline_cost:.4f} (evaluated in {time.time()-t0:.2f}s)")
 
-    print(f"\n[OPTIM] Launching Differential Evolution Global Optimization (popsize={popsize}, maxiter={maxiter})...")
+    prev_cost = None
+    if prev_tuned_params is not None:
+        t0 = time.time()
+        prev_cost = evaluate_candidate(prev_tuned_params, scenarios, lambda_image=lambda_image)
+        print(f"       Previous Tuned Mean Cost: {prev_cost:.4f} (evaluated in {time.time()-t0:.2f}s)")
+
+    # Construct initial population array
+    total_pop = max(len(bounds) * popsize, 30)
+    rng = np.random.default_rng(42)
+    init_pop = rng.uniform(lower_b, upper_b, size=(total_pop, len(bounds)))
+    init_pop[0] = baseline_params
+    if prev_tuned_params is not None:
+        init_pop[1] = prev_tuned_params
+        for idx in range(2, min(16, total_pop)):
+            noise_scale = 0.05 * (idx - 1)
+            perturbed = prev_tuned_params * (1.0 + rng.normal(0.0, noise_scale, size=len(bounds)))
+            init_pop[idx] = np.clip(perturbed, lower_b, upper_b)
+    else:
+        for idx in range(1, min(10, total_pop)):
+            noise_scale = 0.05 * idx
+            perturbed = baseline_params * (1.0 + rng.normal(0.0, noise_scale, size=len(bounds)))
+            init_pop[idx] = np.clip(perturbed, lower_b, upper_b)
+
+    print(f"\n[OPTIM] Launching Differential Evolution Global Optimization (pop_size={total_pop}, maxiter={maxiter})...")
     t_start = time.time()
     
     eval_counter = [0]
-    best_seen = [baseline_cost]
+    best_seen = [min(baseline_cost, prev_cost if prev_cost is not None else float("inf"))]
 
     def callback_fn(xk, convergence=None):
         cost = evaluate_candidate(xk, scenarios, lambda_image=lambda_image)
         if cost < best_seen[0]:
             best_seen[0] = cost
         eval_counter[0] += 1
-        print(f"  DE Gen {eval_counter[0]:2d} | Best Cost: {best_seen[0]:.4f} | Current Gen Best: {cost:.4f}", flush=True)
+        print(f"  DE Gen {eval_counter[0]:2d} | Best Cost: {best_seen[0]:.4f} | Current Gen Candidate: {cost:.4f}", flush=True)
 
     de_res = differential_evolution(
         func=evaluate_candidate,
@@ -549,8 +606,8 @@ def run_tuning_optimization(
         args=(scenarios, lambda_image),
         strategy="best1bin",
         maxiter=maxiter,
-        popsize=popsize,
-        tol=0.01,
+        init=init_pop,
+        tol=0.005,
         mutation=(0.5, 1.0),
         recombination=0.7,
         seed=42,
@@ -594,64 +651,208 @@ def run_tuning_optimization(
         opt_cost = de_cost
 
     elapsed = time.time() - t_start
-    ref_cost = baseline_cost
+    ref_cost = prev_cost if prev_cost is not None else baseline_cost
     pct_gain = (ref_cost - opt_cost) / ref_cost * 100.0
 
     print(f"[OPTIM] Optimization finished in {elapsed:.1f}s.")
     print(f"        Tuned Parameters:   {opt_params.round(3)}")
-    print(f"        Final Tuned Cost:   {opt_cost:.4f} (Baseline: {baseline_cost:.4f}, Improvement: {pct_gain:+.1f}%)")
+    print(f"        Final Tuned Cost:   {opt_cost:.4f} (Prior Best: {ref_cost:.4f}, Improvement: {pct_gain:+.1f}%)")
 
-    tuned_dict = {
-        "kp_forward": float(opt_params[0]),
-        "ki_forward": float(opt_params[1]),
-        "kd_forward": float(opt_params[2]),
-        "max_decel": float(opt_params[3]),
-        "centering_damping": float(opt_params[4]),
-        "min_centering_factor": float(opt_params[5]),
-        "kp_lat": float(opt_params[6]),
-        "ki_lat": float(opt_params[7]),
-        "kd_lat": float(opt_params[8]),
-        "kp_z": float(opt_params[9]),
-        "ki_z": float(opt_params[10]),
-        "kd_z": float(opt_params[11]),
-        "kp_yaw": float(opt_params[12]),
-        "ki_yaw": float(opt_params[13]),
-        "kd_yaw": float(opt_params[14]),
-    }
-    baseline_dict = {
-        "kp_forward": float(baseline_params[0]),
-        "ki_forward": float(baseline_params[1]),
-        "kd_forward": float(baseline_params[2]),
-        "max_decel": float(baseline_params[3]),
-        "centering_damping": float(baseline_params[4]),
-        "min_centering_factor": float(baseline_params[5]),
-        "kp_lat": float(baseline_params[6]),
-        "ki_lat": float(baseline_params[7]),
-        "kd_lat": float(baseline_params[8]),
-        "kp_z": float(baseline_params[9]),
-        "ki_z": float(baseline_params[10]),
-        "kd_z": float(baseline_params[11]),
-        "kp_yaw": float(baseline_params[12]),
-        "ki_yaw": float(baseline_params[13]),
-        "kd_yaw": float(baseline_params[14]),
-    }
+    tuned_dict = {k: float(opt_params[i]) for i, k in enumerate(param_keys)}
+    baseline_dict = {k: float(baseline_params[i]) for i, k in enumerate(param_keys)}
 
     results = {
         "status": "SUCCESS",
         "optimization_time_s": round(elapsed, 1),
         "lambda_image": lambda_image,
         "num_scenarios": len(scenarios),
+        "attitude_dynamics": {
+            "tau_att_s": 0.035,
+            "max_tilt_rate_deg_s": 250.0
+        },
         "baseline_cost": round(baseline_cost, 4),
+        "previous_tuned_cost": round(prev_cost, 4) if prev_cost is not None else None,
         "tuned_cost": round(opt_cost, 4),
         "cost_reduction_pct": round(pct_gain, 2),
         "baseline_parameters": baseline_dict,
         "tuned_parameters": tuned_dict,
     }
+    if prev_tuned_params is not None:
+        results["previous_tuned_parameters"] = {k: float(prev_tuned_params[i]) for i, k in enumerate(param_keys)}
 
     output_weights_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_weights_path, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2)
-    print(f"[SAVE] Exported realistic tuned PID gains to: {output_weights_path}")
+    print(f"[SAVE] Exported retuned PID gains to: {output_weights_path}")
+
+    if _GLOBAL_POOL is not None:
+        _GLOBAL_POOL.close()
+        _GLOBAL_POOL.join()
+        _GLOBAL_POOL = None
+
+    return results
+
+
+def run_random_search_optimization(
+    scenarios: List[Dict[str, Any]],
+    output_weights_path: Path,
+    n_global: int = 300,
+    n_local: int = 300,
+    elite_k: int = 3,
+    lambda_image: float = 15.0,
+    workers: int = 10,
+    seed: int = 42,
+) -> Dict[str, Any]:
+    """
+    Two-Stage Coarse-to-Fine Latin Hypercube Random Search (Bergstra & Bengio, 2012 / Solis & Wets, 1981):
+      - Stage 1: Global Latin Hypercube Sampling (LHS) across the 15D parameter envelope.
+      - Stage 2: Local exploitation sampling centered around the top elite candidate basins.
+    """
+    global _GLOBAL_POOL
+    if workers > 1:
+        ctx = mp.get_context("fork")
+        _GLOBAL_POOL = ctx.Pool(workers)
+        print(f"[RANDOM-SEARCH] Initialized parallel worker pool with {workers} cores.")
+
+    bounds = DEFAULT_BOUNDS
+    lower_b = np.array([b[0] for b in bounds])
+    upper_b = np.array([b[1] for b in bounds])
+    ranges = upper_b - lower_b
+    baseline_params = BASELINE_PARAMS.copy()
+    param_keys = PARAM_KEYS
+
+    print(f"\n[EVAL] Evaluating baseline parameters on realistic observation suite ({len(scenarios)} scenarios):")
+    t0 = time.time()
+    baseline_cost = evaluate_candidate(baseline_params, scenarios, lambda_image=lambda_image)
+    print(f"       Baseline Mean Cost: {baseline_cost:.4f} (evaluated in {time.time()-t0:.2f}s)")
+
+    best_cost = baseline_cost
+    best_params = baseline_params.copy()
+    best_trial_overall = 0
+    history = []
+
+    t_start = time.time()
+
+    # -------------------------------------------------------------
+    # STAGE 1: Global Latin Hypercube Sampling (LHS)
+    # -------------------------------------------------------------
+    print(f"\n[STAGE 1/2: GLOBAL LHS] Generating {n_global} stratified samples across 15D parameter space (seed={seed})...")
+    lhs_sampler = LatinHypercube(d=len(bounds), seed=seed)
+    unit_samples = lhs_sampler.random(n=n_global)
+    global_candidates = scale(unit_samples, lower_b, upper_b)
+
+    stage1_results = []
+    for i in range(n_global):
+        cand = global_candidates[i]
+        cost = evaluate_candidate(cand, scenarios, lambda_image=lambda_image)
+        stage1_results.append((cost, cand.copy(), i + 1))
+
+        if cost < best_cost:
+            improvement = (best_cost - cost) / best_cost * 100.0 if best_cost < 1e5 else 0.0
+            best_cost = cost
+            best_params = cand.copy()
+            best_trial_overall = i + 1
+            print(f"  [★ STAGE 1 NEW BEST] Trial {i+1:3d}/{n_global} | Cost: {best_cost:.4f} | Improvement: {improvement:+.1f}% | Lat kp={cand[6]:.2f}, kd={cand[8]:.2f}", flush=True)
+        elif (i + 1) % 50 == 0 or (i + 1) == n_global:
+            elapsed_now = time.time() - t_start
+            rate = (i + 1) / elapsed_now
+            print(f"  Stage 1 Trial {i+1:3d}/{n_global} | Best So Far: {best_cost:.4f} | Rate: {rate:.2f} trials/s", flush=True)
+
+        history.append({
+            "stage": 1,
+            "trial": i + 1,
+            "cost": float(cost),
+            "best_cost_so_far": float(best_cost)
+        })
+
+    stage1_elapsed = time.time() - t_start
+    stage1_best_cost = best_cost
+    print(f"[STAGE 1 COMPLETE] {n_global} LHS trials in {stage1_elapsed:.1f}s. Stage 1 Best Cost: {stage1_best_cost:.4f}")
+
+    # Extract top elite candidates from Stage 1
+    stage1_results.sort(key=lambda x: x[0])
+    elite_pool = [x[1] for x in stage1_results[:elite_k]]
+    print(f"[ELITE POOL] Selected top {elite_k} candidate basins for Stage 2 refinement (Costs: {[round(x[0], 2) for x in stage1_results[:elite_k]]}).")
+
+    # -------------------------------------------------------------
+    # STAGE 2: Local Exploitation (Random Perturbations around Elites)
+    # -------------------------------------------------------------
+    print(f"\n[STAGE 2/2: LOCAL EXPLOITATION] Generating {n_local} localized perturbations around top {elite_k} elite basins...")
+    rng_local = np.random.default_rng(seed + 100)
+    stage2_t0 = time.time()
+
+    for j in range(n_local):
+        overall_idx = n_global + j + 1
+        # Pick an elite candidate to perturb (weighted toward rank 1)
+        elite_idx = int(rng_local.choice(len(elite_pool), p=[0.55, 0.30, 0.15] if len(elite_pool) >= 3 else None))
+        elite_center = elite_pool[elite_idx]
+
+        # Multi-scale perturbation: 50% fine (10% range) and 50% medium (20% range)
+        scale_factor = 0.10 if (j % 2 == 0) else 0.20
+        delta = rng_local.normal(0.0, scale_factor * ranges, size=len(bounds))
+        cand = np.clip(elite_center + delta, lower_b, upper_b)
+
+        cost = evaluate_candidate(cand, scenarios, lambda_image=lambda_image)
+
+        if cost < best_cost:
+            improvement = (best_cost - cost) / best_cost * 100.0 if best_cost < 1e5 else 0.0
+            best_cost = cost
+            best_params = cand.copy()
+            best_trial_overall = overall_idx
+            print(f"  [★ STAGE 2 NEW BEST] Trial {j+1:3d}/{n_local} (Overall #{overall_idx}) | Cost: {best_cost:.4f} | Improvement: {improvement:+.1f}% | Lat kp={cand[6]:.2f}, kd={cand[8]:.2f}", flush=True)
+        elif (j + 1) % 50 == 0 or (j + 1) == n_local:
+            elapsed_now = time.time() - stage2_t0
+            rate = (j + 1) / elapsed_now
+            print(f"  Stage 2 Trial {j+1:3d}/{n_local} | Best So Far: {best_cost:.4f} | Rate: {rate:.2f} trials/s", flush=True)
+
+        history.append({
+            "stage": 2,
+            "trial": overall_idx,
+            "cost": float(cost),
+            "best_cost_so_far": float(best_cost)
+        })
+
+    total_elapsed = time.time() - t_start
+    total_trials = n_global + n_local
+    pct_gain = (baseline_cost - best_cost) / baseline_cost * 100.0
+
+    print(f"\n[RANDOM-SEARCH COMPLETE] {total_trials} total trials in {total_elapsed:.1f}s ({total_elapsed/total_trials:.2f}s/trial).")
+    print(f"                         Stage 1 Best: {stage1_best_cost:.4f} ──► Stage 2 Final Best: {best_cost:.4f}")
+    print(f"                         Baseline Cost: {baseline_cost:.4f} | Total Improvement: {pct_gain:+.1f}%")
+    print(f"                         Winning Trial: #{best_trial_overall}")
+    print(f"                         Best Parameters: {best_params.round(3)}")
+
+    tuned_dict = {k: float(best_params[i]) for i, k in enumerate(param_keys)}
+    baseline_dict = {k: float(baseline_params[i]) for i, k in enumerate(param_keys)}
+
+    results = {
+        "status": "SUCCESS",
+        "method": "TWO_STAGE_LATIN_HYPERCUBE_RANDOM_SEARCH",
+        "seed": seed,
+        "n_global": n_global,
+        "n_local": n_local,
+        "total_trials": total_trials,
+        "best_trial_overall": best_trial_overall,
+        "stage1_best_cost": round(stage1_best_cost, 4),
+        "final_tuned_cost": round(best_cost, 4),
+        "optimization_time_s": round(total_elapsed, 1),
+        "lambda_image": lambda_image,
+        "num_scenarios": len(scenarios),
+        "attitude_dynamics": {
+            "tau_att_s": 0.035,
+            "max_tilt_rate_deg_s": 250.0
+        },
+        "baseline_cost": round(baseline_cost, 4),
+        "cost_reduction_pct": round(pct_gain, 2),
+        "baseline_parameters": baseline_dict,
+        "tuned_parameters": tuned_dict,
+        "history": history
+    }
+
+    output_weights_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_weights_path, "w", encoding="utf-8") as f:
+        json.dump(results, f, indent=2)
+    print(f"[SAVE] Exported Two-Stage Random Search PID gains to: {output_weights_path}")
 
     if _GLOBAL_POOL is not None:
         _GLOBAL_POOL.close()
@@ -663,11 +864,12 @@ def run_tuning_optimization(
 
 def validate_on_held_out(
     val_suite_path: Path,
-    baseline_params: np.ndarray,
-    tuned_params: np.ndarray,
+    candidates: Union[Dict[str, np.ndarray], np.ndarray],
+    tuned_params: Optional[np.ndarray] = None,
+    prev_params: Optional[np.ndarray] = None,
     lambda_image: float = 15.0
 ):
-    """Directly compares baseline vs realistic tuned PID on the independent 30-scenario validation suite."""
+    """Directly compares candidate controllers on the independent 30-scenario validation suite."""
     if not val_suite_path.exists():
         print(f"[WARN] Validation suite not found at {val_suite_path}")
         return
@@ -677,69 +879,125 @@ def validate_on_held_out(
         val_data = json.load(f)
     scenarios = val_data["scenarios"]
 
-    b_res = [simulate_scenario(s, baseline_params, lambda_image=lambda_image) for s in scenarios]
-    t_res = [simulate_scenario(s, tuned_params, lambda_image=lambda_image) for s in scenarios]
+    # Adapt backward-compatible positional call if dictionary was not passed directly
+    if isinstance(candidates, dict):
+        cand_dict = candidates
+    else:
+        cand_dict = {"BASELINE PID": candidates}
+        if tuned_params is not None:
+            cand_dict["RETUNED PID"] = tuned_params
+        if prev_params is not None:
+            cand_dict["PREV TUNED"] = prev_params
 
-    print("\n" + "="*80)
-    print(f"{'METRIC':<30} | {'BASELINE PID':<18} | {'TUNED PID':<18} | {'DELTA':<10}")
-    print("="*80)
-    
-    b_fov = np.mean([r["in_view_pct"] for r in b_res])
-    t_fov = np.mean([r["in_view_pct"] for r in t_res])
-    print(f"{'Camera In-View (% FOV)':<30} | {b_fov:15.1f}% | {t_fov:15.1f}% | {t_fov - b_fov:+5.1f}%")
+    results_map = {}
+    for name, params in cand_dict.items():
+        if params is None:
+            continue
+        res_list = [simulate_scenario(s, params, lambda_image=lambda_image) for s in scenarios]
+        dwell_s = [r["max_dwell_s"] for r in res_list]
+        results_map[name] = {
+            "fov": float(np.mean([r["in_view_pct"] for r in res_list])),
+            "standoff_rmse": float(np.mean([np.sqrt(r["mean_standoff_err_m2"]) for r in res_list])),
+            "image_err": float(np.mean([r["mean_image_err"] for r in res_list])),
+            "dwell": float(np.mean(dwell_s)),
+            "catch_1s_pct": float(np.mean([d >= 1.0 for d in dwell_s]) * 100.0),
+            "dwell_3s_pct": float(np.mean([d >= 3.0 for d in dwell_s]) * 100.0),
+            "final_dist": float(np.mean([r["final_dist"] for r in res_list]))
+        }
 
-    b_standoff = np.mean([np.sqrt(r["mean_standoff_err_m2"]) for r in b_res])
-    t_standoff = np.mean([np.sqrt(r["mean_standoff_err_m2"]) for r in t_res])
-    print(f"{'RMSE Standoff Dist (m)':<30} | {b_standoff:15.2f}m | {t_standoff:15.2f}m | {t_standoff - b_standoff:+5.2f}m")
+    names = list(results_map.keys())
+    col_w = max(20, max(len(n) for n in names) + 2)
+    header = f"{'METRIC':<30} | " + " | ".join(f"{n:^{col_w}}" for n in names)
+    sep = "=" * len(header)
 
-    b_image = np.mean([r["mean_image_err"] for r in b_res])
-    t_image = np.mean([r["mean_image_err"] for r in t_res])
-    print(f"{'Mean Image Plane Error (e^2)':<30} | {b_image:15.4f}  | {t_image:15.4f}  | {t_image - b_image:+5.4f}")
+    print("\n" + sep)
+    print(header)
+    print(sep)
 
-    b_dwell = np.mean([r["max_dwell_s"] for r in b_res])
-    t_dwell = np.mean([r["max_dwell_s"] for r in t_res])
-    print(f"{'Mean Max Catch Dwell (s)':<30} | {b_dwell:15.2f}s | {t_dwell:15.2f}s | {t_dwell - b_dwell:+5.2f}s")
+    metrics = [
+        ("Camera In-View (% FOV)", "fov", "{:16.1f}%"),
+        ("1.0s Basket Catch Rate (%)", "catch_1s_pct", "{:16.1f}%"),
+        ("3.0s Continuous Dwell Rate", "dwell_3s_pct", "{:16.1f}%"),
+        ("Mean Max Catch Dwell (s)", "dwell", "{:16.2f}s"),
+        ("RMSE Standoff Dist (m)", "standoff_rmse", "{:16.2f}m"),
+        ("Mean Image Plane Error (e^2)", "image_err", "{:16.4f} "),
+        ("Mean Final Distance (m)", "final_dist", "{:16.2f}m")
+    ]
 
-    b_final = np.mean([r["final_dist"] for r in b_res])
-    t_final = np.mean([r["final_dist"] for r in t_res])
-    print(f"{'Mean Final Distance (m)':<30} | {b_final:15.2f}m | {t_final:15.2f}m | {t_final - b_final:+5.2f}m")
-    print("="*80 + "\n")
+    for label, key, fmt in metrics:
+        row = f"{label:<30} | " + " | ".join(f"{fmt.format(results_map[n][key]):^{col_w}}" for n in names)
+        print(row)
+    print(sep + "\n")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Tune Kinematic Controller Under Realistic Observations")
+    parser = argparse.ArgumentParser(description="Tune Kinematic Controller Under Realistic Observations & Attitude Dynamics")
+    parser.add_argument("--method", type=str, default="de", choices=["de", "random"], help="Optimization algorithm: 'de' (Differential Evolution) or 'random' (Two-Stage Latin Hypercube Random Search)")
     parser.add_argument("--suite", type=str, default="outputs/benchmarks/datasets/pid_realistic_tuning_suite_80.json")
     parser.add_argument("--val-suite", type=str, default="outputs/benchmarks/datasets/validation_suite_30.json")
-    parser.add_argument("--out", type=str, default="control/weights/tuned_pid_gains.json")
+    parser.add_argument("--out", type=str, default=None, help="Output weights JSON path (defaults based on method)")
+    parser.add_argument("--init-weights", type=str, default="control/weights/tuned_pid_gains_pre_attitude_dynamics.json")
     parser.add_argument("--lambda-image", type=float, default=15.0, help="Weight for image plane error vs standoff error")
     parser.add_argument("--workers", type=int, default=10, help="Number of parallel CPU workers")
-    parser.add_argument("--popsize", type=int, default=3, help="Differential evolution population size factor")
-    parser.add_argument("--maxiter", type=int, default=10, help="Maximum differential evolution generations")
+    parser.add_argument("--popsize", type=int, default=2, help="Differential evolution population size factor (e.g. 2 -> 30 candidates)")
+    parser.add_argument("--maxiter", type=int, default=8, help="Maximum differential evolution generations")
+    parser.add_argument("--n-global", type=int, default=300, help="Stage 1 Latin Hypercube global trials (default: 300)")
+    parser.add_argument("--n-local", type=int, default=300, help="Stage 2 localized perturbation trials (default: 300)")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed")
     args = parser.parse_args()
 
     suite_scenarios = create_tuning_suite(Path(args.suite))
-    res = run_tuning_optimization(
-        scenarios=suite_scenarios,
-        output_weights_path=Path(args.out),
-        lambda_image=args.lambda_image,
-        workers=args.workers,
-        popsize=args.popsize,
-        maxiter=args.maxiter
-    )
 
-    param_keys = [
-        "kp_forward", "ki_forward", "kd_forward", "max_decel",
-        "centering_damping", "min_centering_factor",
-        "kp_lat", "ki_lat", "kd_lat",
-        "kp_z", "ki_z", "kd_z",
-        "kp_yaw", "ki_yaw", "kd_yaw"
-    ]
-    baseline_vec = np.array([res["baseline_parameters"][k] for k in param_keys])
-    tuned_vec = np.array([res["tuned_parameters"][k] for k in param_keys])
+    if args.method == "random":
+        out_path = Path(args.out) if args.out else Path("control/weights/tuned_pid_gains_random_search.json")
+        res = run_random_search_optimization(
+            scenarios=suite_scenarios,
+            output_weights_path=out_path,
+            n_global=args.n_global,
+            n_local=args.n_local,
+            lambda_image=args.lambda_image,
+            workers=args.workers,
+            seed=args.seed
+        )
+    else:
+        out_path = Path(args.out) if args.out else Path("control/weights/tuned_pid_gains.json")
+        res = run_tuning_optimization(
+            scenarios=suite_scenarios,
+            output_weights_path=out_path,
+            init_weights_path=Path(args.init_weights) if args.init_weights else None,
+            lambda_image=args.lambda_image,
+            workers=args.workers,
+            popsize=args.popsize,
+            maxiter=args.maxiter
+        )
+
+    # Prepare candidate vectors for validation comparison
+    baseline_vec = np.array([res["baseline_parameters"][k] for k in PARAM_KEYS])
+    tuned_vec = np.array([res["tuned_parameters"][k] for k in PARAM_KEYS])
+
+    comparison_dict = {
+        "BASELINE PID": baseline_vec,
+    }
+
+    if args.method == "random":
+        comparison_dict["2-STAGE RANDOM"] = tuned_vec
+        # Also load DE-tuned weights if available for side-by-side comparison
+        de_weights_path = Path("control/weights/tuned_pid_gains.json")
+        if de_weights_path.exists():
+            try:
+                with open(de_weights_path, "r", encoding="utf-8") as f:
+                    de_data = json.load(f)
+                de_params = de_data.get("tuned_parameters", de_data)
+                comparison_dict["DE RETUNED"] = np.array([float(de_params[k]) for k in PARAM_KEYS])
+            except Exception as e:
+                print(f"[WARN] Could not load DE weights for comparison: {e}")
+    else:
+        comparison_dict["DE RETUNED"] = tuned_vec
+        if "previous_tuned_parameters" in res:
+            comparison_dict["PREV TUNED"] = np.array([res["previous_tuned_parameters"][k] for k in PARAM_KEYS])
 
     validate_on_held_out(
         val_suite_path=Path(args.val_suite),
-        baseline_params=baseline_vec,
-        tuned_params=tuned_vec,
+        candidates=comparison_dict,
         lambda_image=args.lambda_image
     )

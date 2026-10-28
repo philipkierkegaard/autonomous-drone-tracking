@@ -337,7 +337,7 @@ def train_residual_ppo(
     task_eval_callback = ResidualTaskMetricEvalCallback(
         eval_env=eval_env,
         validation_dataset=val_dataset,
-        eval_freq=eval_freq,
+        eval_freq=max(100, eval_freq // n_envs),
         best_model_save_path=output_dir / "best_model",
         log_path=output_dir / "eval_results",
         verbose=1

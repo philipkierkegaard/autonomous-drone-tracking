@@ -11,6 +11,8 @@ class FastPixhawkQuadSim:
         max_vel_down=2.5,
         k_drag_lin=0.055,
         k_drag_quad=0.008,
+        tau_att=0.035,
+        max_tilt_rate=np.deg2rad(250.0),
     ):  # 50 Hz integration
         self.dt = dt
         
@@ -18,6 +20,10 @@ class FastPixhawkQuadSim:
         self.tau_v_horiz = 0.32   # Horizontal velocity response (smooth progressive ramp)
         self.tau_v_vert  = 0.22   # Vertical velocity response
         self.tau_yaw     = 0.15   # Yaw rate response
+        
+        # Physical attitude response time constant (35 ms calibrated from Flight 120 SysID)
+        self.tau_att     = float(tau_att)
+        self.max_tilt_rate = float(max_tilt_rate)  # 250 deg/s max angular tilt rate
         
         # Pipeline delay: 60 ms (Camera capture + YOLO + UART MAVLink)
         self.delay_steps = max(1, int(round(0.06 / dt)))
@@ -147,8 +153,29 @@ class FastPixhawkQuadSim:
         total_a_fwd = a_fwd + drag_fwd
         total_a_right = a_right + drag_right
 
-        self.pitch = np.arctan2(total_a_fwd, 9.81)
-        self.roll = np.arctan2(-total_a_right, 9.81)
+        # Target body tilt demanded from quadrotor rotors
+        target_pitch = np.arctan2(total_a_fwd, 9.81)
+        target_roll = np.arctan2(-total_a_right, 9.81)
+
+        # 1st-order physical rotational dynamics with angular rate saturation (calibrated from Flight 120 SysID)
+        if self.tau_att > 1e-4:
+            alpha_att = 1.0 - np.exp(-self.dt / self.tau_att)
+            d_pitch = np.clip(
+                alpha_att * (target_pitch - self.pitch),
+                -self.max_tilt_rate * self.dt,
+                self.max_tilt_rate * self.dt,
+            )
+            self.pitch += d_pitch
+
+            d_roll = np.clip(
+                alpha_att * (target_roll - self.roll),
+                -self.max_tilt_rate * self.dt,
+                self.max_tilt_rate * self.dt,
+            )
+            self.roll += d_roll
+        else:
+            self.pitch = target_pitch
+            self.roll = target_roll
 
         # Camera optical pitch relative to horizon (accounts for 15 deg mount up-tilt)
         # When drone pitches nose-down (self.pitch > 0), camera pitch becomes level

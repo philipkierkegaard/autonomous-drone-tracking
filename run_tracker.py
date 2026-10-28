@@ -17,6 +17,8 @@ import sys
 import time
 import math
 import bisect
+import json
+import queue
 import argparse
 import asyncio
 import threading
@@ -57,6 +59,45 @@ def build_jetson_csi_pipeline(
         f"videoconvert ! "
         f"video/x-raw, format=(string)BGR ! appsink drop=true sync=false"
     )
+
+
+class AsyncVideoWriter:
+    """Non-blocking background video writer using worker thread and bounded queue."""
+    def __init__(self, filename: str, fourcc: int, fps: float, frame_size: tuple, max_queue: int = 150):
+        self.filename = str(filename)
+        self.writer = cv2.VideoWriter(self.filename, fourcc, fps, frame_size)
+        self.queue = queue.Queue(maxsize=max_queue)
+        self.running = True
+        self.thread = threading.Thread(target=self._worker, name=f"AsyncWriter-{Path(self.filename).stem}", daemon=True)
+        self.thread.start()
+
+    def _worker(self):
+        while self.running or not self.queue.empty():
+            try:
+                frame = self.queue.get(timeout=0.05)
+                self.writer.write(frame)
+                self.queue.task_done()
+            except queue.Empty:
+                continue
+
+    def write(self, frame: np.ndarray):
+        if not self.running:
+            return
+        try:
+            self.queue.put_nowait(frame.copy())
+        except queue.Full:
+            # Overwrite/drop oldest frame if disk I/O stalls to preserve memory safety
+            try:
+                _ = self.queue.get_nowait()
+                self.queue.put_nowait(frame.copy())
+            except Exception:
+                pass
+
+    def release(self):
+        self.running = False
+        if self.thread.is_alive():
+            self.thread.join(timeout=3.5)
+        self.writer.release()
 
 
 def is_zero_yuv_green_frame(frame: np.ndarray) -> bool:
@@ -275,6 +316,35 @@ class AutonomousTrackerNode:
         if "coast_mode" in sig.parameters:
             ctrl_kwargs["coast_mode"] = getattr(args, "coast_mode", "decay")
 
+        # Load tuned PID gains from file if provided
+        pid_gains_path = getattr(args, "pid_gains", "control/weights/tuned_pid_gains.json")
+        if pid_gains_path and str(pid_gains_path).lower() != "none":
+            p_gains = Path(pid_gains_path)
+            if not p_gains.is_absolute():
+                p_gains = ROOT_DIR / p_gains
+            if p_gains.exists():
+                try:
+                    with open(p_gains, "r", encoding="utf-8") as f:
+                        g_data = json.load(f)
+                    p_map = g_data.get("tuned_parameters", g_data)
+                    for k in [
+                        "kp_forward", "ki_forward", "kd_forward", "max_decel",
+                        "centering_damping", "min_centering_factor",
+                        "kp_lat", "ki_lat", "kd_lat",
+                        "kp_z", "ki_z", "kd_z",
+                        "kp_yaw", "ki_yaw", "kd_yaw"
+                    ]:
+                        if k in p_map and k in sig.parameters:
+                            ctrl_kwargs[k] = float(p_map[k])
+                    print(f"[PID] Loaded tuned gains from {p_gains.name}: "
+                          f"Fwd(kp={ctrl_kwargs.get('kp_forward', 0):.3f}, ki={ctrl_kwargs.get('ki_forward', 0):.3f}, kd={ctrl_kwargs.get('kd_forward', 0):.3f}), "
+                          f"Lat(kp={ctrl_kwargs.get('kp_lat', 0):.3f}, ki={ctrl_kwargs.get('ki_lat', 0):.3f}, kd={ctrl_kwargs.get('kd_lat', 0):.3f}), "
+                          f"Z(kp={ctrl_kwargs.get('kp_z', 0):.3f}, ki={ctrl_kwargs.get('ki_z', 0):.3f}, kd={ctrl_kwargs.get('kd_z', 0):.3f}), "
+                          f"Yaw(kp={ctrl_kwargs.get('kp_yaw', 0):.1f}, ki={ctrl_kwargs.get('ki_yaw', 0):.2f}, kd={ctrl_kwargs.get('kd_yaw', 0):.1f}), "
+                          f"max_decel={ctrl_kwargs.get('max_decel', 0):.2f}")
+                except Exception as e:
+                    print(f"[WARN] Failed to load PID gains from {p_gains}: {e}")
+
         self.controller = KinematicVisualServoController(**ctrl_kwargs)
         if hasattr(self.controller, "deadband_dist"):
             self.controller.deadband_dist = deadband
@@ -330,8 +400,8 @@ class AutonomousTrackerNode:
         # 4. Video Recording Setup (HUD & Bounding Boxes + Optional Clean Raw Stream)
         self.record_path: Optional[Path] = None
         self.record_raw_path: Optional[Path] = None
-        self.video_writer: Optional[cv2.VideoWriter] = None
-        self.video_writer_raw: Optional[cv2.VideoWriter] = None
+        self.video_writer: Optional[Union[cv2.VideoWriter, AsyncVideoWriter]] = None
+        self.video_writer_raw: Optional[Union[cv2.VideoWriter, AsyncVideoWriter]] = None
         self.record_fps: float = float(getattr(args, "record_fps", 30.0))
 
         record_arg = getattr(args, "record", None)
@@ -1150,6 +1220,25 @@ class AutonomousTrackerNode:
                 self.perception_state.is_stale = False
                 self.perception_state.has_new_frame = True
 
+            # Direct non-blocking asynchronous video recording (guarantees zero dropped frames)
+            if self.record_path is not None:
+                if self.video_writer is None:
+                    h, w = annotated_frame.shape[:2]
+                    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                    self.video_writer = AsyncVideoWriter(str(self.record_path), fourcc, self.record_fps, (w, h))
+                    print(f"[RECORD] Async tracked video writer initialized: {self.record_path} ({w}x{h} @ {self.record_fps:.1f} FPS)")
+                cmd_safe = getattr(self, "latest_cmd_safe", np.zeros(3))
+                rec_frame = self.draw_flight_hud(annotated_frame, telemetry, cmd_safe, 1.0 / max(1.0, fps))
+                self.video_writer.write(rec_frame)
+
+            if self.record_raw_path is not None:
+                if self.video_writer_raw is None:
+                    rh, rw = clean_raw_frame.shape[:2]
+                    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                    self.video_writer_raw = AsyncVideoWriter(str(self.record_raw_path), fourcc, self.record_fps, (rw, rh))
+                    print(f"[RECORD-RAW] Async clean video writer initialized: {self.record_raw_path} ({rw}x{rh} @ {self.record_fps:.1f} FPS)")
+                self.video_writer_raw.write(clean_raw_frame)
+
             # Record dual-filter ablation telemetry if enabled
             if self.enable_ablation_log and self.ablation_csv_writer is not None:
                 if self.ablation_start_time is None:
@@ -1381,24 +1470,6 @@ class AutonomousTrackerNode:
                     if ret_enc:
                         with self.jpeg_lock:
                             self.latest_jpeg = buf.tobytes()
-
-                # Video Recording: write each uniquely processed frame with HUD and bounding box
-                if self.record_path is not None and new_frame_available:
-                    if self.video_writer is None:
-                        h, w = display_frame.shape[:2]
-                        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-                        self.video_writer = cv2.VideoWriter(str(self.record_path), fourcc, self.record_fps, (w, h))
-                        print(f"[RECORD] Tracked video writer initialized: {self.record_path} ({w}x{h} @ {self.record_fps:.1f} FPS)")
-                    self.video_writer.write(display_frame)
-
-                # Clean Raw Video Recording (No HUD, no bounding boxes, pure sensor feed for offline re-evaluation)
-                if self.record_raw_path is not None and new_frame_available and raw_frame_to_write is not None:
-                    if self.video_writer_raw is None:
-                        rh, rw = raw_frame_to_write.shape[:2]
-                        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-                        self.video_writer_raw = cv2.VideoWriter(str(self.record_raw_path), fourcc, self.record_fps, (rw, rh))
-                        print(f"[RECORD-RAW] Clean video writer initialized: {self.record_raw_path} ({rw}x{rh} @ {self.record_fps:.1f} FPS)")
-                    self.video_writer_raw.write(raw_frame_to_write)
 
                 if not self.args.headless:
                     try:
@@ -1812,6 +1883,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--search-mode", type=str, default="brake", choices=["brake", "legacy_coast"],
         help="Target loss search governor policy: 'brake' (immediate active station-keeping hover, default) or 'legacy_coast'."
+    )
+    parser.add_argument(
+        "--pid-gains", type=str, default="control/weights/tuned_pid_gains.json",
+        help="Path to JSON file containing tuned PID gains (default: control/weights/tuned_pid_gains.json, set 'none' to disable)."
     )
 
     # Altitude Floor and Ceiling Safety Limits

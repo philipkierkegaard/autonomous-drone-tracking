@@ -15,6 +15,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from scipy.optimize import minimize
 from pymavlink import mavutil
+from pathlib import Path
 
 def load_flight_log(log_path: str):
     print(f"Reading log: {log_path}...")
@@ -115,6 +116,8 @@ def main():
     import argparse
     parser = argparse.ArgumentParser(description="4-Axis FOPDT System Identification from ArduPilot .BIN log")
     parser.add_argument("log", nargs="?", default="logs/flight_logs/flight_00000073.BIN", help="Path to .BIN flight log")
+    parser.add_argument("--t-start", type=float, default=None, help="Start timestamp in seconds")
+    parser.add_argument("--t-end", type=float, default=None, help="End timestamp in seconds")
     args = parser.parse_args()
 
     log_file = args.log
@@ -124,9 +127,15 @@ def main():
         print("[ERROR] No attitude (ANG/ATT) data found in log file.")
         return
 
-    # Filter armed flight period if Flight 73, else auto-detect valid range
-    if "flight_00000073.BIN" in str(log_file):
+    # Determine time window for identification
+    if args.t_start is not None and args.t_end is not None:
+        t_start = float(args.t_start)
+        t_end = float(args.t_end)
+    elif "flight_00000073.BIN" in str(log_file):
         t_start, t_end = 127.0, 434.0
+    elif "00000118.BIN" in str(log_file):
+        # Default to longest stable flight segment (Segment 3)
+        t_start, t_end = 275.0, 405.0
     else:
         t_start = df_att['time'].min()
         t_end = df_att['time'].max()
@@ -135,6 +144,7 @@ def main():
             t_start += 2.0
             t_end -= 1.0
 
+    print(f"Analyzing time window: t = {t_start:.1f}s to {t_end:.1f}s (Duration: {t_end - t_start:.1f}s)")
     mask_att = (df_att['time'] >= t_start) & (df_att['time'] <= t_end)
     df_att = df_att[mask_att].reset_index(drop=True)
     
@@ -185,8 +195,9 @@ def main():
     tau_z, td_z, y_sim_z, rmse_z = fit_first_order_delay(t_uniform, u_vz, y_vz, bounds=((0.05, 0.80), (0.00, 0.15)))
     _, vaf_z = calculate_metrics(y_vz, y_sim_z)
 
+    stem = Path(log_file).stem
     print("\n" + "="*70)
-    print("        COMPLETE 4-AXIS SYSTEM IDENTIFICATION (FLIGHT 73)")
+    print(f"        COMPLETE 4-AXIS SYSTEM IDENTIFICATION ({stem.upper()})")
     print("="*70)
     print(f"1. PITCH:      tau = {tau_p*1000:5.1f} ms, T_d = {td_p*1000:4.1f} ms | RMSE = {rmse_p:5.2f}°    | VAF = {vaf_p:5.1f}%")
     print(f"2. ROLL:       tau = {tau_r*1000:5.1f} ms, T_d = {td_r*1000:4.1f} ms | RMSE = {rmse_r:5.2f}°    | VAF = {vaf_r:5.1f}%")
@@ -195,11 +206,11 @@ def main():
     print("="*70)
 
     # Generate Comprehensive 4-Subplot Figure
-    from pathlib import Path
     if "flight_00000073.BIN" in str(log_file):
         win_start = 138.0
     else:
-        win_start = t_uniform[0]
+        # Start 5 seconds into flight to show active maneuvers
+        win_start = min(t_uniform[0] + 5.0, t_uniform[-1] - 20.0) if (t_uniform[-1] - t_uniform[0]) > 25.0 else t_uniform[0]
 
     win_len = min(20.0, float(t_uniform[-1] - win_start))
     win_mask = (t_uniform >= win_start) & (t_uniform <= win_start + win_len)

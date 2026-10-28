@@ -943,6 +943,10 @@ def run_dataset_benchmark(
     ctrl_tag = controller_type.lower()
     if ctrl_tag == "pid":
         ctrl_tag = "pid_baseline" if (pid_gains is not None and str(pid_gains).lower() == "none") else "pid_tuned"
+    elif ctrl_tag in ["residual", "residual_rl"] and model_path is not None:
+        p = Path(model_path)
+        tag_name = p.parent.name if p.parent.name not in ["weights", ".", "checkpoints"] else p.stem
+        ctrl_tag = f"residual_{tag_name}"
     elif ctrl_tag == "rl" and model_path is not None:
         p = Path(model_path)
         tag_name = p.parent.name if p.parent.name not in ["weights", ".", "checkpoints"] else p.stem

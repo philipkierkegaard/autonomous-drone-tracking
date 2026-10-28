@@ -1,0 +1,82 @@
+{
+  "metrics_steady": {
+    "settling_time_s": 8.72,
+    "ss_mean_dist_m": 3.486565510591737,
+    "ss_std_dist_m": 0.20322706158419454,
+    "ss_mae_dist_m": 0.15676594118800158,
+    "ss_rmse_dist_m": 0.20367062641875172,
+    "ss_max_deviation_m": 0.7003685503860133,
+    "ss_vel_ripple_rms": 0.20197513354753607,
+    "ss_basket_retention_pct": 100.0,
+    "min_dist_m": 2.27558634769567,
+    "max_dist_m": 7.0
+  },
+  "metrics_inplace": {
+    "settling_time_s": 17.72,
+    "ss_mean_dist_m": 3.876193007996343,
+    "ss_std_dist_m": 0.15165852647632552,
+    "ss_mae_dist_m": 0.37619300799634314,
+    "ss_rmse_dist_m": 0.405612484914243,
+    "ss_max_deviation_m": 0.6490521934710545,
+    "ss_vel_ripple_rms": 0.16319400463264824,
+    "ss_basket_retention_pct": 100.0,
+    "min_dist_m": 3.5,
+    "max_dist_m": 4.1490521934710545
+  },
+  "metrics_drift_pid": {
+    "settling_time_s": 7.4,
+    "ss_mean_dist_m": 3.4622352344496914,
+    "ss_std_dist_m": 0.23524223953375772,
+    "ss_mae_dist_m": 0.20242543096520696,
+    "ss_rmse_dist_m": 0.2382542523816261,
+    "ss_max_deviation_m": 0.49390087529491966,
+    "ss_vel_ripple_rms": 0.19315440361939645,
+    "ss_basket_retention_pct": 100.0,
+    "min_dist_m": 2.3241428417180394,
+    "max_dist_m": 7.007903385058092
+  },
+  "metrics_drift_rl": {
+    "settling_time_s": 2.7600000000000002,
+    "ss_mean_dist_m": 2.4200545561313804,
+    "ss_std_dist_m": 0.062212086476205,
+    "ss_mae_dist_m": 1.0799454438686193,
+    "ss_rmse_dist_m": 1.0817358760050033,
+    "ss_max_deviation_m": 1.2450329443540529,
+    "ss_vel_ripple_rms": 0.18897790388868824,
+    "ss_basket_retention_pct": 6.705882352941177,
+    "min_dist_m": 2.0727363042154643,
+    "max_dist_m": 7.005092301071873
+  },
+  "monte_carlo_pid": {
+    "success_1s_pct": 100.0,
+    "success_3s_pct": 100.0,
+    "dwell_time_mean_s": 20.47279999999965,
+    "firing_time_mean_s": 21.699199999999628,
+    "fov_retention_pct": 99.704,
+    "collision_rate_pct": 0.0,
+    "ss_mean_dist_m": 3.4752833094295665,
+    "ss_std_dist_m": 0.2819855352973814,
+    "ss_mae_dist_m": 0.2883068896108374,
+    "ss_max_deviation_m": 0.653203604897032,
+    "ss_vel_ripple_rms": 0.1930945826550212,
+    "ss_basket_retention_pct": 99.50823529411765,
+    "settling_time_s": 13.876399999999999
+  },
+  "monte_carlo_rl": {
+    "success_1s_pct": 100.0,
+    "success_3s_pct": 82.0,
+    "dwell_time_mean_s": 6.114399999999948,
+    "firing_time_mean_s": 9.520399999999883,
+    "fov_retention_pct": 99.15360000000001,
+    "collision_rate_pct": 0.0,
+    "ss_mean_dist_m": 2.466765971498163,
+    "ss_std_dist_m": 0.17099091376218517,
+    "ss_mae_dist_m": 1.0332340285018369,
+    "ss_max_deviation_m": 1.3789935129577295,
+    "ss_vel_ripple_rms": 0.20280818474635823,
+    "ss_basket_retention_pct": 34.74588235294117,
+    "settling_time_s": 3.2164000000000006
+  },
+  "plot_path": "/Users/philipkierkegaard/Development/autonomous-drone-tracking/outputs/benchmarks/control/hover_drift_distance_holding.png",
+  "video_path": "/Users/philipkierkegaard/Development/autonomous-drone-tracking/outputs/benchmarks/videos/hover_drift_chase_bright.mp4"
+}
