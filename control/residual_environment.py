@@ -39,9 +39,10 @@ class ResidualDronePursuitEnv(DronePursuitEnv):
         residual_scales: Optional[Sequence[float]] = (3.0, 2.0, 1.0, 30.0),
         reward_mode: str = "theory_fast_catch_compounding_dwell",
         desired_bbox_size: float = 110.0,
+        terminate_on_catch: bool = True,
         **kwargs
     ):
-        super().__init__(*args, reward_mode=reward_mode, **kwargs)
+        super().__init__(*args, reward_mode=reward_mode, terminate_on_catch=terminate_on_catch, **kwargs)
 
         # Base classical controller
         resolved_gains = Path(pid_gains_path)

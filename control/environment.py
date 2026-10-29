@@ -71,6 +71,7 @@ class DronePursuitEnv(gym.Env):
         reward_mode: str = "monotone_potential",
         profile_distribution: Optional[Tuple[float, float, float]] = None,
         dwell_time_required_s: float = 1.0,
+        terminate_on_catch: bool = True,
     ):
         super().__init__()
 
@@ -224,7 +225,9 @@ class DronePursuitEnv(gym.Env):
 
         # Mission Objective: Reach 5.0m - 7.0m basket & maintain continuous lock
         self.dwell_time_required = float(dwell_time_required_s)
+        self.terminate_on_catch = bool(terminate_on_catch)
         self.continuous_lock_dwell_s = 0.0
+        self.max_continuous_dwell_s = 0.0
         self.unbroken_bucket_steps = 0
         self.unbroken_bucket_dwell_s = 0.0
         self.time_to_first_lock: Optional[float] = None
@@ -596,6 +599,7 @@ class DronePursuitEnv(gym.Env):
         self.last_physical_cmd = np.array([v_fwd, v_right, cfg["chaser_vel"][2], 0.0], dtype=np.float64)
         self.cumulative_firing_window_s = 0.0
         self.continuous_lock_dwell_s = 0.0
+        self.max_continuous_dwell_s = 0.0
         self.unbroken_bucket_steps = 0
         self.unbroken_bucket_dwell_s = 0.0
         self.time_to_first_lock = None
@@ -1019,7 +1023,11 @@ class DronePursuitEnv(gym.Env):
             ang_err_cam = float(np.sqrt(raw_ex**2 + raw_ey**2))
             alignment_quality = float(np.clip(1.0 - (ang_err_cam / 0.70)**2, 0.05, 1.0))
             dwell_rate = alignment_quality
-            self.continuous_lock_dwell_s = min(self.dwell_time_required, self.continuous_lock_dwell_s + dwell_rate * self.dt)
+            if self.terminate_on_catch:
+                self.continuous_lock_dwell_s = min(self.dwell_time_required, self.continuous_lock_dwell_s + dwell_rate * self.dt)
+            else:
+                self.continuous_lock_dwell_s = self.continuous_lock_dwell_s + dwell_rate * self.dt
+            self.max_continuous_dwell_s = max(self.max_continuous_dwell_s, self.continuous_lock_dwell_s)
 
             m1_thresh = 0.4 * self.dwell_time_required
             m2_thresh = 0.7 * self.dwell_time_required
@@ -1040,6 +1048,14 @@ class DronePursuitEnv(gym.Env):
                     self.lock_achieved = True
                     self.time_to_first_lock = float(max(0.0, self.step_count * self.dt - self.dwell_time_required))
                     r_milestone += 50.0 + 100.0 * time_decay_arrival
+                    if not self.terminate_on_catch:
+                        # Milestone catch bonus awarded immediately upon achieving dwell lock
+                        if self.reward_mode in ("theory_fast_catch_compounding_dwell", "fast_catch_compounding_dwell"):
+                            r_milestone += 150.0 + 250.0 * float(np.exp(-t_sim / 4.5))
+                        elif self.reward_mode.startswith("expressive"):
+                            r_milestone += 120.0 + 100.0 * float(np.exp(-t_sim / 6.0))
+                        else:
+                            r_milestone += 80.0 + 120.0 * time_decay_arrival
                 # Ongoing formation sustain reward: +5.0/s for holding lock through evasive maneuvers
                 r_sustain = 0.1
         else:
@@ -1060,8 +1076,8 @@ class DronePursuitEnv(gym.Env):
         termination_reason = "running"
         terminal_reward = 0.0
 
-        # Successful Target Interception Lock (3.0s continuous lock achieved)
-        if self.continuous_lock_dwell_s >= self.dwell_time_required:
+        # Successful Target Interception Lock
+        if self.terminate_on_catch and (self.continuous_lock_dwell_s >= self.dwell_time_required):
             terminated = True
             termination_reason = "lock_dwell_achieved"
             terminal_reward = 80.0 + 120.0 * time_decay_arrival
@@ -1707,6 +1723,8 @@ class DronePursuitEnv(gym.Env):
                 action=action,
                 terminal_reward=terminal_reward,
             )
+            if not self.terminate_on_catch and r_milestone > 0.0:
+                step_reward += r_milestone
         elif self.reward_mode.startswith("expressive") and not raw_in_view:
             p_lost = float(self.expressive_cfg.get("p_lost_fov", -1.5))
             step_reward = p_lost + terminal_reward
@@ -1728,6 +1746,8 @@ class DronePursuitEnv(gym.Env):
             "in_view": bool(raw_in_view),
             "in_basket": bool(in_basket),
             "continuous_lock_dwell_s": float(self.continuous_lock_dwell_s),
+            "max_continuous_dwell_s": float(self.max_continuous_dwell_s),
+            "unbroken_bucket_dwell_s": float(self.unbroken_bucket_dwell_s),
             "time_to_first_lock_s": float(self.time_to_first_lock) if self.time_to_first_lock is not None else -1.0,
             "interception_success": bool(self.lock_achieved),
             "time_lost_s": float(self.time_lost),
@@ -1859,7 +1879,8 @@ class DronePursuitEnv(gym.Env):
             if in_basket:
                 t_unbroken = float(self.unbroken_bucket_dwell_s)
                 r_base_dwell = 12.0 + 18.0 * time_factor
-                r_streak = 35.0 * t_unbroken + 25.0 * (t_unbroken**2)
+                t_quad = min(t_unbroken, 3.0)
+                r_streak = 35.0 * t_unbroken + 25.0 * (t_quad**2)
                 r_dwell = r_base_dwell + r_streak
             else:
                 r_dwell = 0.0

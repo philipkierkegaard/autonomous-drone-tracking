@@ -62,6 +62,7 @@ def make_residual_env(
     profile_dist: Optional[Sequence[float]] = None,
     pid_gains_path: str = "control/weights/tuned_pid_gains.json",
     residual_scales: Sequence[float] = (3.0, 2.0, 1.0, 30.0),
+    terminate_on_catch: bool = False,
 ):
     def _init():
         env = ResidualDronePursuitEnv(
@@ -73,6 +74,7 @@ def make_residual_env(
             profile_distribution=profile_dist,
             pid_gains_path=pid_gains_path,
             residual_scales=residual_scales,
+            terminate_on_catch=terminate_on_catch,
         )
         env.reset(seed=seed + rank)
         return env
@@ -151,7 +153,7 @@ class ResidualTaskMetricEvalCallback(BaseCallback):
             is_collision = (term_reason == "collision")
             is_ground_strike = (term_reason == "ground_strike")
             is_lost = (term_reason == "lost_target_timeout")
-            dwell_s = float(info.get("continuous_lock_dwell_s", 0.0))
+            dwell_s = float(info.get("max_continuous_dwell_s", info.get("continuous_lock_dwell_s", 0.0)))
 
             results.append({
                 "scenario_id": scenario.scenario_id,
@@ -187,12 +189,12 @@ class ResidualTaskMetricEvalCallback(BaseCallback):
 
         # Balanced task score:
         # - Success rate: 0 to 100 pts
-        # - Continuous dwell: +5 pts per second (up to +25 pts for 5.0s max dwell)
+        # - Continuous dwell: +5 pts per second (up to +50 pts for 10.0s dwell)
         # - Standoff accuracy: -5 pts per meter of MAE error
-        # - Safety penalties: -20 pts per collision/ground-strike incident (penalizes safety violations without completely obliterating 30-scenario evaluations)
+        # - Safety penalties: -20 pts per collision/ground-strike incident
         task_score = float(
             (success_rate * 100.0)
-            + 5.0 * min(5.0, mean_dwell_s)
+            + 5.0 * min(10.0, mean_dwell_s)
             - 5.0 * mae_standoff_error
             - 20.0 * n_collisions
             - 20.0 * n_ground_strikes
@@ -262,6 +264,7 @@ def train_residual_ppo(
     pid_gains_path: str = "control/weights/tuned_pid_gains.json",
     residual_scales: Sequence[float] = (3.0, 2.0, 1.0, 30.0),
     profile_dist: Optional[Dict[str, float]] = None,
+    terminate_on_catch: bool = False,
 ) -> None:
     if output_dir is None:
         output_dir = PROJECT_ROOT / "outputs" / "models" / f"residual_ppo_{time.strftime('%Y%m%d_%H%M%S')}"
@@ -284,6 +287,7 @@ def train_residual_ppo(
     print(f"  Base Controller:     Tuned Kinematic PID ({pid_gains_path})")
     print(f"  Residual Scales:     Surge: +/-{residual_scales[0]} m/s, Sway: +/-{residual_scales[1]} m/s, Heave: +/-{residual_scales[2]} m/s, Yaw: +/-{residual_scales[3]} deg/s")
     print(f"  Reward Mode:         {reward_mode}")
+    print(f"  Terminate on Catch:  {terminate_on_catch} (False = maximize continuous dwell across scenario)")
     print(f"  Learning Rate:       {learning_rate} (annealing to 2e-5)")
     print(f"  Entropy Coef:        {ent_coef}")
     print(f"  Output Directory:    {output_dir}")
@@ -300,7 +304,8 @@ def train_residual_ppo(
             reward_mode=reward_mode,
             profile_dist=profile_dist,
             pid_gains_path=pid_gains_path,
-            residual_scales=residual_scales
+            residual_scales=residual_scales,
+            terminate_on_catch=terminate_on_catch,
         )
         for i in range(n_envs)
     ]
@@ -325,6 +330,7 @@ def train_residual_ppo(
         profile_distribution=profile_dist,
         pid_gains_path=pid_gains_path,
         residual_scales=residual_scales,
+        terminate_on_catch=terminate_on_catch,
     )
 
     val_dataset_path = PROJECT_ROOT / "outputs" / "benchmarks" / "datasets" / "validation_suite_30.json"
@@ -432,6 +438,12 @@ if __name__ == "__main__":
     parser.add_argument("--reward-mode", type=str, default="theory_fast_catch_compounding_dwell", help="Reward function mode")
     parser.add_argument("--pid-gains", type=str, default="control/weights/tuned_pid_gains.json", help="Path to tuned PID gains JSON")
     parser.add_argument("--output-dir", type=str, default="outputs/models/residual_ppo_v1", help="Output model directory")
+    parser.add_argument(
+        "--terminate-on-catch",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Whether to terminate episode upon 1.0s dwell catch (default: False, maximize continuous dwell across full scenario)"
+    )
     args = parser.parse_args()
 
     train_residual_ppo(
@@ -447,5 +459,6 @@ if __name__ == "__main__":
         seed=args.seed,
         reward_mode=args.reward_mode,
         output_dir=args.output_dir,
-        pid_gains_path=args.pid_gains
+        pid_gains_path=args.pid_gains,
+        terminate_on_catch=args.terminate_on_catch,
     )

@@ -345,6 +345,17 @@ class AutonomousTrackerNode:
                 except Exception as e:
                     print(f"[WARN] Failed to load PID gains from {p_gains}: {e}")
 
+        # CLI overrides for yaw gains (allows safe manual tuning for live flight tests)
+        if getattr(args, "kp_yaw", None) is not None:
+            ctrl_kwargs["kp_yaw"] = float(args.kp_yaw)
+            print(f"[PID] CLI override kp_yaw: {ctrl_kwargs['kp_yaw']:.1f}")
+        if getattr(args, "ki_yaw", None) is not None:
+            ctrl_kwargs["ki_yaw"] = float(args.ki_yaw)
+            print(f"[PID] CLI override ki_yaw: {ctrl_kwargs['ki_yaw']:.2f}")
+        if getattr(args, "kd_yaw", None) is not None:
+            ctrl_kwargs["kd_yaw"] = float(args.kd_yaw)
+            print(f"[PID] CLI override kd_yaw: {ctrl_kwargs['kd_yaw']:.1f}")
+
         self.controller = KinematicVisualServoController(**ctrl_kwargs)
         if hasattr(self.controller, "deadband_dist"):
             self.controller.deadband_dist = deadband
@@ -921,10 +932,11 @@ class AutonomousTrackerNode:
         cv2.rectangle(hud, (0, h - 45), (w, h), banner_color, -1)
         cv2.line(hud, (0, h - 45), (w, h - 45), (0, 210, 211), 1)
 
+        mode_tag = "[YAW-ONLY] " if getattr(self.args, "yaw_only", False) else ""
         if abs(v_right) > 0.05:
-            cmd_text = f"CMD -> FWD: {v_fwd:4.1f} | LAT: {v_right:+4.1f} | VERT: {-v_down:+4.2f} m/s | YAW: {yawspeed:+5.1f} */s | GUARD: {alt_status}"
+            cmd_text = f"CMD {mode_tag}-> FWD: {v_fwd:4.1f} | LAT: {v_right:+4.1f} | VERT: {-v_down:+4.2f} m/s | YAW: {yawspeed:+5.1f} */s | GUARD: {alt_status}"
         else:
-            cmd_text = f"CMD -> FWD: {v_fwd:4.1f} m/s | VERT: {-v_down:+4.2f} m/s | YAW: {yawspeed:+5.1f} */s | GUARD: {alt_status}"
+            cmd_text = f"CMD {mode_tag}-> FWD: {v_fwd:4.1f} m/s | VERT: {-v_down:+4.2f} m/s | YAW: {yawspeed:+5.1f} */s | GUARD: {alt_status}"
         cv2.putText(hud, cmd_text, (20, h - 16), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (0, 210, 211), 2, cv2.LINE_AA)
 
         # Alpha blend background banners with frame
@@ -1393,6 +1405,13 @@ class AutonomousTrackerNode:
             safe_v_down, alt_status = self.enforce_altitude_limits(v_down, current_alt)
             self.vehicle_state.alt_safety_status = alt_status
             v_down = safe_v_down
+
+            # Enforce strict stationary hover in Yaw-Only flight test mode (locks translation, allows yaw rotation only)
+            if getattr(self.args, "yaw_only", False):
+                v_fwd = 0.0
+                v_right = 0.0
+                if alt_status == "OK":
+                    v_down = 0.0
 
             # In dry-run mode, simulate altitude dynamics
             if self.args.dry_run:
@@ -1863,6 +1882,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--no-lateral-strafe", action="store_false", dest="lateral_strafe",
         help="Disable lateral strafe (enforces 3-DOF coordinated-turn yaw-only mode)."
+    )
+    parser.add_argument(
+        "--yaw-only", action="store_true",
+        help="Strict stationary hover tracking mode: locks all translations (v_fwd=0, v_lat=0, v_down=0). Drone station-keeps at current position/altitude and only yaws towards target. Recommended for safe initial live flight validation."
+    )
+    parser.add_argument(
+        "--kp-yaw", type=float, default=None,
+        help="Directly override proportional yaw gain kp_yaw (default: loaded from --pid-gains JSON, e.g. 237.3)."
+    )
+    parser.add_argument(
+        "--ki-yaw", type=float, default=None,
+        help="Directly override integral yaw gain ki_yaw (default: loaded from --pid-gains JSON)."
+    )
+    parser.add_argument(
+        "--kd-yaw", type=float, default=None,
+        help="Directly override derivative yaw gain kd_yaw (default: loaded from --pid-gains JSON)."
     )
     parser.add_argument(
         "--max-lat-speed", type=float, default=2.5,
