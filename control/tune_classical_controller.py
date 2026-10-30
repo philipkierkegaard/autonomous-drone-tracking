@@ -38,7 +38,6 @@ from control.trajectory import StochasticTargetTrajectory
 from control.dataset_generator import PursuitDatasetGenerator, EncounterType, PursuitScenario, PursuitDataset
 from control.synthetic_sensor import SyntheticYOLOSensor
 from perception.pipeline import DroneTracker
-from control.spatial import compute_ego_motion_compensation
 
 
 def create_tuning_suite(
@@ -113,7 +112,7 @@ def simulate_scenario(
     scenario: Dict[str, Any],
     params: np.ndarray,
     dt: float = 0.02,
-    lambda_image: float = 15.0,
+    lambda_image: float = 3.0,
     camera_fps: float = 30.0,
     frame_drop_rate: float = 0.05
 ) -> Dict[str, float]:
@@ -224,6 +223,7 @@ def simulate_scenario(
     dists = []
     continuous_dwell = 0.0
     max_continuous_dwell = 0.0
+    time_to_1s_lock = None
     proximity_penalty = 0.0
     collision = False
     ground_strike = False
@@ -260,63 +260,53 @@ def simulate_scenario(
         )
         in_views.append(bool(in_view))
 
-        # Standoff error: (d - 3.5)^2
-        err_standoff = (dist - 3.5) ** 2
-        standoff_costs.append(err_standoff)
+        # Engagement basket Huber potential: [2.5m, 4.5m]
+        if dist < 2.5:
+            e_basket = 2.5 - dist
+        elif dist > 4.5:
+            e_basket = dist - 4.5
+        else:
+            e_basket = 0.0
+        # Huber loss with delta=1.0m
+        huber_basket = (0.5 * (e_basket ** 2)) if e_basket <= 1.0 else (e_basket - 0.5)
+        standoff_costs.append(huber_basket)
 
-        # Saturating robust visual loss (Geman-McClure / Cauchy formulation):
-        # Prevents unclipped off-screen projection errors from quadratically blowing up
-        # and dominating the engagement/dwell objectives
-        e_sq = float(u_ex ** 2 + u_ey ** 2)
-        err_image = float(e_sq / (1.0 + e_sq / 4.0))
-        image_costs.append(err_image)
+        # FOV boundary penalty: generous cushion in central 60% of image; penalizes edge proximity or lost FOV
+        if in_view:
+            max_err = max(abs(u_ex), abs(u_ey))
+            if max_err <= 0.6:
+                err_fov = 0.0
+            else:
+                err_fov = (max_err - 0.6) / 0.4
+        else:
+            err_fov = 2.0
+        image_costs.append(err_fov)
 
         # Strict continuous dwell tracking: strictly resets to 0.0 upon any engagement departure
         # (directly mirroring the benchmark evaluation)
         if in_view and (2.5 <= dist <= 4.5):
             continuous_dwell += dt
-            max_continuous_dwell = max(max_continuous_dwell, continuous_dwell)
+            if continuous_dwell > max_continuous_dwell:
+                max_continuous_dwell = continuous_dwell
+            if continuous_dwell >= 1.0 and time_to_1s_lock is None:
+                time_to_1s_lock = t
         else:
             continuous_dwell = 0.0
 
         # Safety & Proximity barrier (aligned with benchmark 0.5m collision threshold)
         if dist < 0.5:
             collision = True
-        elif dist < 1.8:
+        elif dist < 1.5:
             # Soft quadratic repulsive barrier discouraging uncomfortably close approaches
-            prox_ratio = (1.8 - dist) / (1.8 - 0.5)
-            proximity_penalty += float((prox_ratio ** 2) * 30.0 * dt)
+            prox_ratio = (1.5 - dist) / (1.5 - 0.5)
+            proximity_penalty += float((prox_ratio ** 2) * 50.0 * dt)
 
         if -sim.pos[2] < 0.8:
             ground_strike = True
 
-        # Attitude deltas for SO(3) gyroscopic ego-motion compensation
-        d_pitch = sim.pitch - prev_chaser_pitch
-        d_roll = sim.roll - prev_chaser_roll
-        d_yaw = float((sim.yaw - prev_chaser_yaw + np.pi) % (2.0 * np.pi) - np.pi)
         prev_chaser_pitch = sim.pitch
         prev_chaser_roll = sim.roll
         prev_chaser_yaw = sim.yaw
-
-        # Compute ego shifts for active Kalman trackers
-        ego_shifts = {}
-        for tr in drone_tracker.trackers:
-            st = tr.get_state()
-            tcx = (st[0] + st[2]) / 2.0
-            tcy = (st[1] + st[3]) / 2.0
-            tw = max(1.0, st[2] - st[0])
-            th = max(1.0, st[3] - st[1])
-            shift = compute_ego_motion_compensation(
-                cx=tcx, cy=tcy, w=tw, h=th,
-                delta_pitch_rad=d_pitch,
-                delta_roll_rad=d_roll,
-                delta_yaw_rad=d_yaw,
-                vx_body=0.0, vy_body=0.0, vz_body=0.0,
-                dt=dt,
-                img_width=1280.0,
-                img_height=720.0
-            )
-            ego_shifts[tr.id] = shift
 
         # -------------------------------------------------------------
         # Realistic Perception Processing (30Hz Camera + 50Hz Kalman)
@@ -348,11 +338,10 @@ def simulate_scenario(
 
             det_arr = np.array(detections, dtype=np.float32) if detections else np.empty((0, 4), dtype=np.float32)
             conf_arr = np.array(confs, dtype=np.float32) if confs else np.empty((0,), dtype=np.float32)
-            drone_tracker.update(det_arr, conf_arr, ego_shifts=ego_shifts, dt_step=dt)
+            drone_tracker.update(det_arr, conf_arr, dt_step=dt)
         else:
             for trk in drone_tracker.trackers:
-                shift = ego_shifts.get(trk.id, None)
-                trk.predict(ego_shift=shift, dt_step=dt)
+                trk.predict(dt_step=dt)
 
         # Extract realistic controller telemetry (what the drone actually receives)
         primary = None
@@ -417,19 +406,31 @@ def simulate_scenario(
     mean_standoff = float(np.mean(standoff_costs))
     mean_image = float(np.mean(image_costs))
     
-    # Strict continuous dwell optimization: heavily reward >= 1.0s dwell
-    dwell_penalty = max(0.0, 1.0 - max_continuous_dwell) * 30.0
-    dwell_reward = -15.0 * min(3.0, max_continuous_dwell)
+    # Quadratic continuous dwell jackpot: heavily rewards reaching 1.0s and 3.0s dwell
+    dwell_reward = -10.0 * (min(3.0, max_continuous_dwell) ** 2)
 
-    base_cost = mean_standoff + lambda_image * mean_image + dwell_penalty + dwell_reward + proximity_penalty
+    # Sprint time-to-lock incentive: rewards closing fast and locking early
+    duration = float(scenario.get("duration", 18.0))
+    if time_to_1s_lock is not None:
+        sprint_cost = -5.0 * (duration - time_to_1s_lock)
+    else:
+        sprint_cost = 20.0  # Penalty for timeout without ever locking
+
+    base_cost = (
+        mean_standoff * 2.0 +
+        lambda_image * mean_image +
+        dwell_reward +
+        sprint_cost +
+        proximity_penalty
+    )
 
     # Collision & Ground Strike Overwhelming Barrier Penalties
     # Strictly prevents unsafe parameter sets from trading collisions for tracking score
     safety_penalty = 0.0
     if collision:
-        safety_penalty += 10000.0
+        safety_penalty += 500.0
     if ground_strike:
-        safety_penalty += 2000.0
+        safety_penalty += 200.0
 
     total_cost = base_cost + safety_penalty
 
@@ -459,7 +460,7 @@ _GLOBAL_POOL = None
 def evaluate_candidate(
     params: np.ndarray,
     scenarios: List[Dict[str, Any]],
-    lambda_image: float = 15.0
+    lambda_image: float = 3.0
 ) -> float:
     """Evaluates candidate parameters across the tuning scenarios and returns mean cost."""
     global _GLOBAL_POOL
@@ -480,39 +481,39 @@ PARAM_KEYS = [
 ]
 
 DEFAULT_BOUNDS = [
-    (0.2, 3.5),     # 0: kp_fwd (forward proportional gain)
-    (0.0, 0.80),    # 1: ki_fwd (forward integral gain)
-    (0.05, 0.60),   # 2: kd_fwd (forward derivative closing velocity damping)
-    (1.5, 4.5),     # 3: max_decel (m/s² braking limit to prevent pitch-up blinding)
-    (0.10, 1.20),   # 4: centering_damp (cornering deceleration factor per unit |e_x|)
-    (0.20, 0.75),   # 5: min_centering_factor (speed retention floor during sharp turns)
-    (0.5, 4.5),     # 6: kp_lat (lateral proportional gain)
-    (0.0, 0.80),    # 7: ki_lat (lateral integral gain)
-    (0.05, 1.2),    # 8: kd_lat (lateral derivative gain)
-    (2.0, 9.0),     # 9: kp_z (vertical proportional gain)
-    (0.0, 1.50),    # 10: ki_z (vertical integral gain)
-    (0.2, 2.5),     # 11: kd_z (vertical derivative gain)
-    (120.0, 320.0), # 12: kp_yaw (yaw proportional gain)
-    (0.0, 35.0),    # 13: ki_yaw (yaw integral gain)
-    (5.0, 75.0),    # 14: kd_yaw (yaw derivative gain)
+    (0.65, 2.5),    # 0: kp_fwd (forward proportional gain - expanded interior bound)
+    (0.0, 0.40),    # 1: ki_fwd (forward integral gain - allows 0.0)
+    (0.10, 0.45),   # 2: kd_fwd (forward derivative damping)
+    (2.5, 6.0),     # 3: max_decel (m/s² braking limit)
+    (0.05, 0.35),   # 4: centering_damp (cornering deceleration factor)
+    (0.30, 0.65),   # 5: min_centering_factor (speed retention floor)
+    (1.5, 3.5),     # 6: kp_lat (lateral proportional gain)
+    (0.0, 0.40),    # 7: ki_lat (lateral integral gain - allows 0.0)
+    (0.20, 0.70),   # 8: kd_lat (lateral derivative gain - ensures damping)
+    (3.0, 8.0),     # 9: kp_z (vertical proportional gain)
+    (0.0, 0.50),    # 10: ki_z (vertical integral gain - allows 0.0)
+    (0.3, 1.5),     # 11: kd_z (vertical derivative gain)
+    (160.0, 280.0), # 12: kp_yaw (yaw proportional gain)
+    (0.0, 20.0),    # 13: ki_yaw (yaw integral gain - allows 0.0)
+    (15.0, 55.0),   # 14: kd_yaw (yaw derivative gain)
 ]
 
 BASELINE_PARAMS = np.array([
-    1.2,    # kp_fwd
-    0.35,   # ki_fwd
+    1.4,    # kp_fwd
+    0.0,    # ki_fwd (pure PD start)
     0.20,   # kd_fwd
-    3.0,    # max_decel
-    0.70,   # centering_damp
-    0.35,   # min_centering_factor
-    2.0,    # kp_lat
-    0.15,   # ki_lat
+    4.0,    # max_decel
+    0.20,   # centering_damp
+    0.45,   # min_centering_factor
+    2.2,    # kp_lat
+    0.0,    # ki_lat (pure PD start)
     0.40,   # kd_lat
-    6.0,    # kp_z
-    0.20,   # ki_z
-    1.0,    # kd_z
-    200.0,  # kp_yaw
-    5.0,    # ki_yaw
-    35.0,   # kd_yaw
+    5.0,    # kp_z
+    0.0,    # ki_z (pure PD start)
+    0.80,   # kd_z
+    220.0,  # kp_yaw
+    0.0,    # ki_yaw (pure PD start)
+    30.0,   # kd_yaw
 ], dtype=np.float64)
 
 
@@ -525,7 +526,7 @@ def run_random_search_optimization(
     n_global: int = 300,
     n_local: int = 300,
     elite_k: int = 3,
-    lambda_image: float = 15.0,
+    lambda_image: float = 3.0,
     workers: int = 10,
     seed: int = 42,
 ) -> Dict[str, Any]:
@@ -693,7 +694,7 @@ def validate_on_held_out(
     candidates: Union[Dict[str, np.ndarray], np.ndarray],
     tuned_params: Optional[np.ndarray] = None,
     prev_params: Optional[np.ndarray] = None,
-    lambda_image: float = 15.0
+    lambda_image: float = 3.0
 ):
     """Directly compares candidate controllers on the independent 30-scenario validation suite."""
     if not val_suite_path.exists():
@@ -761,7 +762,7 @@ if __name__ == "__main__":
     parser.add_argument("--suite", type=str, default="outputs/benchmarks/datasets/pid_realistic_tuning_suite_80.json")
     parser.add_argument("--val-suite", type=str, default="outputs/benchmarks/datasets/validation_suite_30.json")
     parser.add_argument("--out", type=str, default="control/weights/tuned_pid_gains.json", help="Output weights JSON path (default: control/weights/tuned_pid_gains.json)")
-    parser.add_argument("--lambda-image", type=float, default=15.0, help="Weight for image plane error vs standoff error")
+    parser.add_argument("--lambda-image", type=float, default=3.0, help="Weight for image plane error vs standoff error")
     parser.add_argument("--workers", type=int, default=10, help="Number of parallel CPU workers")
     parser.add_argument("--n-global", type=int, default=300, help="Stage 1 Latin Hypercube global trials (default: 300)")
     parser.add_argument("--n-local", type=int, default=300, help="Stage 2 localized perturbation trials (default: 300)")

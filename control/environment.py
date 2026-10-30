@@ -70,7 +70,7 @@ class DronePursuitEnv(gym.Env):
         env_perception_mode: str = "nominal",
         reward_mode: str = "monotone_potential",
         profile_distribution: Optional[Tuple[float, float, float]] = None,
-        dwell_time_required_s: float = 1.0,
+        dwell_time_required_s: float = 2.0,
         terminate_on_catch: bool = True,
     ):
         super().__init__()
@@ -1020,34 +1020,31 @@ class DronePursuitEnv(gym.Env):
 
         if in_basket:
             self.cumulative_firing_window_s += self.dt
-            ang_err_cam = float(np.sqrt(raw_ex**2 + raw_ey**2))
-            alignment_quality = float(np.clip(1.0 - (ang_err_cam / 0.70)**2, 0.05, 1.0))
-            dwell_rate = alignment_quality
             if self.terminate_on_catch:
-                self.continuous_lock_dwell_s = min(self.dwell_time_required, self.continuous_lock_dwell_s + dwell_rate * self.dt)
+                self.continuous_lock_dwell_s = min(self.dwell_time_required, self.continuous_lock_dwell_s + self.dt)
             else:
-                self.continuous_lock_dwell_s = self.continuous_lock_dwell_s + dwell_rate * self.dt
+                self.continuous_lock_dwell_s = self.continuous_lock_dwell_s + self.dt
             self.max_continuous_dwell_s = max(self.max_continuous_dwell_s, self.continuous_lock_dwell_s)
 
-            m1_thresh = 0.4 * self.dwell_time_required
-            m2_thresh = 0.7 * self.dwell_time_required
+            m1_thresh = 0.5 * self.dwell_time_required
+            m2_thresh = 0.75 * self.dwell_time_required
 
-            # Milestone 1: 40% of target continuous lock dwell
+            # Milestone 1: 50% of target continuous lock dwell (1.0s)
             if self.continuous_lock_dwell_s >= m1_thresh and not self.milestone_1s_awarded:
                 self.milestone_1s_awarded = True
-                r_milestone += 15.0 + 20.0 * time_decay_arrival
+                r_milestone += 20.0 + 30.0 * time_decay_arrival
 
-            # Milestone 2: 70% of target continuous lock dwell
+            # Milestone 2: 75% of target continuous lock dwell (1.5s)
             if self.continuous_lock_dwell_s >= m2_thresh and not self.milestone_2s_awarded:
                 self.milestone_2s_awarded = True
-                r_milestone += 25.0 + 35.0 * time_decay_arrival
+                r_milestone += 35.0 + 50.0 * time_decay_arrival
 
-            # Goal: 100% continuous lock (interception jackpot)
+            # Goal: 100% continuous lock (2.0s hard interception jackpot)
             if self.continuous_lock_dwell_s >= self.dwell_time_required:
                 if not self.lock_achieved:
                     self.lock_achieved = True
                     self.time_to_first_lock = float(max(0.0, self.step_count * self.dt - self.dwell_time_required))
-                    r_milestone += 50.0 + 100.0 * time_decay_arrival
+                    r_milestone += 60.0 + 120.0 * time_decay_arrival
                     if not self.terminate_on_catch:
                         # Milestone catch bonus awarded immediately upon achieving dwell lock
                         if self.reward_mode in ("theory_fast_catch_compounding_dwell", "fast_catch_compounding_dwell"):
@@ -1059,16 +1056,12 @@ class DronePursuitEnv(gym.Env):
                 # Ongoing formation sustain reward: +5.0/s for holding lock through evasive maneuvers
                 r_sustain = 0.1
         else:
-            # Grace decay (soft leaky integrator: decays only 0.5s per second outside basket to tolerate momentary visual dropouts)
-            self.continuous_lock_dwell_s = max(0.0, self.continuous_lock_dwell_s - 0.5 * self.dt)
-            if self.continuous_lock_dwell_s <= 0.0 and not self.first_bucket_awarded:
+            # Hard reset: instantaneous zeroing of continuous dwell outside basket or FOV (strict hard dwell)
+            self.continuous_lock_dwell_s = 0.0
+            if not self.first_bucket_awarded:
                 self.bucket_entry_time = None
-            m1_thresh = 0.4 * self.dwell_time_required
-            m2_thresh = 0.7 * self.dwell_time_required
-            if self.continuous_lock_dwell_s < m1_thresh:
-                self.milestone_1s_awarded = False
-            if self.continuous_lock_dwell_s < m2_thresh:
-                self.milestone_2s_awarded = False
+            self.milestone_1s_awarded = False
+            self.milestone_2s_awarded = False
 
         # 5. Check Termination & Truncation Criteria
         terminated = False

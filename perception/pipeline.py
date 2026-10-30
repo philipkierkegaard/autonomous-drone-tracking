@@ -19,13 +19,7 @@ import torch
 from scipy.optimize import linear_sum_assignment
 from ultralytics import YOLO
 
-try:
-    from control.spatial import compute_ego_motion_compensation
-except ImportError:
-    try:
-        from spatial import compute_ego_motion_compensation
-    except ImportError:
-        compute_ego_motion_compensation = None
+
 
 
 # ==============================================================================
@@ -110,12 +104,12 @@ class KalmanBoxTracker:
 
     def predict(
         self,
+        dt_step: Optional[float] = None,
         ego_shift: Optional[Tuple[float, float, float, float]] = None,
-        dt_step: Optional[float] = None
+        **kwargs
     ) -> np.ndarray:
         """
-        Advance state forward by dt with optional ego-motion compensation.
-        ego_shift: (delta_cx, delta_cy, delta_w, delta_h) shift induced by drone movement
+        Advance state forward by dt.
         dt_step: Optional actual elapsed time since last prediction (seconds)
         Returns predicted [x1, y1, x2, y2].
         """
@@ -133,14 +127,6 @@ class KalmanBoxTracker:
 
         # x = F * x
         self.x = np.dot(F, self.x)
-
-        # Apply deterministic ego-motion control shift
-        if ego_shift is not None:
-            dcx, dcy, dw, dh = ego_shift
-            self.x[0, 0] += dcx
-            self.x[1, 0] += dcy
-            self.x[2, 0] = max(1.0, self.x[2, 0] + dw)
-            self.x[3, 0] = max(1.0, self.x[3, 0] + dh)
 
         # P = F * P * F^T + Q
         self.P = np.dot(np.dot(F, self.P), F.T) + Q
@@ -267,21 +253,20 @@ class DroneTracker:
         self,
         detections: np.ndarray,
         confs: np.ndarray,
+        dt_step: Optional[float] = None,
         ego_shifts: Optional[Dict[int, Tuple[float, float, float, float]]] = None,
-        dt_step: Optional[float] = None
+        **kwargs
     ) -> List[Dict[str, Any]]:
         """
         Updates the tracker with new detections in the current frame.
         detections: array of [x1, y1, x2, y2]
         confs: array of detection confidences
-        ego_shifts: optional dict of {track_id: (dcx, dcy, dw, dh)} for ego-motion compensation
         dt_step: optional elapsed time since last prediction (seconds)
         """
-        # 1. Predict new positions for all active trackers (incorporating ego-motion)
+        # 1. Predict new positions for all active trackers
         predicted_boxes = []
         for trk in self.trackers:
-            shift = ego_shifts.get(trk.id, None) if ego_shifts is not None else None
-            predicted_boxes.append(trk.predict(ego_shift=shift, dt_step=dt_step))
+            predicted_boxes.append(trk.predict(dt_step=dt_step))
         predicted_boxes = np.array(predicted_boxes) if len(predicted_boxes) > 0 else np.empty((0, 4))
 
         # 2. Hungarian matching between predictions and detections
@@ -526,31 +511,13 @@ class DroneTrackingPipeline:
             q_cov=q_cov,
             r_cov=r_cov
         )
-        self.enable_ego_ablation = enable_ego_ablation
-        if self.enable_ego_ablation:
-            print("[INIT] Tri-Filter Ego-Motion Ablation: ACTIVE (Parallel SO(3), Vanilla, and Full 6-DOF Trackers Initialized)")
-            self.uncomp_tracker = DroneTracker(
-                max_lost_frames=max_lost_frames,
-                min_hits_to_confirm=min_hits_to_confirm,
-                q_pos=q_pos,
-                q_vel=q_vel,
-                r_pos=r_pos
-            )
-            self.full_tracker = DroneTracker(
-                max_lost_frames=max_lost_frames,
-                min_hits_to_confirm=min_hits_to_confirm,
-                q_pos=q_pos,
-                q_vel=q_vel,
-                r_pos=r_pos
-            )
-        else:
-            self.uncomp_tracker = None
-            self.full_tracker = None
+        self.enable_ego_ablation = False
+        self.uncomp_tracker = None
+        self.full_tracker = None
 
         self.frame_idx = 0
         self.fps_history = deque(maxlen=20)
         self.prev_time = None
-        self.prev_ego_telemetry: Optional[Dict[str, float]] = None
 
     def process_frame(
         self,
@@ -563,7 +530,7 @@ class DroneTrackingPipeline:
         1. Determines Foveal Digital Zoom based on Constant Apparent Size Regulation
         2. Runs YOLOv8 inference (on high-res crop if zoomed, or full frame)
         3. Maps crop detections back to Global Sensor Coordinates
-        4. Updates 8D Kalman filter in continuous global space (with optional ego-motion compensation)
+        4. Updates 8D Kalman filter in continuous global space
         5. Extracts visual servoing telemetry errors (e_x, e_y, velocities, range/size error)
         6. Renders aeronautical HUD overlay in True Zoom POV or Wide FOV
         """
@@ -579,86 +546,6 @@ class DroneTrackingPipeline:
         img_center = (w / 2.0, h / 2.0)
 
         # ----------------------------------------------------------------------
-        # 0. Drone Ego-Motion Compensation (Pure SO(3) Gyroscopic Attitude Feedforward)
-        # ----------------------------------------------------------------------
-        ego_shifts: Dict[int, Tuple[float, float, float, float]] = {}
-        ego_shifts_full: Dict[int, Tuple[float, float, float, float]] = {}
-        target_pred_shift = (0.0, 0.0, 0.0, 0.0)
-
-        if ego_telemetry is not None and compute_ego_motion_compensation is not None:
-            curr_pitch = float(ego_telemetry.get("pitch_rad", 0.0))
-            curr_roll = float(ego_telemetry.get("roll_rad", 0.0))
-            curr_yaw_rad = float(np.deg2rad(ego_telemetry.get("yaw_deg", 0.0)))
-            ego_dt = float(ego_telemetry.get("dt", self.tracker.dt))
-            vx_body = float(ego_telemetry.get("vx_body", 0.0))
-            vy_body = float(ego_telemetry.get("vy_body", 0.0))
-            vz_body = float(ego_telemetry.get("vz_body", 0.0))
-            target_dist = float(ego_telemetry.get("target_dist", 4.5))
-
-            if self.prev_ego_telemetry is not None:
-                d_pitch = curr_pitch - self.prev_ego_telemetry["pitch_rad"]
-                d_roll = curr_roll - self.prev_ego_telemetry["roll_rad"]
-                d_yaw = curr_yaw_rad - self.prev_ego_telemetry["yaw_rad"]
-                d_yaw = float((d_yaw + np.pi) % (2.0 * np.pi) - np.pi)
-
-                # 1. Depth-invariant SO(3) gyroscopic homography for primary tracker (vx, vy, vz = 0.0)
-                for trk in self.tracker.trackers:
-                    box = trk.get_state()
-                    tcx = (box[0] + box[2]) / 2.0
-                    tcy = (box[1] + box[3]) / 2.0
-                    tw = max(1.0, box[2] - box[0])
-                    th = max(1.0, box[3] - box[1])
-
-                    shift = compute_ego_motion_compensation(
-                        cx=tcx, cy=tcy, w=tw, h=th,
-                        delta_pitch_rad=d_pitch,
-                        delta_roll_rad=d_roll,
-                        delta_yaw_rad=d_yaw,
-                        vx_body=0.0,
-                        vy_body=0.0,
-                        vz_body=0.0,
-                        dt=ego_dt,
-                        img_width=float(w),
-                        img_height=float(h)
-                    )
-                    ego_shifts[trk.id] = shift
-
-                # 2. Full 6-DOF compensation for parallel full_tracker (rotations + body translations)
-                if getattr(self, "enable_ego_ablation", False) and getattr(self, "full_tracker", None) is not None:
-                    for trk in self.full_tracker.trackers:
-                        box = trk.get_state()
-                        tcx = (box[0] + box[2]) / 2.0
-                        tcy = (box[1] + box[3]) / 2.0
-                        tw = max(1.0, box[2] - box[0])
-                        th = max(1.0, box[3] - box[1])
-
-                        shift_full = compute_ego_motion_compensation(
-                            cx=tcx, cy=tcy, w=tw, h=th,
-                            delta_pitch_rad=d_pitch,
-                            delta_roll_rad=d_roll,
-                            delta_yaw_rad=d_yaw,
-                            vx_body=vx_body,
-                            vy_body=vy_body,
-                            vz_body=vz_body,
-                            dt=ego_dt,
-                            estimated_distance_m=target_dist,
-                            img_width=float(w),
-                            img_height=float(h)
-                        )
-                        ego_shifts_full[trk.id] = shift_full
-
-                if self.tracker.primary_track_id in ego_shifts:
-                    target_pred_shift = ego_shifts[self.tracker.primary_track_id]
-                elif len(ego_shifts) > 0:
-                    target_pred_shift = next(iter(ego_shifts.values()))
-
-            self.prev_ego_telemetry = {
-                "pitch_rad": curr_pitch,
-                "roll_rad": curr_roll,
-                "yaw_rad": curr_yaw_rad
-            }
-
-        # ----------------------------------------------------------------------
         # 1. Active Foveal Zoom Decision (Constant Apparent Target Size Regulation)
         # ----------------------------------------------------------------------
         crop_xmin, crop_ymin = 0, 0
@@ -672,8 +559,8 @@ class DroneTrackingPipeline:
                 if trk.id == self.tracker.primary_track_id:
                     primary_trk = trk
                     pred_box = trk.get_state()
-                    tcx = (pred_box[0] + pred_box[2]) / 2.0 + target_pred_shift[0]
-                    tcy = (pred_box[1] + pred_box[3]) / 2.0 + target_pred_shift[1]
+                    tcx = (pred_box[0] + pred_box[2]) / 2.0
+                    tcy = (pred_box[1] + pred_box[3]) / 2.0
                     target_pred_center = (tcx, tcy)
                     current_target_size = max(pred_box[2] - pred_box[0], pred_box[3] - pred_box[1])
 
@@ -781,30 +668,12 @@ class DroneTrackingPipeline:
         # ----------------------------------------------------------------------
         t_track_start = time.perf_counter()
         if self.enable_kalman:
-            active_tracks = self.tracker.update(detections, confs, ego_shifts=ego_shifts, dt_step=frame_dt)
+            active_tracks = self.tracker.update(detections, confs, dt_step=frame_dt)
             primary_track = None
             for trk in active_tracks:
                 if trk["id"] == self.tracker.primary_track_id:
                     primary_track = trk
                     break
-
-            # Parallel uncompensated and full 6-DOF trackers for ablation testing
-            uncomp_primary = None
-            full_primary = None
-            if getattr(self, "enable_ego_ablation", False):
-                if getattr(self, "uncomp_tracker", None) is not None:
-                    uncomp_active_tracks = self.uncomp_tracker.update(detections, confs, ego_shifts=None, dt_step=frame_dt)
-                    for trk in uncomp_active_tracks:
-                        if trk["id"] == self.uncomp_tracker.primary_track_id:
-                            uncomp_primary = trk
-                            break
-
-                if getattr(self, "full_tracker", None) is not None:
-                    full_active_tracks = self.full_tracker.update(detections, confs, ego_shifts=ego_shifts_full, dt_step=frame_dt)
-                    for trk in full_active_tracks:
-                        if trk["id"] == self.full_tracker.primary_track_id:
-                            full_primary = trk
-                            break
         else:
             active_tracks = []
             primary_track = None
@@ -867,9 +736,6 @@ class DroneTrackingPipeline:
             "is_zoomed": is_zoomed,
             "view_mode": self.view_mode,
             "active_tracks_count": len(active_tracks),
-            "ego_compensated": bool(len(ego_shifts) > 0),
-            "ego_shift_x": float(target_pred_shift[0]),
-            "ego_shift_y": float(target_pred_shift[1]),
             "fps": 0.0
         }
 
@@ -934,57 +800,6 @@ class DroneTrackingPipeline:
             telemetry["raw_yolo_center"] = (float((best_det[0] + best_det[2]) / 2.0), float((best_det[1] + best_det[3]) / 2.0))
         else:
             telemetry["raw_yolo_center"] = None
-
-        if getattr(self, "enable_ego_ablation", False):
-            if uncomp_primary is not None:
-                ubbox = uncomp_primary["bbox"]
-                utcx = (ubbox[0] + ubbox[2]) / 2.0
-                utcy = (ubbox[1] + ubbox[3]) / 2.0
-                uvx, uvy = uncomp_primary["velocity"]
-                telemetry.update({
-                    "uncomp_status": "COASTING" if uncomp_primary["is_coasting"] else "LOCKED",
-                    "uncomp_target_id": uncomp_primary["id"],
-                    "uncomp_bbox": [float(b) for b in ubbox],
-                    "uncomp_center": (float(utcx), float(utcy)),
-                    "uncomp_velocity_x": float(uvx),
-                    "uncomp_velocity_y": float(uvy),
-                    "uncomp_velocity_mag": float(np.hypot(uvx, uvy))
-                })
-            else:
-                telemetry.update({
-                    "uncomp_status": "SEARCHING",
-                    "uncomp_target_id": None,
-                    "uncomp_bbox": None,
-                    "uncomp_center": None,
-                    "uncomp_velocity_x": 0.0,
-                    "uncomp_velocity_y": 0.0,
-                    "uncomp_velocity_mag": 0.0
-                })
-
-            if full_primary is not None:
-                fbbox = full_primary["bbox"]
-                ftcx = (fbbox[0] + fbbox[2]) / 2.0
-                ftcy = (fbbox[1] + fbbox[3]) / 2.0
-                fvx, fvy = full_primary["velocity"]
-                telemetry.update({
-                    "full_status": "COASTING" if full_primary["is_coasting"] else "LOCKED",
-                    "full_target_id": full_primary["id"],
-                    "full_bbox": [float(b) for b in fbbox],
-                    "full_center": (float(ftcx), float(ftcy)),
-                    "full_velocity_x": float(fvx),
-                    "full_velocity_y": float(fvy),
-                    "full_velocity_mag": float(np.hypot(fvx, fvy))
-                })
-            else:
-                telemetry.update({
-                    "full_status": "SEARCHING",
-                    "full_target_id": None,
-                    "full_bbox": None,
-                    "full_center": None,
-                    "full_velocity_x": 0.0,
-                    "full_velocity_y": 0.0,
-                    "full_velocity_mag": 0.0
-                })
 
         # Calculate FPS
         t_elapsed = time.perf_counter() - t_start

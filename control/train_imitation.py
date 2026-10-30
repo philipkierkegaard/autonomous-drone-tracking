@@ -37,7 +37,6 @@ from control.predictive_controller import StandaloneRecurrentPolicy, RecurrentVi
 from benchmarks.control.benchmark_controller import create_pid_controller
 from perception.pipeline import DroneTracker
 from control.synthetic_sensor import SyntheticYOLOSensor
-from control.spatial import compute_ego_motion_compensation
 
 
 def collect_expert_demonstrations(
@@ -200,33 +199,10 @@ def collect_expert_demonstrations(
                 desired_target_size=110.0
             )
             
-            # 1. Compute ego-motion compensation
-            d_pitch = sim.pitch - prev_chaser_pitch
-            d_roll = sim.roll - prev_chaser_roll
-            d_yaw = float((sim.yaw - prev_chaser_yaw + np.pi) % (2.0 * np.pi) - np.pi)
             prev_chaser_pitch = sim.pitch
             prev_chaser_roll = sim.roll
             prev_chaser_yaw = sim.yaw
             
-            ego_shifts = {}
-            for tr in drone_tracker.trackers:
-                st = tr.get_state()
-                tcx = (st[0] + st[2]) / 2.0
-                tcy = (st[1] + st[3]) / 2.0
-                tw = max(1.0, st[2] - st[0])
-                th = max(1.0, st[3] - st[1])
-                shift = compute_ego_motion_compensation(
-                    cx=tcx, cy=tcy, w=tw, h=th,
-                    delta_pitch_rad=d_pitch,
-                    delta_roll_rad=d_roll,
-                    delta_yaw_rad=d_yaw,
-                    vx_body=0.0, vy_body=0.0, vz_body=0.0,
-                    dt=dt,
-                    img_width=1280.0,
-                    img_height=720.0
-                )
-                ego_shifts[tr.id] = shift
-                
             # 2. 30 Hz Camera Timing vs 50 Hz Physics Prediction
             time_since_camera += dt
             is_camera_tick = (time_since_camera >= camera_dt - 1e-5)
@@ -255,11 +231,10 @@ def collect_expert_demonstrations(
                     
                 det_arr = np.array(detections, dtype=np.float32) if detections else np.empty((0, 4), dtype=np.float32)
                 conf_arr = np.array(confs, dtype=np.float32) if confs else np.empty((0,), dtype=np.float32)
-                drone_tracker.update(det_arr, conf_arr, ego_shifts=ego_shifts, dt_step=dt)
+                drone_tracker.update(det_arr, conf_arr, dt_step=dt)
             else:
                 for trk in drone_tracker.trackers:
-                    shift = ego_shifts.get(trk.id, None)
-                    trk.predict(ego_shift=shift, dt_step=dt)
+                    trk.predict(dt_step=dt)
                     
             primary = None
             if drone_tracker.primary_track_id is not None:
@@ -435,25 +410,6 @@ def evaluate_policy(
         prev_chaser_roll = sim.roll
         prev_chaser_yaw = sim.yaw
         
-        ego_shifts = {}
-        for tr in drone_tracker.trackers:
-            st = tr.get_state()
-            tcx = (st[0] + st[2]) / 2.0
-            tcy = (st[1] + st[3]) / 2.0
-            tw = max(1.0, st[2] - st[0])
-            th = max(1.0, st[3] - st[1])
-            shift = compute_ego_motion_compensation(
-                cx=tcx, cy=tcy, w=tw, h=th,
-                delta_pitch_rad=d_pitch,
-                delta_roll_rad=d_roll,
-                delta_yaw_rad=d_yaw,
-                vx_body=0.0, vy_body=0.0, vz_body=0.0,
-                dt=dt,
-                img_width=1280.0,
-                img_height=720.0
-            )
-            ego_shifts[tr.id] = shift
-            
         time_since_camera += dt
         is_camera_tick = (time_since_camera >= camera_dt - 1e-5)
         if is_camera_tick:
@@ -475,11 +431,10 @@ def evaluate_policy(
                 confs.append(0.36)
             det_arr = np.array(detections, dtype=np.float32) if detections else np.empty((0, 4), dtype=np.float32)
             conf_arr = np.array(confs, dtype=np.float32) if confs else np.empty((0,), dtype=np.float32)
-            drone_tracker.update(det_arr, conf_arr, ego_shifts=ego_shifts, dt_step=dt)
+            drone_tracker.update(det_arr, conf_arr, dt_step=dt)
         else:
             for trk in drone_tracker.trackers:
-                shift = ego_shifts.get(trk.id, None)
-                trk.predict(ego_shift=shift, dt_step=dt)
+                trk.predict(dt_step=dt)
                 
         primary = None
         if drone_tracker.primary_track_id is not None:

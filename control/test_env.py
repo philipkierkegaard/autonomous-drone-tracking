@@ -25,7 +25,7 @@ def test_environment_stepping():
     env = DronePursuitEnv()
     obs, info = env.reset(seed=42)
 
-    assert obs.shape == (13,), f"Expected obs shape (13,), got {obs.shape}"
+    assert obs.shape == env.observation_space.shape, f"Expected obs shape {env.observation_space.shape}, got {obs.shape}"
     assert np.all(np.isfinite(obs)), "Observation contains NaN or Inf!"
     print(f"✓ Initial Observation: {np.round(obs, 3)}")
     print(f"✓ Initial Info: {info}")
@@ -36,7 +36,7 @@ def test_environment_stepping():
         obs, reward, terminated, truncated, info = env.step(action)
         total_reward += reward
 
-        assert obs.shape == (13,), f"Step {step}: Bad obs shape {obs.shape}"
+        assert obs.shape == env.observation_space.shape, f"Step {step}: Bad obs shape {obs.shape}"
         assert np.isfinite(reward), f"Step {step}: Reward is not finite: {reward}"
 
         if terminated or truncated:

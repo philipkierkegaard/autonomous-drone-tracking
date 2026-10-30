@@ -71,6 +71,10 @@ class AsyncVideoWriter:
         self.thread = threading.Thread(target=self._worker, name=f"AsyncWriter-{Path(self.filename).stem}", daemon=True)
         self.thread.start()
 
+        self.released = False
+        import atexit
+        atexit.register(self.release)
+
     def _worker(self):
         while self.running or not self.queue.empty():
             try:
@@ -81,7 +85,7 @@ class AsyncVideoWriter:
                 continue
 
     def write(self, frame: np.ndarray):
-        if not self.running:
+        if not self.running or self.released:
             return
         try:
             self.queue.put_nowait(frame.copy())
@@ -94,10 +98,30 @@ class AsyncVideoWriter:
                 pass
 
     def release(self):
+        if getattr(self, "released", False):
+            return
+        self.released = True
         self.running = False
-        if self.thread.is_alive():
-            self.thread.join(timeout=3.5)
-        self.writer.release()
+        try:
+            if self.thread.is_alive():
+                self.thread.join(timeout=2.0)
+        except (KeyboardInterrupt, Exception):
+            pass
+        try:
+            # Drain any remaining frames
+            while not self.queue.empty():
+                try:
+                    f = self.queue.get_nowait()
+                    self.writer.write(f)
+                    self.queue.task_done()
+                except Exception:
+                    break
+        except Exception:
+            pass
+        try:
+            self.writer.release()
+        except Exception:
+            pass
 
 
 def is_zero_yuv_green_frame(frame: np.ndarray) -> bool:
@@ -391,7 +415,6 @@ class AutonomousTrackerNode:
             print("       ! Notice: Running standard PyTorch model (Use .engine on Jetson for max FPS)")
         enable_zoom = bool(getattr(args, "foveal_zoom", False))
         max_zoom = float(getattr(args, "max_zoom", 2.0))
-        enable_ablation = bool(getattr(args, "ego_ablation_log", False))
         self.pipeline = DroneTrackingPipeline(
             weights=args.weights,
             conf_threshold=args.conf,
@@ -399,8 +422,7 @@ class AutonomousTrackerNode:
             max_lost_frames=args.max_lost_frames,
             desired_target_size=args.target_size,
             enable_dynamic_zoom=enable_zoom,
-            max_zoom=max_zoom,
-            enable_ego_ablation=enable_ablation
+            max_zoom=max_zoom
         )
 
         # 3. Decoupled Threading & State Containers
@@ -450,32 +472,10 @@ class AutonomousTrackerNode:
                 self.record_raw_path.parent.mkdir(parents=True, exist_ok=True)
             print(f"[RECORD-RAW] Clean raw camera recording destination: {self.record_raw_path}")
 
-        # 5. Dual-Filter Ego-Motion Ablation Logging Setup
-        self.enable_ablation_log = bool(getattr(args, "ego_ablation_log", False))
+        self.enable_ablation_log = False
         self.ablation_csv_path: Optional[Path] = None
         self.ablation_csv_file = None
         self.ablation_csv_writer = None
-        self.ablation_start_time: Optional[float] = None
-        if self.enable_ablation_log:
-            ablation_dir = ROOT_DIR / "outputs" / "ablation"
-            ablation_dir.mkdir(parents=True, exist_ok=True)
-            self.ablation_csv_path = ablation_dir / f"ego_motion_ablation_{shared_ts}.csv"
-            self.ablation_csv_file = open(self.ablation_csv_path, "w", newline="")
-            import csv
-            self.ablation_csv_writer = csv.writer(self.ablation_csv_file)
-            self.ablation_csv_writer.writerow([
-                "timestamp", "dt", "roll_deg", "pitch_deg", "yaw_deg",
-                "altitude_m", "vx_body", "vy_body", "vz_body",
-                "yolo_detected", "yolo_cx", "yolo_cy",
-                "comp_status", "comp_cx", "comp_cy", "comp_vx", "comp_vy", "comp_vmag",
-                "uncomp_status", "uncomp_cx", "uncomp_cy", "uncomp_vx", "uncomp_vy", "uncomp_vmag",
-                "full_status", "full_cx", "full_cy", "full_vx", "full_vy", "full_vmag"
-            ])
-            self.ablation_csv_file.flush()
-            print(f"[ABLATION] Tri-filter ego-motion ablation logging ACTIVE -> {self.ablation_csv_path.name}")
-            print(f"           • Filter 1: Vanilla Kalman Filter (Uncompensated Baseline)")
-            print(f"           • Filter 2: Pure SO(3) Attitude Decoupling (Proposed Depth-Invariant)")
-            print(f"           • Filter 3: Full 6-DOF Decoupling (SO(3) + R^3 Translation, Standoff: {getattr(args, 'target_dist', 4.5):.1f}m)")
 
         # 6. Live MJPEG Web Streamer Setup (Browser / SSH Port Forwarding)
         self.stream_server: Optional[ThreadingHTTPServer] = None
@@ -1172,53 +1172,15 @@ class AutonomousTrackerNode:
             prev_time = now
             fps = 1.0 / max(1e-4, raw_dt)
 
-            # Ego-Motion Decoupling Telemetry (Time-aligned attitude ring buffer & body velocity)
-            cam_latency_s = float(getattr(self.args, "ego_latency_ms", 35.0)) / 1000.0
-            target_att_time = now - cam_latency_s
-            interp_pitch, interp_roll, interp_yaw = self.vehicle_state.get_interpolated_attitude(target_att_time)
-
-            # Extract body-frame velocity from Pixhawk MAVLink NED velocity:
-            # v_body_x = cos(psi)*vn + sin(psi)*ve (Forward)
-            # v_body_y = -sin(psi)*vn + cos(psi)*ve (Right)
-            # v_body_z = vd (Down)
-            vn = self.vehicle_state.vx_m_s
-            ve = self.vehicle_state.vy_m_s
-            vd = self.vehicle_state.vz_m_s
-            yaw_rad = float(np.deg2rad(interp_yaw))
-            c_yaw = float(np.cos(yaw_rad))
-            s_yaw = float(np.sin(yaw_rad))
-            vx_body = float(c_yaw * vn + s_yaw * ve)
-            vy_body = float(-s_yaw * vn + c_yaw * ve)
-            vz_body = float(vd)
-
-            target_dist = float(getattr(self.args, "target_dist", 4.5))
-
-            ego_telemetry = {
-                "pitch_rad": float(interp_pitch),
-                "roll_rad": float(interp_roll),
-                "yaw_deg": float(interp_yaw),
-                "vx_body": vx_body,
-                "vy_body": vy_body,
-                "vz_body": vz_body,
-                "target_dist": target_dist,
-                "altitude_m": float(self.get_current_altitude()) if self.get_current_altitude() is not None else 0.0,
-                "dt": float(raw_dt)
-            }
-
-            # Ingest YOLOv8 + Kalman Tracking (with active ego-motion compensation)
+            # Ingest YOLOv8 + Kalman Tracking
             clean_raw_frame = frame.copy()
             proc_frame = frame
             if getattr(self.args, "adaptive_shadows", False):
                 proc_frame = apply_adaptive_shadow_boost(frame)
 
-            try:
-                annotated_frame, telemetry = self.pipeline.process_frame(
-                    proc_frame, draw_hud=False, ego_telemetry=ego_telemetry
-                )
-            except TypeError:
-                annotated_frame, telemetry = self.pipeline.process_frame(
-                    proc_frame, draw_hud=False
-                )
+            annotated_frame, telemetry = self.pipeline.process_frame(
+                proc_frame, draw_hud=False
+            )
 
             with self.perception_state.lock:
                 telemetry["timestamp"] = time.perf_counter()
@@ -1251,47 +1213,7 @@ class AutonomousTrackerNode:
                     print(f"[RECORD-RAW] Async clean video writer initialized: {self.record_raw_path} ({rw}x{rh} @ {self.record_fps:.1f} FPS)")
                 self.video_writer_raw.write(clean_raw_frame)
 
-            # Record dual-filter ablation telemetry if enabled
-            if self.enable_ablation_log and self.ablation_csv_writer is not None:
-                if self.ablation_start_time is None:
-                    self.ablation_start_time = now
-                rel_t = now - self.ablation_start_time
-                yolo_det = 1 if telemetry.get("raw_yolo_detections_count", 0) > 0 else 0
-                ycx = f"{telemetry['raw_yolo_center'][0]:.1f}" if telemetry.get("raw_yolo_center") else ""
-                ycy = f"{telemetry['raw_yolo_center'][1]:.1f}" if telemetry.get("raw_yolo_center") else ""
-                ccx = f"{telemetry['center'][0]:.1f}" if telemetry.get("center") else ""
-                ccy = f"{telemetry['center'][1]:.1f}" if telemetry.get("center") else ""
-                ucx = f"{telemetry['uncomp_center'][0]:.1f}" if telemetry.get("uncomp_center") else ""
-                ucy = f"{telemetry['uncomp_center'][1]:.1f}" if telemetry.get("uncomp_center") else ""
 
-                fcx = f"{telemetry['full_center'][0]:.1f}" if telemetry.get("full_center") else ""
-                fcy = f"{telemetry['full_center'][1]:.1f}" if telemetry.get("full_center") else ""
-
-                self.ablation_csv_writer.writerow([
-                    f"{rel_t:.4f}", f"{raw_dt:.4f}",
-                    f"{np.rad2deg(interp_roll):.2f}",
-                    f"{np.rad2deg(interp_pitch):.2f}",
-                    f"{interp_yaw:.2f}",
-                    f"{self.get_current_altitude():.2f}" if self.get_current_altitude() is not None else "N/A",
-                    f"{vx_body:.3f}", f"{vy_body:.3f}", f"{vz_body:.3f}",
-                    yolo_det, ycx, ycy,
-                    telemetry.get("status", "SEARCHING"),
-                    ccx, ccy,
-                    f"{telemetry.get('velocity_x', 0.0):.2f}",
-                    f"{telemetry.get('velocity_y', 0.0):.2f}",
-                    f"{telemetry.get('comp_velocity_mag', 0.0):.2f}",
-                    telemetry.get("uncomp_status", "SEARCHING"),
-                    ucx, ucy,
-                    f"{telemetry.get('uncomp_velocity_x', 0.0):.2f}",
-                    f"{telemetry.get('uncomp_velocity_y', 0.0):.2f}",
-                    f"{telemetry.get('uncomp_velocity_mag', 0.0):.2f}",
-                    telemetry.get("full_status", "SEARCHING"),
-                    fcx, fcy,
-                    f"{telemetry.get('full_velocity_x', 0.0):.2f}",
-                    f"{telemetry.get('full_velocity_y', 0.0):.2f}",
-                    f"{telemetry.get('full_velocity_mag', 0.0):.2f}"
-                ])
-                self.ablation_csv_file.flush()
 
             if self.args.max_frames > 0 and self.pipeline.frame_idx >= self.args.max_frames:
                 print(f"[LIMIT] Reached max requested frames ({self.args.max_frames}).")
@@ -1662,38 +1584,38 @@ class AutonomousTrackerNode:
                 telemetry_task.cancel()
 
             # 3. Non-essential storage, vision, and network finalization
-            # Wait for vision thread to cleanly close camera
-            if self.vision_thread and self.vision_thread.is_alive():
-                self.vision_thread.join(timeout=1.5)
+            try:
+                if self.vision_thread and self.vision_thread.is_alive():
+                    self.vision_thread.join(timeout=1.0)
+            except (KeyboardInterrupt, Exception):
+                pass
 
             if not self.args.headless:
-                cv2.destroyAllWindows()
-
-            # Flush and release video recordings
-            if self.video_writer is not None:
-                self.video_writer.release()
-                self.video_writer = None
-                print(f"[RECORD] ✓ Tracked HUD video successfully saved to: {self.record_path}")
-
-            if self.video_writer_raw is not None:
-                self.video_writer_raw.release()
-                self.video_writer_raw = None
-                print(f"[RECORD-RAW] ✓ Clean raw camera video successfully saved to: {self.record_raw_path}")
-
-            # Flush and close ego-motion ablation dataset if active
-            if getattr(self, "ablation_csv_file", None) is not None:
                 try:
-                    self.ablation_csv_file.close()
-                    self.ablation_csv_file = None
-                    print(f"[ABLATION] ✓ Telemetry dataset closed: {self.ablation_csv_path}")
-                    if self.ablation_csv_path and self.ablation_csv_path.exists():
-                        try:
-                            from scripts.generate_ego_ablation_plot import generate_ego_ablation_report
-                            generate_ego_ablation_report(str(self.ablation_csv_path), save_plot=True)
-                        except Exception as e:
-                            print(f"[ABLATION] Note: Post-run report generation encountered: {e}")
-                except Exception as e:
-                    print(f"[ABLATION] Error closing ablation file: {e}")
+                    cv2.destroyAllWindows()
+                except Exception:
+                    pass
+
+            # Flush and release video recordings (always executed, immune to Ctrl+C)
+            try:
+                if self.video_writer is not None:
+                    vw = self.video_writer
+                    self.video_writer = None
+                    vw.release()
+                    print(f"\n[RECORD] ✓ Tracked HUD video successfully saved to: {self.record_path}")
+            except Exception as e:
+                print(f"[RECORD] Error saving video: {e}")
+
+            try:
+                if self.video_writer_raw is not None:
+                    vwr = self.video_writer_raw
+                    self.video_writer_raw = None
+                    vwr.release()
+                    print(f"[RECORD-RAW] ✓ Clean raw camera video successfully saved to: {self.record_raw_path}")
+            except Exception as e:
+                print(f"[RECORD-RAW] Error saving raw video: {e}")
+
+
 
             # Shutdown live MJPEG stream server
             if self.stream_server is not None:
@@ -1839,23 +1761,23 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--ego-ablation-log", action="store_true",
-        help="Enable tri-filter ego-motion ablation logging. Runs parallel Vanilla Kalman, pure SO(3) attitude decoupled, and full 6-DOF trackers on live telemetry to quantify decoupling accuracy (saves CSV & comparison plot on exit)."
+        help=argparse.SUPPRESS
     )
     parser.add_argument(
         "--target-dist", type=float, default=4.5,
-        help="Target standoff distance in meters for full 6-DOF translational compensation (default: 4.5m)."
+        help="Target standoff distance in meters (default: 4.5m)."
     )
     parser.add_argument(
         "--enable-trans-ego", action="store_true",
-        help="Explicitly enable 6-DOF translational ego-motion compensation using MAVLink body velocity and target distance (profiled in 3-way ablation)."
+        help=argparse.SUPPRESS
     )
     parser.add_argument(
         "--rot-only-ego", action="store_true", default=True,
-        help="Pure SO(3) attitude rotation decoupling is permanently active. Kept for CLI compatibility."
+        help=argparse.SUPPRESS
     )
     parser.add_argument(
         "--ego-latency-ms", type=float, default=35.0,
-        help="Camera exposure & Tegra ISP hardware pipeline latency in milliseconds for time-aligned attitude ring buffer lookup (default: 35.0 ms, set 0.0 to disable)."
+        help=argparse.SUPPRESS
     )
 
     # Controller & Flight Tuning Options

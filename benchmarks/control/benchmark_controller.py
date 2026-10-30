@@ -41,7 +41,6 @@ from control.trajectory import StochasticTargetTrajectory, PROFILES
 from perception.pipeline import DroneTracker, KalmanBoxTracker
 from control.synthetic_sensor import SyntheticYOLOSensor
 from control.dataset_generator import PursuitScenario, PursuitDataset
-from control.spatial import compute_ego_motion_compensation
 
 
 def create_pid_controller(
@@ -303,26 +302,6 @@ def evaluate_single_run(
         prev_chaser_yaw = sim.yaw
 
         if is_empirical:
-            ego_shifts = {}
-            if enable_ego_compensation:
-                for tr in drone_tracker.trackers:
-                    st = tr.get_state()
-                    tcx = (st[0] + st[2]) / 2.0
-                    tcy = (st[1] + st[3]) / 2.0
-                    tw = max(1.0, st[2] - st[0])
-                    th = max(1.0, st[3] - st[1])
-                    shift = compute_ego_motion_compensation(
-                        cx=tcx, cy=tcy, w=tw, h=th,
-                        delta_pitch_rad=d_pitch,
-                        delta_roll_rad=d_roll,
-                        delta_yaw_rad=d_yaw,
-                        vx_body=0.0, vy_body=0.0, vz_body=0.0,
-                        dt=dt,
-                        img_width=float(img_w),
-                        img_height=float(img_h)
-                    )
-                    ego_shifts[tr.id] = shift
-
             time_since_camera += dt
             is_camera_tick = (time_since_camera >= camera_dt - 1e-5)
             if is_camera_tick:
@@ -350,11 +329,10 @@ def evaluate_single_run(
 
                 det_arr = np.array(detections, dtype=np.float32) if detections else np.empty((0, 4), dtype=np.float32)
                 conf_arr = np.array(confs, dtype=np.float32) if confs else np.empty((0,), dtype=np.float32)
-                drone_tracker.update(det_arr, conf_arr, ego_shifts=ego_shifts if enable_ego_compensation else None, dt_step=dt)
+                drone_tracker.update(det_arr, conf_arr, dt_step=dt)
             else:
                 for trk in drone_tracker.trackers:
-                    shift = ego_shifts.get(trk.id, None) if enable_ego_compensation else None
-                    trk.predict(ego_shift=shift, dt_step=dt)
+                    trk.predict(dt_step=dt)
 
             primary = None
             if drone_tracker.primary_track_id is not None:
@@ -403,23 +381,7 @@ def evaluate_single_run(
             measured_bbox = true_telem["bbox"] if (true_telem["in_view"] and not is_dropped) else None
 
             if kalman_tracker is not None:
-                shift = None
-                if enable_ego_compensation:
-                    box = kalman_tracker.get_state()
-                    shift = compute_ego_motion_compensation(
-                        cx=(box[0] + box[2]) / 2.0,
-                        cy=(box[1] + box[3]) / 2.0,
-                        w=max(1.0, box[2] - box[0]),
-                        h=max(1.0, box[3] - box[1]),
-                        delta_pitch_rad=d_pitch,
-                        delta_roll_rad=d_roll,
-                        delta_yaw_rad=d_yaw,
-                        vx_body=0.0, vy_body=0.0, vz_body=0.0,
-                        dt=dt,
-                        img_width=float(img_w),
-                        img_height=float(img_h)
-                    )
-                kalman_tracker.predict(ego_shift=shift)
+                kalman_tracker.predict(dt_step=dt)
 
             if measured_bbox is not None:
                 if kalman_tracker is None:
@@ -564,6 +526,7 @@ def evaluate_single_run(
         "frame_drop_rate": frame_drop_rate,
         "success": lock_achieved,
         "success_1s": bool(max_continuous_dwell >= 1.0),
+        "success_2s": bool(max_continuous_dwell >= 2.0),
         "success_3s": bool(max_continuous_dwell >= 3.0),
         "max_continuous_dwell_s": float(max_continuous_dwell),
         "time_to_lock": time_to_first_lock,
@@ -929,6 +892,7 @@ def run_dataset_benchmark(
             })
 
     overall_succ_1s = float(np.mean([1 if r.get("success_1s", r["success"]) else 0 for r in raw_results]) * 100.0)
+    overall_succ_2s = float(np.mean([1 if r.get("success_2s", r.get("max_continuous_dwell_s", 0.0) >= 2.0) else 0 for r in raw_results]) * 100.0)
     overall_succ_3s = float(np.mean([1 if r.get("success_3s", False) else 0 for r in raw_results]) * 100.0)
     overall_fov = float(np.mean([r["fov_lock_pct"] for r in raw_results]))
     overall_fwin = float(np.mean([r["firing_window_s"] for r in raw_results]))
@@ -937,7 +901,7 @@ def run_dataset_benchmark(
     overall_breach = float(np.mean([1 if r["collision_breach"] else 0 for r in raw_results]) * 100.0)
 
     print("-" * 95)
-    print(f"{'>>> OVERALL':16s} | {'ALL':14s} | 1s: {overall_succ_1s:5.1f}% | 3s: {overall_succ_3s:5.1f}% | MaxDwell: {overall_dwell:4.2f}s | FOV: {overall_fov:5.1f}% | Win: {overall_fwin:4.2f}s | MinD: {overall_min_d:4.2f}m | Breaches: {overall_breach:4.1f}%")
+    print(f"{'>>> OVERALL':16s} | {'ALL':14s} | 1s: {overall_succ_1s:5.1f}% | 2s: {overall_succ_2s:5.1f}% | 3s: {overall_succ_3s:5.1f}% | MaxDwell: {overall_dwell:4.2f}s | FOV: {overall_fov:5.1f}% | Win: {overall_fwin:4.2f}s | MinD: {overall_min_d:4.2f}m | Breaches: {overall_breach:4.1f}%")
     print("=" * 95 + "\n")
 
     ctrl_tag = controller_type.lower()
@@ -945,8 +909,11 @@ def run_dataset_benchmark(
         ctrl_tag = "pid_baseline" if (pid_gains is not None and str(pid_gains).lower() == "none") else "pid_tuned"
     elif ctrl_tag in ["residual", "residual_rl"] and model_path is not None:
         p = Path(model_path)
-        tag_name = p.parent.name if p.parent.name not in ["weights", ".", "checkpoints"] else p.stem
-        ctrl_tag = f"residual_{tag_name}"
+        if p.parent.name in ["best_model", "checkpoints"]:
+            tag_name = f"{p.parent.parent.name}_{p.parent.name}" if p.parent.name == "best_model" else f"{p.parent.parent.name}_{p.stem}"
+        else:
+            tag_name = p.parent.name if p.parent.name not in ["weights", "."] else p.stem
+        ctrl_tag = tag_name if tag_name.startswith("residual_") else f"residual_{tag_name}"
     elif ctrl_tag == "rl" and model_path is not None:
         p = Path(model_path)
         tag_name = p.parent.name if p.parent.name not in ["weights", ".", "checkpoints"] else p.stem

@@ -313,7 +313,7 @@ def simulate_tracker_on_sequence(
         curr_confs = confs[mask]
 
         # Update tracker
-        active_tracks = tracker.update(curr_boxes, curr_confs, ego_shifts=None)
+        active_tracks = tracker.update(curr_boxes, curr_confs)
 
         primary_track = None
         for trk in active_tracks:

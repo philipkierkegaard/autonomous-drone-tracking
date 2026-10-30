@@ -62,6 +62,7 @@ def make_residual_env(
     profile_dist: Optional[Sequence[float]] = None,
     pid_gains_path: str = "control/weights/tuned_pid_gains.json",
     residual_scales: Sequence[float] = (3.0, 2.0, 1.0, 30.0),
+    dwell_time_required_s: float = 2.0,
     terminate_on_catch: bool = False,
 ):
     def _init():
@@ -74,6 +75,7 @@ def make_residual_env(
             profile_distribution=profile_dist,
             pid_gains_path=pid_gains_path,
             residual_scales=residual_scales,
+            dwell_time_required_s=dwell_time_required_s,
             terminate_on_catch=terminate_on_catch,
         )
         env.reset(seed=seed + rank)
@@ -330,6 +332,7 @@ def train_residual_ppo(
         profile_distribution=profile_dist,
         pid_gains_path=pid_gains_path,
         residual_scales=residual_scales,
+        dwell_time_required_s=2.0,
         terminate_on_catch=terminate_on_catch,
     )
 
