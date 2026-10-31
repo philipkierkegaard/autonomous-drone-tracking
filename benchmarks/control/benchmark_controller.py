@@ -263,6 +263,9 @@ def evaluate_single_run(
     continuous_lock_dwell = 0.0
     max_continuous_dwell = 0.0
     time_to_first_lock: Optional[float] = None
+    time_to_lock_1s: Optional[float] = None
+    time_to_lock_2s: Optional[float] = None
+    time_to_lock_3s: Optional[float] = None
     lock_achieved = False
 
     in_view_count = 0
@@ -270,6 +273,13 @@ def evaluate_single_run(
     min_dist = float("inf")
     total_path_length = 0.0
     control_effort = 0.0
+    prev_cmd: Optional[np.ndarray] = None
+    jerk_surge_sum = 0.0
+    jerk_lat_sum = 0.0
+    jerk_vert_sum = 0.0
+    jerk_yaw_sum = 0.0
+    total_jerk_sq = 0.0
+    jerk_steps = 0
     prev_chaser_pos = sim.pos.copy()
     prev_chaser_pitch = sim.pitch
     prev_chaser_roll = sim.roll
@@ -489,6 +499,15 @@ def evaluate_single_run(
         prev_chaser_pos = sim.pos.copy()
 
         control_effort += float(np.sum(cmd ** 2) * dt)
+        if prev_cmd is not None:
+            dcmd = (cmd - prev_cmd) / dt
+            jerk_surge_sum += float(abs(dcmd[0]))
+            jerk_lat_sum += float(abs(dcmd[1]))
+            jerk_vert_sum += float(abs(dcmd[2]))
+            jerk_yaw_sum += float(abs(dcmd[3]))
+            total_jerk_sq += float(np.sum(dcmd ** 2))
+            jerk_steps += 1
+        prev_cmd = cmd.copy()
 
         in_view_gt = bool(true_telem["in_view"])
         if in_view_gt:
@@ -500,8 +519,14 @@ def evaluate_single_run(
             cumulative_firing_time += dt
             continuous_lock_dwell += dt
             max_continuous_dwell = max(max_continuous_dwell, continuous_lock_dwell)
+            if continuous_lock_dwell >= 1.0 and time_to_lock_1s is None:
+                time_to_lock_1s = float(t - 1.0)
+            if continuous_lock_dwell >= 2.0 and time_to_lock_2s is None:
+                time_to_lock_2s = float(t - 2.0)
+            if continuous_lock_dwell >= 3.0 and time_to_lock_3s is None:
+                time_to_lock_3s = float(t - 3.0)
             if continuous_lock_dwell >= dwell_time_required and time_to_first_lock is None:
-                time_to_first_lock = t - dwell_time_required
+                time_to_first_lock = float(t - dwell_time_required)
                 lock_achieved = True
         else:
             continuous_lock_dwell = 0.0
@@ -530,13 +555,21 @@ def evaluate_single_run(
         "success_3s": bool(max_continuous_dwell >= 3.0),
         "max_continuous_dwell_s": float(max_continuous_dwell),
         "time_to_lock": time_to_first_lock,
+        "time_to_lock_1s": time_to_lock_1s,
+        "time_to_lock_2s": time_to_lock_2s,
+        "time_to_lock_3s": time_to_lock_3s,
         "fov_lock_pct": (in_view_count / total_steps) * 100.0,
         "firing_window_s": cumulative_firing_time,
         "firing_window_pct": (cumulative_firing_time / duration) * 100.0,
         "min_distance": min_dist,
         "collision_breach": bool(min_dist < collision_dist_m),
         "path_length": total_path_length,
-        "control_effort": control_effort
+        "control_effort": control_effort,
+        "jerk_yaw": float(jerk_yaw_sum / max(1, jerk_steps)),
+        "jerk_surge": float(jerk_surge_sum / max(1, jerk_steps)),
+        "jerk_lat": float(jerk_lat_sum / max(1, jerk_steps)),
+        "jerk_vert": float(jerk_vert_sum / max(1, jerk_steps)),
+        "control_jerk_rms": float(np.sqrt(total_jerk_sq / max(1, jerk_steps)))
     }
 
     if return_history:
@@ -860,49 +893,110 @@ def run_dataset_benchmark(
     profiles = sorted(list(set(r["profile"] for r in raw_results)))
 
     summary_rows = []
-    print("\n" + "=" * 95)
-    print(f"{'Encounter Type':16s} | {'Profile':14s} | {'Success%':8s} | {'Time-to-Lock':13s} | {'FOV Lock%':9s} | {'Firing Win%':11s} | {'Min Dist':8s} | {'Breaches':8s}")
-    print("-" * 95)
+    print("\n" + "=" * 120)
+    print(f"{'Encounter Type':16s} | {'Profile':14s} | {'1s Succ%':8s} | {'2s Succ%':8s} | {'TTL (2s)':10s} | {'FOV Lock%':9s} | {'Firing Win%':11s} | {'Yaw Jerk':10s} | {'Breaches':8s}")
+    print("-" * 120)
 
     for enc in encounters:
         for prof in profiles:
             subset = [r for r in raw_results if r["encounter_type"] == enc and r["profile"] == prof]
             if not subset:
                 continue
-            succ = np.mean([1 if r["success"] else 0 for r in subset]) * 100
-            ttls = [r["time_to_lock"] for r in subset if r["time_to_lock"] is not None]
-            ttl_mean = np.mean(ttls) if ttls else None
+            succ_1s = np.mean([1 if r.get("success_1s", r["success"]) else 0 for r in subset]) * 100
+            succ_2s = np.mean([1 if r.get("success_2s", r.get("max_continuous_dwell_s", 0.0) >= 2.0) else 0 for r in subset]) * 100
+            ttls_1s = [r["time_to_lock_1s"] for r in subset if r.get("time_to_lock_1s") is not None]
+            ttls_2s = [r["time_to_lock_2s"] for r in subset if r.get("time_to_lock_2s") is not None]
+            ttl_2s_mean = np.mean(ttls_2s) if ttls_2s else None
+            ttl_1s_mean = np.mean(ttls_1s) if ttls_1s else None
             fov = np.mean([r["fov_lock_pct"] for r in subset])
             fwin = np.mean([r["firing_window_pct"] for r in subset])
             dmin = np.mean([r["min_distance"] for r in subset])
             breach = np.mean([1 if r["collision_breach"] else 0 for r in subset]) * 100
+            yaw_jerk = np.mean([r.get("jerk_yaw", 0.0) for r in subset])
+            surge_jerk = np.mean([r.get("jerk_surge", 0.0) for r in subset])
+            jerk_rms = np.mean([r.get("control_jerk_rms", 0.0) for r in subset])
 
-            ttl_str = f"{ttl_mean:.2f}s" if ttl_mean is not None else "TIMEOUT"
-            print(f"{enc:16s} | {prof:14s} | {succ:7.1f}% | {ttl_str:13s} | {fov:8.1f}% | {fwin:10.1f}% | {dmin:7.2f}m | {breach:7.1f}%")
+            ttl_str = f"{ttl_2s_mean:.2f}s" if ttl_2s_mean is not None else "--"
+            print(f"{enc:16s} | {prof:14s} | {succ_1s:7.1f}% | {succ_2s:7.1f}% | {ttl_str:10s} | {fov:8.1f}% | {fwin:10.1f}% | {yaw_jerk:7.1f} */s2 | {breach:7.1f}%")
 
             summary_rows.append({
                 "encounter_type": enc,
                 "profile": prof,
-                "success_rate_pct": succ,
-                "mean_time_to_lock": ttl_mean,
+                "success_rate_1s_pct": succ_1s,
+                "success_rate_2s_pct": succ_2s,
+                "mean_time_to_lock_1s": ttl_1s_mean,
+                "mean_time_to_lock_2s": ttl_2s_mean,
                 "mean_fov_lock_pct": fov,
                 "mean_firing_window_pct": fwin,
                 "mean_min_distance": dmin,
-                "collision_breach_pct": breach
+                "collision_breach_pct": breach,
+                "mean_jerk_yaw_deg_s2": yaw_jerk,
+                "mean_jerk_surge_m_s2": surge_jerk,
+                "mean_control_jerk_rms": jerk_rms
             })
+
+    # Summary by Trajectory Profile (Cruising, Evasive, Hyper-Evasive)
+    profile_summaries = []
+    print("\n" + "=" * 120)
+    print(f"{'>>> PROFILE BREAKDOWN':22s} | {'1s Succ':7s} | {'2s Succ':7s} | {'3s Succ':7s} | {'TTL (1s)':8s} | {'TTL (2s)':8s} | {'MaxDwell':8s} | {'FOV%':6s} | {'Yaw Jerk':10s} | {'Surge Jerk':10s}")
+    print("-" * 120)
+    for prof in profiles:
+        p_subset = [r for r in raw_results if r["profile"] == prof]
+        if not p_subset:
+            continue
+        p_succ_1s = float(np.mean([1 if r.get("success_1s", r["success"]) else 0 for r in p_subset]) * 100.0)
+        p_succ_2s = float(np.mean([1 if r.get("success_2s", r.get("max_continuous_dwell_s", 0.0) >= 2.0) else 0 for r in p_subset]) * 100.0)
+        p_succ_3s = float(np.mean([1 if r.get("success_3s", False) else 0 for r in p_subset]) * 100.0)
+        p_ttls_1s = [r["time_to_lock_1s"] for r in p_subset if r.get("time_to_lock_1s") is not None]
+        p_ttls_2s = [r["time_to_lock_2s"] for r in p_subset if r.get("time_to_lock_2s") is not None]
+        p_ttl_1s = float(np.mean(p_ttls_1s)) if p_ttls_1s else None
+        p_ttl_2s = float(np.mean(p_ttls_2s)) if p_ttls_2s else None
+        p_dwell = float(np.mean([r.get("max_continuous_dwell_s", 0.0) for r in p_subset]))
+        p_fov = float(np.mean([r["fov_lock_pct"] for r in p_subset]))
+        p_yaw_j = float(np.mean([r.get("jerk_yaw", 0.0) for r in p_subset]))
+        p_surge_j = float(np.mean([r.get("jerk_surge", 0.0) for r in p_subset]))
+        p_rms_j = float(np.mean([r.get("control_jerk_rms", 0.0) for r in p_subset]))
+
+        ttl1_str = f"{p_ttl_1s:5.2f}s" if p_ttl_1s is not None else "--"
+        ttl2_str = f"{p_ttl_2s:5.2f}s" if p_ttl_2s is not None else "--"
+        print(f"{prof:22s} | {p_succ_1s:6.1f}% | {p_succ_2s:6.1f}% | {p_succ_3s:6.1f}% | {ttl1_str:8s} | {ttl2_str:8s} | {p_dwell:6.2f}s | {p_fov:5.1f}% | {p_yaw_j:6.1f} */s2 | {p_surge_j:6.2f} m/s2")
+
+        profile_summaries.append({
+            "profile": prof,
+            "success_rate_1s_pct": p_succ_1s,
+            "success_rate_2s_pct": p_succ_2s,
+            "success_rate_3s_pct": p_succ_3s,
+            "mean_time_to_lock_1s": p_ttl_1s,
+            "mean_time_to_lock_2s": p_ttl_2s,
+            "mean_dwell_s": p_dwell,
+            "mean_fov_lock_pct": p_fov,
+            "mean_jerk_yaw_deg_s2": p_yaw_j,
+            "mean_jerk_surge_m_s2": p_surge_j,
+            "mean_control_jerk_rms": p_rms_j
+        })
 
     overall_succ_1s = float(np.mean([1 if r.get("success_1s", r["success"]) else 0 for r in raw_results]) * 100.0)
     overall_succ_2s = float(np.mean([1 if r.get("success_2s", r.get("max_continuous_dwell_s", 0.0) >= 2.0) else 0 for r in raw_results]) * 100.0)
     overall_succ_3s = float(np.mean([1 if r.get("success_3s", False) else 0 for r in raw_results]) * 100.0)
+    all_ttls_1s = [r["time_to_lock_1s"] for r in raw_results if r.get("time_to_lock_1s") is not None]
+    all_ttls_2s = [r["time_to_lock_2s"] for r in raw_results if r.get("time_to_lock_2s") is not None]
+    overall_ttl_1s = float(np.mean(all_ttls_1s)) if all_ttls_1s else None
+    overall_ttl_2s = float(np.mean(all_ttls_2s)) if all_ttls_2s else None
     overall_fov = float(np.mean([r["fov_lock_pct"] for r in raw_results]))
     overall_fwin = float(np.mean([r["firing_window_s"] for r in raw_results]))
     overall_dwell = float(np.mean([r.get("max_continuous_dwell_s", 0.0) for r in raw_results]))
     overall_min_d = float(np.mean([r["min_distance"] for r in raw_results]))
     overall_breach = float(np.mean([1 if r["collision_breach"] else 0 for r in raw_results]) * 100.0)
+    overall_yaw_j = float(np.mean([r.get("jerk_yaw", 0.0) for r in raw_results]))
+    overall_surge_j = float(np.mean([r.get("jerk_surge", 0.0) for r in raw_results]))
+    overall_lat_j = float(np.mean([r.get("jerk_lat", 0.0) for r in raw_results]))
+    overall_jerk_rms = float(np.mean([r.get("control_jerk_rms", 0.0) for r in raw_results]))
 
-    print("-" * 95)
-    print(f"{'>>> OVERALL':16s} | {'ALL':14s} | 1s: {overall_succ_1s:5.1f}% | 2s: {overall_succ_2s:5.1f}% | 3s: {overall_succ_3s:5.1f}% | MaxDwell: {overall_dwell:4.2f}s | FOV: {overall_fov:5.1f}% | Win: {overall_fwin:4.2f}s | MinD: {overall_min_d:4.2f}m | Breaches: {overall_breach:4.1f}%")
-    print("=" * 95 + "\n")
+    print("-" * 120)
+    ttl1_all_str = f"{overall_ttl_1s:.2f}s" if overall_ttl_1s is not None else "--"
+    ttl2_all_str = f"{overall_ttl_2s:.2f}s" if overall_ttl_2s is not None else "--"
+    print(f"{'>>> OVERALL':22s} | 1s: {overall_succ_1s:5.1f}% | 2s: {overall_succ_2s:5.1f}% | 3s: {overall_succ_3s:5.1f}% | TTL1: {ttl1_all_str} | TTL2: {ttl2_all_str} | MaxDwell: {overall_dwell:4.2f}s | FOV: {overall_fov:5.1f}% | YawJerk: {overall_yaw_j:4.1f} */s2 | SurgeJerk: {overall_surge_j:4.2f} m/s2 | Breaches: {overall_breach:4.1f}%")
+    print("=" * 120 + "\n")
 
     ctrl_tag = controller_type.lower()
     if ctrl_tag == "pid":
@@ -920,7 +1014,31 @@ def run_dataset_benchmark(
         ctrl_tag = f"rl_{tag_name}"
     out_json = output_dir / f"benchmark_results_{dataset.name}_{ctrl_tag}_{mode_str.lower()}_{noise_mode}_d{int(frame_drop_rate*100)}.json"
     with open(out_json, "w", encoding="utf-8") as f:
-        json.dump({"dataset": dataset.name, "controller": ctrl_tag, "model_path": str(model_path) if model_path else None, "noise_mode": noise_mode, "summary": summary_rows, "results": raw_results}, f, indent=2)
+        json.dump({
+            "dataset": dataset.name,
+            "controller": ctrl_tag,
+            "model_path": str(model_path) if model_path else None,
+            "noise_mode": noise_mode,
+            "overall": {
+                "success_rate_1s_pct": overall_succ_1s,
+                "success_rate_2s_pct": overall_succ_2s,
+                "success_rate_3s_pct": overall_succ_3s,
+                "mean_time_to_lock_1s": overall_ttl_1s,
+                "mean_time_to_lock_2s": overall_ttl_2s,
+                "mean_dwell_s": overall_dwell,
+                "mean_firing_window_s": overall_fwin,
+                "mean_fov_lock_pct": overall_fov,
+                "mean_min_distance_m": overall_min_d,
+                "collision_breach_pct": overall_breach,
+                "mean_jerk_yaw_deg_s2": overall_yaw_j,
+                "mean_jerk_surge_m_s2": overall_surge_j,
+                "mean_jerk_lat_m_s2": overall_lat_j,
+                "mean_control_jerk_rms": overall_jerk_rms
+            },
+            "profile_summaries": profile_summaries,
+            "summary": summary_rows,
+            "results": raw_results
+        }, f, indent=2)
     print(f"[REPORT] Dataset benchmark report saved to: {out_json}")
     return {"summary": summary_rows, "results": raw_results}
 

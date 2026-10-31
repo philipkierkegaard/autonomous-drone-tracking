@@ -1813,7 +1813,6 @@ class DronePursuitEnv(gym.Env):
         r_basket = 0.0
         r_close = 0.0
         r_dwell = 0.0
-        r_aux = 0.0
 
         v_fwd = float(self.sim.vel[0] * np.cos(self.sim.yaw) + self.sim.vel[1] * np.sin(self.sim.yaw))
 
@@ -1980,7 +1979,7 @@ class DronePursuitEnv(gym.Env):
             nt = float(np.linalg.norm(v_t))
             if nc > 1.0 and nt > 1.0 and raw_in_view:
                 align = float(np.dot(v_c, v_t) / (nc * nt))
-                r_aux = 3.0 * float(max(0.0, align))
+                r_close += 3.0 * float(max(0.0, align))
 
         # =========================================================================
         # CANDIDATE 07: theory_07_decel_to_turn_centripetal
@@ -2000,7 +1999,7 @@ class DronePursuitEnv(gym.Env):
             if raw_in_view and abs(raw_ex) > 0.20:
                 v_turn = 4.0 + 8.0 * float(np.exp(-0.5 * (abs(raw_ex) / 0.25)**2))
                 if v_fwd > v_turn:
-                    r_aux = -2.0 * float((v_fwd - v_turn) / 4.0) + 2.5 * float(max(0.0, -action[0]))
+                    r_close += -2.0 * float((v_fwd - v_turn) / 4.0) + 2.5 * float(max(0.0, -action[0]))
 
         # =========================================================================
         # CANDIDATE 08: theory_08_retinal_slip_raptor
@@ -2020,7 +2019,7 @@ class DronePursuitEnv(gym.Env):
             slip = float(np.hypot(self.filtered_d_ex, self.filtered_d_ey))
             if raw_in_view and slip > 0.25:
                 p_slip = 2.5 * float((v_fwd / 12.0)**2 * min(2.0, slip / 0.40))
-                r_aux = -p_slip
+                r_close -= p_slip
 
         # =========================================================================
         # CANDIDATE 09: theory_09_curvature_adaptive_basket
@@ -2080,7 +2079,7 @@ class DronePursuitEnv(gym.Env):
             nt = float(np.linalg.norm(v_t))
             if nc > 1.0 and nt > 1.0 and raw_in_view:
                 align = float(np.dot(v_c, v_t) / (nc * nt))
-                r_aux = 2.5 * float(max(0.0, align))
+                r_close += 2.5 * float(max(0.0, align))
 
         # =========================================================================
         # CANDIDATE 12: theory_12_adaptive_grand_champion
@@ -2102,12 +2101,12 @@ class DronePursuitEnv(gym.Env):
             if raw_in_view and abs(raw_ex) > 0.20:
                 v_turn = 4.0 + 8.0 * float(np.exp(-0.5 * (abs(raw_ex) / 0.25)**2))
                 if v_fwd > v_turn:
-                    r_aux = -2.0 * float((v_fwd - v_turn) / 4.0) + 2.5 * float(max(0.0, -action[0]))
+                    r_close += -2.0 * float((v_fwd - v_turn) / 4.0) + 2.5 * float(max(0.0, -action[0]))
 
         else:
             r_basket = 4.0 * float(1.0 - ((dist - self.standoff_nominal) / 1.5)**2) if in_basket else -0.3 * float(max(0.0, dist - self.standoff_max))
             r_close = 2.0 * float(np.clip(closing_speed, -2.0, 4.0)) if dist > self.standoff_max else 1.0
             r_dwell = 6.0 * float(dwell_progress)
 
-        step_reward = r_los + r_basket + r_close + r_dwell + r_aux - p_effort - p_lost + terminal_reward
+        step_reward = r_los + r_basket + r_close + r_dwell - p_effort - p_lost + terminal_reward
         return float(step_reward)
