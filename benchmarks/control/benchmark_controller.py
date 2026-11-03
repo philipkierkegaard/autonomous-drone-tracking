@@ -206,6 +206,7 @@ def evaluate_single_run(
     # Optional trajectory history recording for video rendering
     hist_times, hist_tgt, hist_pos, hist_yaw = [], [], [], []
     hist_vel, hist_cmd, hist_telem, hist_dwell = [], [], [], []
+    hist_in_view, hist_dist = [], []
 
     # 1. Initialize Drone Controller (PID vs Recurrent RL)
     if controller is None:
@@ -519,14 +520,15 @@ def evaluate_single_run(
             cumulative_firing_time += dt
             continuous_lock_dwell += dt
             max_continuous_dwell = max(max_continuous_dwell, continuous_lock_dwell)
+            # Time to actual success: the timestamp when the continuous dwell requirement is completed
             if continuous_lock_dwell >= 1.0 and time_to_lock_1s is None:
-                time_to_lock_1s = float(t - 1.0)
+                time_to_lock_1s = float(t)
             if continuous_lock_dwell >= 2.0 and time_to_lock_2s is None:
-                time_to_lock_2s = float(t - 2.0)
+                time_to_lock_2s = float(t)
             if continuous_lock_dwell >= 3.0 and time_to_lock_3s is None:
-                time_to_lock_3s = float(t - 3.0)
+                time_to_lock_3s = float(t)
             if continuous_lock_dwell >= dwell_time_required and time_to_first_lock is None:
-                time_to_first_lock = float(t - dwell_time_required)
+                time_to_first_lock = float(t)
                 lock_achieved = True
         else:
             continuous_lock_dwell = 0.0
@@ -540,6 +542,8 @@ def evaluate_single_run(
             hist_cmd.append(cmd.copy())
             hist_telem.append(ctrl_telem.copy())
             hist_dwell.append(continuous_lock_dwell)
+            hist_in_view.append(in_view_gt)
+            hist_dist.append(dist)
 
     res_dict = {
         "scenario_id": scenario_id,
@@ -582,6 +586,8 @@ def evaluate_single_run(
             "chaser_cmd": np.array(hist_cmd),
             "chaser_telem": hist_telem,
             "dwell": np.array(hist_dwell),
+            "in_view": np.array(hist_in_view, dtype=bool),
+            "distance": np.array(hist_dist, dtype=np.float32),
             "catch_t_1s": time_to_first_lock
         }
 

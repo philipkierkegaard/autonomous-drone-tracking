@@ -97,6 +97,7 @@ class KinematicVisualServoController:
         min_centering_factor: float = 0.35,  # Speed retention floor during sharp turns (allows braking down to 35% speed)
         search_mode: str = "momentum_cruise", # 'momentum_cruise' (preserve pursuit momentum), 'decay' (smooth brake), or 'brake' (immediate hover)
         coast_mode: str = "decay",           # 'decay' (inhibit forward acceleration & smooth decay), 'brake' (immediate hover), or 'follow'
+        enable_looming_ff: bool = True,      # Enable optical looming velocity feedforward on Axis 0
     ):
         self.camera_uptilt = np.deg2rad(camera_uptilt_deg)
         self.half_hfov = np.tan(np.deg2rad(hfov_deg / 2.0))
@@ -111,6 +112,7 @@ class KinematicVisualServoController:
         self.min_centering_factor = float(min_centering_factor)
         self.search_mode = str(search_mode).lower().strip()
         self.coast_mode = str(coast_mode).lower().strip()
+        self.enable_looming_ff = bool(enable_looming_ff)
 
         self.lost_time = 0.0
 
@@ -452,10 +454,15 @@ class KinematicVisualServoController:
         # Compute optical looming relative velocity whenever bounding box is valid
         if current_w > 1.0 and telemetry.get("in_view", True):
             if self.prev_bbox_w is not None and dt > 1e-4:
-                raw_dw = (current_w - self.prev_bbox_w) / dt
-                alpha_w = dt / (dt + 0.08)  # 80ms low-pass filter against bounding box pixel jitter
-                self.filtered_dw += alpha_w * (raw_dw - self.filtered_dw)
-            self.prev_bbox_w = current_w
+                # Guard against 50Hz control / 30Hz camera frame-repetition aliasing
+                # If current_w did not change from prev_bbox_w, hold filtered rate without zero-pulsing
+                if abs(current_w - self.prev_bbox_w) > 1e-6:
+                    raw_dw = (current_w - self.prev_bbox_w) / dt
+                    alpha_w = dt / (dt + 0.08)  # 80ms low-pass filter against bounding box pixel jitter
+                    self.filtered_dw += alpha_w * (raw_dw - self.filtered_dw)
+                    self.prev_bbox_w = current_w
+            else:
+                self.prev_bbox_w = current_w
 
             # Distance estimate from pinhole geometry: d_hat = d* * (w* / w)
             d_hat = float(np.clip(self.standoff_dist * (self.desired_bbox_size / max(5.0, current_w)), 1.5, 25.0))
@@ -469,10 +476,10 @@ class KinematicVisualServoController:
             decay = max(0.0, 1.0 - 1.5 * max(0.0, self.coast_time - 0.2))
             est_v_target = float(self.last_valid_target_vx * decay)
 
-        # Target forward velocity feedforward (uses optical looming estimate unless external is provided)
+        # Target forward velocity feedforward (uses optical looming estimate if enabled and external is not provided)
         target_vx_ff = float(telemetry.get("target_vx", telemetry.get("target_vel_x", 0.0)))
         if target_vx_ff <= 0.0:
-            target_vx_ff = est_v_target
+            target_vx_ff = est_v_target if getattr(self, "enable_looming_ff", True) else 0.0
 
         # Verify all derived error terms are finite before proceeding
         if not (np.isfinite(range_term) and np.isfinite(target_vx_ff) and np.isfinite(err_x_horizon) and np.isfinite(elevation_horizon) and np.isfinite(azimuth_horizon)):

@@ -422,6 +422,7 @@ class ArduPilotBridge:
                     vn = float(msg.vx)
                     ve = float(msg.vy)
                     vd = float(msg.vz)
+                    t_now = time.perf_counter()
                     with self.lock:
                         self.vx_m_s = vn
                         self.vy_m_s = ve
@@ -429,10 +430,11 @@ class ArduPilotBridge:
                         self.has_local_pos = True
 
                     if self.vehicle_state is not None:
-                        self.vehicle_state.vx_m_s = vn
-                        self.vehicle_state.vy_m_s = ve
-                        self.vehicle_state.vz_m_s = vd
-                        if abs(vn) > 1e-4 or abs(ve) > 1e-4:
+                        with getattr(self.vehicle_state, "lock", threading.Lock()):
+                            self.vehicle_state.vx_m_s = vn
+                            self.vehicle_state.vy_m_s = ve
+                            self.vehicle_state.vz_m_s = vd
+                            self.vehicle_state.velocity_updated_time = t_now
                             self.vehicle_state.has_gps_vel = True
 
                 elif msg_type == "GLOBAL_POSITION_INT":

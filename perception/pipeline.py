@@ -269,35 +269,55 @@ class DroneTracker:
             predicted_boxes.append(trk.predict(dt_step=dt_step))
         predicted_boxes = np.array(predicted_boxes) if len(predicted_boxes) > 0 else np.empty((0, 4))
 
-        # 2. Hungarian matching between predictions and detections
+
+        # 2. Greedy IoU matching with distance fallback
         matched_indices = []
-        unmatched_detections = list(range(len(detections)))
-        unmatched_trackers = list(range(len(self.trackers)))
+        unmatched_detections = set(range(len(detections)))
+        unmatched_trackers = set(range(len(self.trackers)))
 
         if len(predicted_boxes) > 0 and len(detections) > 0:
             cost_matrix = compute_iou_matrix(predicted_boxes, detections)
-            row_ind, col_ind = linear_sum_assignment(cost_matrix)
 
-            for r, c in zip(row_ind, col_ind):
-                if cost_matrix[r, c] <= self.iou_match_threshold:
+            # Stage 1: Match highest-IoU pairs first
+            candidates = [
+                (cost_matrix[r, c], r, c)
+                for r in range(len(predicted_boxes))
+                for c in range(len(detections))
+                if cost_matrix[r, c] <= self.iou_match_threshold
+            ]
+
+            for cost, r, c in sorted(candidates):
+                if r in unmatched_trackers and c in unmatched_detections:
                     matched_indices.append((r, c))
-                    if c in unmatched_detections:
-                        unmatched_detections.remove(c)
-                    if r in unmatched_trackers:
-                        unmatched_trackers.remove(r)
-                else:
-                    # Fallback: Euclidean center distance gating for fast agile maneuvers
-                    pred_center = (predicted_boxes[r, :2] + predicted_boxes[r, 2:]) / 2.0
-                    det_center = (detections[c, :2] + detections[c, 2:]) / 2.0
-                    pred_diag = np.linalg.norm(predicted_boxes[r, 2:] - predicted_boxes[r, :2])
+                    unmatched_trackers.remove(r)
+                    unmatched_detections.remove(c)
+
+            # Stage 2: Nearest-center fallback
+            fallback_candidates = []
+
+            for r in unmatched_trackers:
+                pred = predicted_boxes[r]
+                pred_center = (pred[:2] + pred[2:]) / 2.0
+                pred_diag = np.linalg.norm(pred[2:] - pred[:2])
+                gate = max(80.0, self.dist_gate_scale * pred_diag)
+
+                for c in unmatched_detections:
+                    det = detections[c]
+                    det_center = (det[:2] + det[2:]) / 2.0
                     dist = np.linalg.norm(pred_center - det_center)
 
-                    if dist < max(80.0, self.dist_gate_scale * pred_diag):
-                        matched_indices.append((r, c))
-                        if c in unmatched_detections:
-                            unmatched_detections.remove(c)
-                        if r in unmatched_trackers:
-                            unmatched_trackers.remove(r)
+                    if dist < gate:
+                        fallback_candidates.append((dist, r, c))
+
+            for dist, r, c in sorted(fallback_candidates):
+                if r in unmatched_trackers and c in unmatched_detections:
+                    matched_indices.append((r, c))
+                    unmatched_trackers.remove(r)
+                    unmatched_detections.remove(c)
+
+        unmatched_detections = list(unmatched_detections)
+        unmatched_trackers = list(unmatched_trackers)
+
 
         # 3. Update matched trackers
         for trk_idx, det_idx in matched_indices:

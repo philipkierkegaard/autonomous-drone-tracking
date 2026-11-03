@@ -339,6 +339,8 @@ class AutonomousTrackerNode:
             ctrl_kwargs["search_mode"] = getattr(args, "search_mode", "brake")
         if "coast_mode" in sig.parameters:
             ctrl_kwargs["coast_mode"] = getattr(args, "coast_mode", "decay")
+        if "enable_looming_ff" in sig.parameters:
+            ctrl_kwargs["enable_looming_ff"] = getattr(args, "looming_ff", True)
 
         # Load tuned PID gains from file if provided
         pid_gains_path = getattr(args, "pid_gains", "control/weights/tuned_pid_gains.json")
@@ -1288,7 +1290,10 @@ class AutonomousTrackerNode:
                     telemetry=telemetry,
                     drone_pitch=current_pitch,
                     drone_roll=current_roll,
-                    dt=dt
+                    dt=dt,
+                    vehicle_vel=self.vehicle_state.velocity_body,
+                    vehicle_yaw_rate=self.vehicle_state.yaw_rate_rad_s,
+                    current_alt_m=self.get_current_altitude() if self.get_current_altitude() is not None else 2.5
                 )
                 if not np.all(np.isfinite(raw_cmd)):
                     raw_cmd = np.zeros_like(raw_cmd)
@@ -1844,6 +1849,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--pid-gains", type=str, default="control/weights/tuned_pid_gains.json",
         help="Path to JSON file containing tuned PID gains (default: control/weights/tuned_pid_gains.json, set 'none' to disable)."
+    )
+    parser.add_argument(
+        "--no-looming-ff", action="store_false", dest="looming_ff", default=True,
+        help="Disable optical looming relative velocity feedforward, running 100%% pure error-driven visual servoing."
     )
 
     # Altitude Floor and Ceiling Safety Limits

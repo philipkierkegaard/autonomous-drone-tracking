@@ -444,9 +444,16 @@ class TestArduPilotBridge(unittest.TestCase):
         self.vehicle_state.vx_m_s = 2.4
         self.vehicle_state.vy_m_s = -0.6
         self.vehicle_state.vz_m_s = 0.1
+        self.vehicle_state.velocity_updated_time = time.perf_counter()
         self.vehicle_state.has_gps_vel = True
         self.assertAlmostEqual(self.vehicle_state.vx_m_s, 2.4)
         self.assertTrue(self.vehicle_state.has_gps_vel)
+        v_body = self.vehicle_state.velocity_body
+        self.assertIsNotNone(v_body)
+        # At yaw=90 deg (facing East): North is left (-Y), East is forward (+X)
+        self.assertAlmostEqual(v_body[0], -0.6, places=4)
+        self.assertAlmostEqual(v_body[1], -2.4, places=4)
+        self.assertAlmostEqual(v_body[2], 0.1, places=4)
 
         # Mock GLOBAL_POSITION_INT (relative alt: 6500 mm = 6.5 m)
         self.vehicle_state.altitude_rel_m = 6500 / 1000.0

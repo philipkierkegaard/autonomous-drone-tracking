@@ -134,11 +134,28 @@ def main():
     # STATISTICAL SYNTHESIS ACROSS 10 FOLDS
     # =========================================================================
     profiles = ["cruising", "evasive", "hyper_evasive"]
+
+    # Align Time-to-Success to represent the actual moment of success (including 2.0s dwell)
+    for f in fold_results_pid + fold_results_rrl:
+        if "results" in f:
+            ttls_2s = [float(r["time_to_lock_2s"] + 2.0) for r in f["results"] if r.get("time_to_lock_2s") is not None]
+            ttls_1s = [float(r["time_to_lock_1s"] + 1.0) for r in f["results"] if r.get("time_to_lock_1s") is not None]
+            f["overall"]["mean_time_to_lock_2s"] = float(np.mean(ttls_2s)) if ttls_2s else None
+            f["overall"]["mean_time_to_lock_1s"] = float(np.mean(ttls_1s)) if ttls_1s else None
+
+            for prof in profiles:
+                p_sub_2s = [float(r["time_to_lock_2s"] + 2.0) for r in f["results"] if r["profile"] == prof and r.get("time_to_lock_2s") is not None]
+                p_sub_1s = [float(r["time_to_lock_1s"] + 1.0) for r in f["results"] if r["profile"] == prof and r.get("time_to_lock_1s") is not None]
+                prof_entry = next((item for item in f["profile_summaries"] if item["profile"] == prof), None)
+                if prof_entry:
+                    prof_entry["mean_time_to_lock_2s"] = float(np.mean(p_sub_2s)) if p_sub_2s else None
+                    prof_entry["mean_time_to_lock_1s"] = float(np.mean(p_sub_1s)) if p_sub_1s else None
+
     metrics_to_track = [
         ("success_rate_2s_pct", "2.0s Dwell Catch (%)", "{:.1f}%"),
         ("success_rate_1s_pct", "1.0s Dwell Catch (%)", "{:.1f}%"),
         ("success_rate_3s_pct", "3.0s Dwell Catch (%)", "{:.1f}%"),
-        ("mean_time_to_lock_2s", "Time-to-Lock 2s (s)", "{:.2f}s"),
+        ("mean_time_to_lock_2s", "Time-to-Success (2.0s Dwell) (s)", "{:.2f}s"),
         ("mean_dwell_s", "Mean Max Dwell (s)", "{:.2f}s"),
         ("mean_fov_lock_pct", "FOV Retention (%)", "{:.1f}%"),
         ("mean_jerk_yaw_deg_s2", "Yaw Jerk (deg/s^2)", "{:.1f}"),
@@ -249,6 +266,24 @@ def main():
         p_val = pr["p_value"]
         p_str_val = f"< 0.001" if p_val < 0.001 else f"{p_val:.4f}"
         md_lines.append(f"| **{prof.capitalize()}** (2,000 runs) | {p_str} | **{r_str}** | {d_str} | {p_str_val} |")
+
+    md_lines.extend([
+        "",
+        "## 3. Profile Breakdown (Time-to-Success for 2.0s Dwell, including 2s dwell)",
+        "",
+        "| Target Profile | Tuned PID Baseline (95% CI) | Residual RL v6 (95% CI) | Paired Difference (Δ, 95% CI) | p-value |",
+        "| :--- | :---: | :---: | :---: | :---: |"
+    ])
+
+    for prof in profiles:
+        pr_ttl = analysis["by_profile"][prof]["mean_time_to_lock_2s"]
+        p_str = f"{pr_ttl['pid_mean']:.2f}s [{pr_ttl['pid_ci_95'][0]:.2f}s, {pr_ttl['pid_ci_95'][1]:.2f}s]"
+        r_str = f"{pr_ttl['rrl_mean']:.2f}s [{pr_ttl['rrl_ci_95'][0]:.2f}s, {pr_ttl['rrl_ci_95'][1]:.2f}s]"
+        d_sign = "+" if pr_ttl["paired_delta_mean"] >= 0 else ""
+        d_str = f"{d_sign}{pr_ttl['paired_delta_mean']:.2f}s [{pr_ttl['paired_delta_ci_95'][0]:.2f}s, {pr_ttl['paired_delta_ci_95'][1]:.2f}s]"
+        p_val = pr_ttl["p_value"]
+        p_str_val = f"< 0.001" if p_val < 0.001 else f"{p_val:.4f}"
+        md_lines.append(f"| **{prof.capitalize()}** | {p_str} | **{r_str}** | {d_str} | {p_str_val} |")
 
     with open(report_md_path, "w", encoding="utf-8") as f:
         f.write("\n".join(md_lines) + "\n")
