@@ -361,7 +361,10 @@ class AutonomousTrackerNode:
                         "kp_yaw", "ki_yaw", "kd_yaw"
                     ]:
                         if k in p_map and k in sig.parameters:
-                            ctrl_kwargs[k] = float(p_map[k])
+                            if k in ("kp_lat", "ki_lat", "kd_lat") and not getattr(args, "lateral_strafe", True):
+                                ctrl_kwargs[k] = 0.0
+                            else:
+                                ctrl_kwargs[k] = float(p_map[k])
                     print(f"[PID] Loaded tuned gains from {p_gains.name}: "
                           f"Fwd(kp={ctrl_kwargs.get('kp_forward', 0):.3f}, ki={ctrl_kwargs.get('ki_forward', 0):.3f}, kd={ctrl_kwargs.get('kd_forward', 0):.3f}), "
                           f"Lat(kp={ctrl_kwargs.get('kp_lat', 0):.3f}, ki={ctrl_kwargs.get('ki_lat', 0):.3f}, kd={ctrl_kwargs.get('kd_lat', 0):.3f}), "
@@ -1318,12 +1321,16 @@ class AutonomousTrackerNode:
 
                 max_step = max_accel * dt
                 cmd_safe = np.clip(raw_cmd, prev_cmd_3d - max_step, prev_cmd_3d + max_step)
+                if not getattr(self.args, "lateral_strafe", True) and len(cmd_safe) >= 2:
+                    cmd_safe[1] = 0.0
                 if not np.all(np.isfinite(cmd_safe)):
                     cmd_safe = np.zeros_like(cmd_safe)
                 prev_cmd_3d = cmd_safe.copy()
 
             # 6. Convert to standard 4-DOF Body Frame (forward, right, down, yawspeed)
             v_fwd, v_right, v_down, yawspeed = self.controller.to_velocity_body(cmd_safe)
+            if not getattr(self.args, "lateral_strafe", True):
+                v_right = 0.0
             if not all(np.isfinite(v) for v in (v_fwd, v_right, v_down, yawspeed)):
                 v_fwd, v_right, v_down, yawspeed = 0.0, 0.0, 0.0, 0.0
 

@@ -113,6 +113,7 @@ class KinematicVisualServoController:
         self.search_mode = str(search_mode).lower().strip()
         self.coast_mode = str(coast_mode).lower().strip()
         self.enable_looming_ff = bool(enable_looming_ff)
+        self.enable_lateral_strafe = bool(enable_lateral_strafe)
 
         self.lost_time = 0.0
 
@@ -121,9 +122,9 @@ class KinematicVisualServoController:
         fwd_ki = float(ki_forward)
         fwd_kd = float(kd_forward) if kd_forward is not None else 0.15
 
-        lat_kp = float(kp_lat) if enable_lateral_strafe else 0.0
-        lat_ki = float(ki_lat) if enable_lateral_strafe else 0.0
-        lat_kd = float(kd_lat) if enable_lateral_strafe else 0.0
+        lat_kp = float(kp_lat) if self.enable_lateral_strafe else 0.0
+        lat_ki = float(ki_lat) if self.enable_lateral_strafe else 0.0
+        lat_kd = float(kd_lat) if self.enable_lateral_strafe else 0.0
 
         z_kp = float(kp_z) if kp_z is not None else 6.0
         z_ki = float(ki_z) if ki_z is not None else 0.0
@@ -156,15 +157,21 @@ class KinematicVisualServoController:
         if kp_forward is not None: self.kp[0] = float(kp_forward)
         if ki_forward is not None: self.ki[0] = float(ki_forward)
         if kd_forward is not None: self.kd[0] = float(kd_forward)
-        if kp_lat is not None: self.kp[1] = float(kp_lat)
-        if ki_lat is not None: self.ki[1] = float(ki_lat)
-        if kd_lat is not None: self.kd[1] = float(kd_lat)
+        if kp_lat is not None: self.kp[1] = float(kp_lat) if self.enable_lateral_strafe else 0.0
+        if ki_lat is not None: self.ki[1] = float(ki_lat) if self.enable_lateral_strafe else 0.0
+        if kd_lat is not None: self.kd[1] = float(kd_lat) if self.enable_lateral_strafe else 0.0
         if kp_z is not None:   self.kp[2] = float(kp_z)
         if ki_z is not None:   self.ki[2] = float(ki_z)
         if kd_z is not None:   self.kd[2] = float(kd_z)
         if kp_yaw is not None: self.kp[3] = float(kp_yaw)
         if ki_yaw is not None: self.ki[3] = float(ki_yaw)
         if kd_yaw is not None: self.kd[3] = float(kd_yaw)
+
+        # Enforce zero gains on Axis 1 if lateral strafe is disabled
+        if not self.enable_lateral_strafe:
+            self.kp[1] = 0.0
+            self.ki[1] = 0.0
+            self.kd[1] = 0.0
 
         # Output Saturation Limits per axis: [Forward, Lateral, Vertical, Yaw]
         yaw_limit = float(max_yawspeed_deg) if max_yawspeed_deg is not None else 120.0
@@ -219,6 +226,8 @@ class KinematicVisualServoController:
         self.filtered_dw = 0.0
         self.last_valid_target_vx = 0.0
         self.coast_time = 0.0
+        self.prev_vision_frame_idx: Optional[int] = None
+        self.prev_vision_time: Optional[float] = None
 
         # Vectorized internal state (shape: (4,))
         self.integral = np.zeros(4, dtype=np.float64)
@@ -240,6 +249,8 @@ class KinematicVisualServoController:
         self.filtered_dw = 0.0
         self.last_valid_target_vx = 0.0
         self.coast_time = 0.0
+        self.prev_vision_frame_idx = None
+        self.prev_vision_time = None
         self.initialized = False
         self.lost_time = 0.0
 
@@ -341,7 +352,9 @@ class KinematicVisualServoController:
                 else:
                     return np.array([0.0, 0.0, 0.0, 15.0], dtype=np.float64)
 
-        is_coasting = (status == "COASTING")
+        is_coasting = (status == "COASTING") or bool(telemetry.get("is_coasting", False))
+        target_in_view = bool(telemetry.get("in_view", not is_coasting)) and not is_coasting
+
         if is_coasting and self.coast_mode == "brake":
             # Immediate active brake on coasting: do not pursue unmeasured Kalman predictions
             self.lost_time += dt
@@ -360,8 +373,8 @@ class KinematicVisualServoController:
         err_x = float(telemetry.get("error_x", 0.0))
         err_y = float(telemetry.get("error_y", 0.0))
 
-        # Update last-seen memory when target is actively in view
-        if telemetry.get("in_view", True):
+        # Update last-seen memory when target is actively in view (real detection, not coasting)
+        if target_in_view:
             self.last_seen_ex = err_x
             self.last_seen_ey = err_y
         elif is_coasting and abs(err_x) < 1e-4 and abs(err_y) < 1e-4:
@@ -445,24 +458,40 @@ class KinematicVisualServoController:
         else:
             v_drone_fwd = float(self.prev_cmd_vx)
 
+        # Check if telemetry represents a new vision frame
+        frame_idx = telemetry.get("frame_idx", None)
+        vision_time = telemetry.get("timestamp", None)
+
+        if frame_idx is None:
+            is_new_vision_frame = True
+            dt_vision = dt
+        elif self.prev_vision_frame_idx is None or frame_idx != self.prev_vision_frame_idx:
+            is_new_vision_frame = True
+            if self.prev_vision_time is not None and vision_time is not None and vision_time > self.prev_vision_time:
+                dt_vision = float(np.clip(vision_time - self.prev_vision_time, 1e-3, 0.50))
+            else:
+                dt_vision = dt
+            self.prev_vision_frame_idx = frame_idx
+            self.prev_vision_time = vision_time
+        else:
+            is_new_vision_frame = False
+            dt_vision = dt
+
         current_w = float(telemetry.get("bbox_w", telemetry.get("target_size", 0.0)))
         if not is_coasting:
             self.coast_time = 0.0
         else:
             self.coast_time += dt
 
-        # Compute optical looming relative velocity whenever bounding box is valid
-        if current_w > 1.0 and telemetry.get("in_view", True):
-            if self.prev_bbox_w is not None and dt > 1e-4:
-                # Guard against 50Hz control / 30Hz camera frame-repetition aliasing
-                # If current_w did not change from prev_bbox_w, hold filtered rate without zero-pulsing
-                if abs(current_w - self.prev_bbox_w) > 1e-6:
-                    raw_dw = (current_w - self.prev_bbox_w) / dt
-                    alpha_w = dt / (dt + 0.08)  # 80ms low-pass filter against bounding box pixel jitter
+        # Compute optical looming relative velocity whenever bounding box is valid, in view, and not coasting
+        if current_w > 1.0 and target_in_view:
+            if is_new_vision_frame:
+                if self.prev_bbox_w is not None and dt_vision > 1e-4:
+                    raw_dw = (current_w - self.prev_bbox_w) / dt_vision
+                    alpha_w = dt_vision / (dt_vision + 0.08)  # 80ms low-pass filter against bounding box pixel jitter
                     self.filtered_dw += alpha_w * (raw_dw - self.filtered_dw)
-                    self.prev_bbox_w = current_w
-            else:
                 self.prev_bbox_w = current_w
+            # Hold filtered_dw during intermediate 50 Hz control ticks without decaying or zero-pulsing
 
             # Distance estimate from pinhole geometry: d_hat = d* * (w* / w)
             d_hat = float(np.clip(self.standoff_dist * (self.desired_bbox_size / max(5.0, current_w)), 1.5, 25.0))
@@ -471,7 +500,7 @@ class KinematicVisualServoController:
             est_v_target = float(np.clip(v_drone_fwd + d_dot_rel, 0.0, self.max_limits[0]))
             self.last_valid_target_vx = est_v_target
         else:
-            # During dropout / prolonged loss, decay loom derivative and hold last known velocity for 0.5s
+            # During dropout / prolonged loss / coasting, decay loom derivative and hold last known velocity for 0.5s
             self.filtered_dw *= max(0.0, 1.0 - 2.0 * dt)
             decay = max(0.0, 1.0 - 1.5 * max(0.0, self.coast_time - 0.2))
             est_v_target = float(self.last_valid_target_vx * decay)
@@ -503,6 +532,8 @@ class KinematicVisualServoController:
             target_vx_ff=target_vx_ff if self.coast_time < 0.5 else 0.0,
             is_coasting=is_coasting,
             current_alt_m=current_alt_m,
+            is_new_vision_frame=is_new_vision_frame,
+            dt_vision=dt_vision,
         )
 
     def update(
@@ -515,6 +546,8 @@ class KinematicVisualServoController:
         target_vx_ff: float = 0.0,
         is_coasting: bool = False,
         current_alt_m: Optional[float] = None,
+        is_new_vision_frame: bool = True,
+        dt_vision: float = 0.02,
     ) -> np.ndarray:
         """
         Vectorized 4-DOF Kinematic Control Update.
@@ -574,21 +607,32 @@ class KinematicVisualServoController:
         if not self.initialized:
             self.filtered_deriv = np.zeros(4, dtype=np.float64)
             deriv = np.zeros(4, dtype=np.float64)
+            self.prev_error = e.copy()
             self.initialized = True
         else:
-            raw_deriv = (e - self.prev_error) / dt
-            alpha = dt / (dt + self.filter_tau)
-            self.filtered_deriv += alpha * (raw_deriv - self.filtered_deriv)
-            deriv = self.filtered_deriv
+            if is_coasting:
+                # During coasting/target loss, smoothly decay filtered derivative
+                self.filtered_deriv *= max(0.0, 1.0 - 2.0 * dt)
+                deriv = self.filtered_deriv
+            elif is_new_vision_frame:
+                dt_d = dt_vision if dt_vision > 1e-4 else dt
+                raw_deriv = (e - self.prev_error) / dt_d
+                alpha = dt_d / (dt_d + self.filter_tau)
+                self.filtered_deriv += alpha * (raw_deriv - self.filtered_deriv)
+                self.prev_error = e.copy()
+                deriv = self.filtered_deriv
+            else:
+                # Hold the filtered derivative without zero-pulsing or decaying on cached 50Hz ticks
+                deriv = self.filtered_deriv
 
         d_term = self.kd * deriv
-        self.prev_error = e.copy()
 
         # ----------------------------------------------------------------------
         # 4. Vectorized Integrator Update with Anti-Windup Clamping
         # ----------------------------------------------------------------------
-        # Maintain integrator during active tracking and short 30Hz-to-50Hz inter-frame Kalman predictions
-        if not is_coasting or getattr(self, "coast_time", 0.0) < 0.15:
+        # Maintain integrator during active tracking ONLY.
+        # During coasting / target loss, freeze and gently decay to prevent phantom windup.
+        if not is_coasting:
             tentative_out = p_term + self.ki * self.integral + d_term
             saturated_high = (tentative_out >= self.max_limits) & (e > 0)
             saturated_low  = (tentative_out <= self.min_limits) & (e < 0)
@@ -599,7 +643,7 @@ class KinematicVisualServoController:
             self.integral[self.ki == 0] = 0.0
             self.integral = np.clip(self.integral, -self.int_limits, self.int_limits)
         else:
-            # During prolonged target loss (> 150ms), decay existing integrals gently
+            # During coasting / prolonged loss, decay existing integrals gently
             self.integral *= max(0.0, 1.0 - 0.5 * dt)
         i_term = self.ki * self.integral
 
@@ -607,6 +651,13 @@ class KinematicVisualServoController:
         # 5. Compute Saturated Output Vector
         # ----------------------------------------------------------------------
         raw_output = p_term + i_term + d_term
+
+        # Enforce zero lateral strafe command if lateral strafe is disabled
+        if not getattr(self, "enable_lateral_strafe", True):
+            raw_output[1] = 0.0
+            self.integral[1] = 0.0
+            self.prev_cmd[1] = 0.0
+            self.prev_cmd_vy = 0.0
 
         # Pure Visual Servoing Guidance Law on Axis 0 (Forward Velocity):
         # When no external velocity feedforward is provided, forward throttle is 100% error-driven:

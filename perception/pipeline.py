@@ -741,6 +741,8 @@ class DroneTrackingPipeline:
         telemetry = {
             "frame_idx": self.frame_idx,
             "status": "SEARCHING",    # "LOCKED", "COASTING", "SEARCHING"
+            "in_view": False,
+            "is_coasting": False,
             "target_id": None,
             "bbox": None,
             "center": None,
@@ -788,8 +790,11 @@ class DroneTrackingPipeline:
             area_ratio = (bw * bh) / float(w * h)
             vx, vy = primary_track["velocity"]
 
+            is_trk_coasting = bool(primary_track.get("is_coasting", False))
             telemetry.update({
-                "status": "COASTING" if primary_track["is_coasting"] else "LOCKED",
+                "status": "COASTING" if is_trk_coasting else "LOCKED",
+                "in_view": not is_trk_coasting,
+                "is_coasting": is_trk_coasting,
                 "target_id": primary_track["id"],
                 "bbox": [float(b) for b in bbox],
                 "center": (float(tcx), float(tcy)),
