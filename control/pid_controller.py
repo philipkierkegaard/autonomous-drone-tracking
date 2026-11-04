@@ -228,6 +228,8 @@ class KinematicVisualServoController:
         self.coast_time = 0.0
         self.prev_vision_frame_idx: Optional[int] = None
         self.prev_vision_time: Optional[float] = None
+        self.was_tracking: bool = False
+        self.prev_target_id: Optional[int] = None
 
         # Vectorized internal state (shape: (4,))
         self.integral = np.zeros(4, dtype=np.float64)
@@ -251,6 +253,8 @@ class KinematicVisualServoController:
         self.coast_time = 0.0
         self.prev_vision_frame_idx = None
         self.prev_vision_time = None
+        self.was_tracking = False
+        self.prev_target_id = None
         self.initialized = False
         self.lost_time = 0.0
 
@@ -297,6 +301,9 @@ class KinematicVisualServoController:
         if status == "SEARCHING":
             self.lost_time += dt
             self.initialized = False  # Reset initialized state to eliminate derivative spike upon re-acquisition
+            self.was_tracking = False
+            self.prev_bbox_w = None
+            self.filtered_dw = 0.0
             if self.search_mode == "momentum_cruise":
                 # Option C: Momentum Cruise & Visual Search
                 # Preserves forward pursuit speed (nominally 4.0 m/s) and continues turning along
@@ -359,6 +366,9 @@ class KinematicVisualServoController:
             # Immediate active brake on coasting: do not pursue unmeasured Kalman predictions
             self.lost_time += dt
             self.initialized = False
+            self.was_tracking = False
+            self.prev_bbox_w = None
+            self.filtered_dw = 0.0
             self.integral.fill(0.0)
             self.prev_error.fill(0.0)
             self.filtered_deriv.fill(0.0)
@@ -477,15 +487,35 @@ class KinematicVisualServoController:
             is_new_vision_frame = False
             dt_vision = dt
 
+        # Smart Re-acquisition Detection:
+        # Occurs if target is in view after being lost (not was_tracking or not initialized),
+        # if prolonged coasting occurred (>100ms / ~3 frames), or if track ID changed.
+        current_target_id = telemetry.get("target_id", None)
+        target_id_changed = (
+            current_target_id is not None
+            and self.prev_target_id is not None
+            and current_target_id != self.prev_target_id
+        )
+        is_reacquisition = bool(
+            target_in_view and (
+                not self.was_tracking
+                or not self.initialized
+                or self.coast_time > 0.10
+                or target_id_changed
+            )
+        )
+
         current_w = float(telemetry.get("bbox_w", telemetry.get("target_size", 0.0)))
-        if not is_coasting:
-            self.coast_time = 0.0
-        else:
-            self.coast_time += dt
 
         # Compute optical looming relative velocity whenever bounding box is valid, in view, and not coasting
         if current_w > 1.0 and target_in_view:
-            if is_new_vision_frame:
+            if is_reacquisition:
+                # Bumpless re-acquisition: seed previous bbox width from current measurement to prevent surge spike
+                self.prev_bbox_w = current_w
+                self.filtered_dw = 0.0
+                est_v_target = v_drone_fwd
+                self.last_valid_target_vx = est_v_target
+            elif is_new_vision_frame:
                 if self.prev_bbox_w is not None and dt_vision > 1e-4:
                     raw_dw = (current_w - self.prev_bbox_w) / dt_vision
                     alpha_w = dt_vision / (dt_vision + 0.08)  # 80ms low-pass filter against bounding box pixel jitter
@@ -504,6 +534,16 @@ class KinematicVisualServoController:
             self.filtered_dw *= max(0.0, 1.0 - 2.0 * dt)
             decay = max(0.0, 1.0 - 1.5 * max(0.0, self.coast_time - 0.2))
             est_v_target = float(self.last_valid_target_vx * decay)
+
+        if not is_coasting:
+            self.coast_time = 0.0
+        else:
+            self.coast_time += dt
+
+        # Update tracking continuity states
+        self.was_tracking = bool(target_in_view)
+        if current_target_id is not None:
+            self.prev_target_id = current_target_id
 
         # Target forward velocity feedforward (uses optical looming estimate if enabled and external is not provided)
         target_vx_ff = float(telemetry.get("target_vx", telemetry.get("target_vel_x", 0.0)))
@@ -534,6 +574,7 @@ class KinematicVisualServoController:
             current_alt_m=current_alt_m,
             is_new_vision_frame=is_new_vision_frame,
             dt_vision=dt_vision,
+            is_reacquisition=is_reacquisition,
         )
 
     def update(
@@ -548,6 +589,7 @@ class KinematicVisualServoController:
         current_alt_m: Optional[float] = None,
         is_new_vision_frame: bool = True,
         dt_vision: float = 0.02,
+        is_reacquisition: bool = False,
     ) -> np.ndarray:
         """
         Vectorized 4-DOF Kinematic Control Update.
@@ -604,7 +646,8 @@ class KinematicVisualServoController:
         # ----------------------------------------------------------------------
         # 3. Vectorized Derivative Term with Low-Pass Filter
         # ----------------------------------------------------------------------
-        if not self.initialized:
+        if not self.initialized or is_reacquisition:
+            # Bumpless transfer: seed previous error from fresh re-acquisition, eliminate derivative kick
             self.filtered_deriv = np.zeros(4, dtype=np.float64)
             deriv = np.zeros(4, dtype=np.float64)
             self.prev_error = e.copy()
@@ -617,6 +660,10 @@ class KinematicVisualServoController:
             elif is_new_vision_frame:
                 dt_d = dt_vision if dt_vision > 1e-4 else dt
                 raw_deriv = (e - self.prev_error) / dt_d
+                # Safety rate-limit clamp on raw derivative against extreme pixel teleportation
+                # (10 m/s for translation, 720 deg/s for yaw)
+                max_deriv = np.array([10.0, 10.0, 10.0, np.deg2rad(720.0)], dtype=np.float64)
+                raw_deriv = np.clip(raw_deriv, -max_deriv, max_deriv)
                 alpha = dt_d / (dt_d + self.filter_tau)
                 self.filtered_deriv += alpha * (raw_deriv - self.filtered_deriv)
                 self.prev_error = e.copy()
