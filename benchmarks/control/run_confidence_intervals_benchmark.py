@@ -135,17 +135,17 @@ def main():
     # =========================================================================
     profiles = ["cruising", "evasive", "hyper_evasive"]
 
-    # Align Time-to-Success to represent the actual moment of success (including 2.0s dwell)
+    # Align Time-to-Success to use raw time_to_lock without hardcoded offsets
     for f in fold_results_pid + fold_results_rrl:
         if "results" in f:
-            ttls_2s = [float(r["time_to_lock_2s"] + 2.0) for r in f["results"] if r.get("time_to_lock_2s") is not None]
-            ttls_1s = [float(r["time_to_lock_1s"] + 1.0) for r in f["results"] if r.get("time_to_lock_1s") is not None]
+            ttls_2s = [float(r["time_to_lock_2s"]) for r in f["results"] if r.get("time_to_lock_2s") is not None]
+            ttls_1s = [float(r["time_to_lock_1s"]) for r in f["results"] if r.get("time_to_lock_1s") is not None]
             f["overall"]["mean_time_to_lock_2s"] = float(np.mean(ttls_2s)) if ttls_2s else None
             f["overall"]["mean_time_to_lock_1s"] = float(np.mean(ttls_1s)) if ttls_1s else None
 
             for prof in profiles:
-                p_sub_2s = [float(r["time_to_lock_2s"] + 2.0) for r in f["results"] if r["profile"] == prof and r.get("time_to_lock_2s") is not None]
-                p_sub_1s = [float(r["time_to_lock_1s"] + 1.0) for r in f["results"] if r["profile"] == prof and r.get("time_to_lock_1s") is not None]
+                p_sub_2s = [float(r["time_to_lock_2s"]) for r in f["results"] if r["profile"] == prof and r.get("time_to_lock_2s") is not None]
+                p_sub_1s = [float(r["time_to_lock_1s"]) for r in f["results"] if r["profile"] == prof and r.get("time_to_lock_1s") is not None]
                 prof_entry = next((item for item in f["profile_summaries"] if item["profile"] == prof), None)
                 if prof_entry:
                     prof_entry["mean_time_to_lock_2s"] = float(np.mean(p_sub_2s)) if p_sub_2s else None
