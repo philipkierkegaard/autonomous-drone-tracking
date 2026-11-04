@@ -1862,13 +1862,19 @@ def parse_args() -> argparse.Namespace:
         help="Disable optical looming relative velocity feedforward, running 100%% pure error-driven visual servoing."
     )
 
+    # Controller & Autonomy Policy Options
+    parser.add_argument(
+        "--controller", type=str, default="pid", choices=["pid", "recurrent"],
+        help="Flight controller type: 'pid' (default kinematic visual servoing) or 'recurrent'."
+    )
+
     # Altitude Floor and Ceiling Safety Limits
     parser.add_argument(
-        "--min-alt", type=float, default=2.0,
+        "--min-alt", "--alt-floor", type=float, default=2.0, dest="min_alt",
         help="Hard altitude floor in meters AGL (prevents ground collision)."
     )
     parser.add_argument(
-        "--max-alt", type=float, default=30.0,
+        "--max-alt", "--alt-ceiling", type=float, default=30.0, dest="max_alt",
         help="Hard altitude ceiling in meters AGL (prevents flyaway/excessive climb)."
     )
     parser.add_argument(
