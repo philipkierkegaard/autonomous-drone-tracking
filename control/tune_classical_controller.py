@@ -108,6 +108,119 @@ def create_tuning_suite(
     return scenarios
 
 
+def create_steady_tuning_suite(
+    suite_path: Path,
+    base_seed: int = 70_000,
+    duration: float = 18.0,
+    scenarios_per_type: int = 8
+) -> List[Dict[str, Any]]:
+    """
+    Creates a dedicated 56-scenario tuning dataset specifically for gentle 1-2 m/s targets
+    using the 'steady_slow' profile across all 7 encounter geometries.
+    """
+    if suite_path.exists():
+        print(f"[TUNING] Loading existing steady tuning suite from: {suite_path}")
+        with open(suite_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data["scenarios"]
+
+    encounter_types = [
+        EncounterType.TAIL_CHASE,
+        EncounterType.CROSSING_RIGHT,
+        EncounterType.CROSSING_LEFT,
+        EncounterType.HEAD_ON,
+        EncounterType.OBLIQUE_AWAY,
+        EncounterType.OBLIQUE_INWARD,
+        EncounterType.OMNIDIRECTIONAL,
+    ]
+    total_expected = len(encounter_types) * scenarios_per_type
+    print(f"[TUNING] Generating balanced {total_expected}-scenario steady tuning dataset (base_seed={base_seed})...")
+    gen = PursuitDatasetGenerator()
+    scenarios = []
+    scen_idx = 1
+    speeds_cycle = [0.0, 1.2, 1.8]  # Hover start, gentle match, slight intercept
+
+    for enc in encounter_types:
+        for c in range(scenarios_per_type):
+            seed = base_seed + scen_idx * 37
+            scen_id = f"tune_steady_{scen_idx:03d}_{enc.value}_s{seed}"
+            init_speed = speeds_cycle[(scen_idx - 1) % len(speeds_cycle)]
+            sc = gen.generate_scenario(
+                scenario_id=scen_id,
+                profile="steady_slow",
+                encounter_type=enc,
+                seed=seed,
+                duration=duration,
+                chaser_alt_m=2.5
+            )
+            sc_dict = sc.to_dict()
+            sc_dict["initial_chaser_speed"] = float(init_speed)
+            scenarios.append(sc_dict)
+            scen_idx += 1
+
+    suite_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(suite_path, "w", encoding="utf-8") as f:
+        json.dump({"name": suite_path.stem, "num_scenarios": len(scenarios), "scenarios": scenarios}, f, indent=2)
+
+    print(f"[TUNING] Successfully saved {len(scenarios)} steady tuning scenarios to: {suite_path}")
+    return scenarios
+
+
+def create_steady_validation_suite(
+    suite_path: Path,
+    base_seed: int = 85_000,
+    duration: float = 20.0,
+    scenarios_per_type: int = 4
+) -> List[Dict[str, Any]]:
+    """
+    Creates an independent 28-scenario held-out validation suite for steady 1-2 m/s targets.
+    """
+    if suite_path.exists():
+        print(f"[TUNING] Loading existing steady validation suite from: {suite_path}")
+        with open(suite_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data["scenarios"]
+
+    encounter_types = [
+        EncounterType.TAIL_CHASE,
+        EncounterType.CROSSING_RIGHT,
+        EncounterType.CROSSING_LEFT,
+        EncounterType.HEAD_ON,
+        EncounterType.OBLIQUE_AWAY,
+        EncounterType.OBLIQUE_INWARD,
+        EncounterType.OMNIDIRECTIONAL,
+    ]
+    gen = PursuitDatasetGenerator()
+    scenarios = []
+    scen_idx = 1
+    speeds_cycle = [0.0, 1.0, 1.5, 2.0]
+
+    for enc in encounter_types:
+        for c in range(scenarios_per_type):
+            seed = base_seed + scen_idx * 43
+            scen_id = f"val_steady_{scen_idx:03d}_{enc.value}_s{seed}"
+            init_speed = speeds_cycle[(scen_idx - 1) % len(speeds_cycle)]
+            sc = gen.generate_scenario(
+                scenario_id=scen_id,
+                profile="steady_slow",
+                encounter_type=enc,
+                seed=seed,
+                duration=duration,
+                chaser_alt_m=2.5
+            )
+            sc_dict = sc.to_dict()
+            sc_dict["initial_chaser_speed"] = float(init_speed)
+            scenarios.append(sc_dict)
+            scen_idx += 1
+
+    suite_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(suite_path, "w", encoding="utf-8") as f:
+        json.dump({"name": suite_path.stem, "num_scenarios": len(scenarios), "scenarios": scenarios}, f, indent=2)
+
+    print(f"[TUNING] Successfully saved {len(scenarios)} steady validation scenarios to: {suite_path}")
+    return scenarios
+
+
 def simulate_scenario(
     scenario: Dict[str, Any],
     params: np.ndarray,
@@ -134,19 +247,29 @@ def simulate_scenario(
 
     c_init = scenario.get("initial_chaser_pos", [0.0, 0.0, -2.5])
     c_yaw = float(scenario.get("initial_chaser_yaw", 0.0))
+    is_steady = (scenario.get("profile") == "steady_slow")
     # Diverse operational initial velocities: read from scenario or fallback to deterministic cycle
-    fallback_speeds = [0.0, 4.0, 5.0, 6.5]
+    fallback_speeds = [0.0, 1.2, 1.8] if is_steady else [0.0, 4.0, 5.0, 6.5]
     seed_idx = int(scenario.get("seed", 0)) % len(fallback_speeds)
     c_speed = float(scenario.get("initial_chaser_speed", fallback_speeds[seed_idx]))
     c_vel = np.array([np.cos(c_yaw) * c_speed, np.sin(c_yaw) * c_speed, 0.0], dtype=np.float64)
 
-    # 1. Quadrotor simulator matching 15 m/s physical flight envelope
+    # 1. Quadrotor simulator matching physical flight envelope (matched to 2.5 m/s, 60 deg/s for steady profile)
+    max_vel_xy = 2.5 if is_steady else 15.0
+    max_accel_xy = 2.0 if is_steady else 6.0
+    max_vel_up = 1.0 if is_steady else 3.0
+    max_vel_down = 0.8 if is_steady else 2.0
+    max_yaw_rate = np.deg2rad(60.0) if is_steady else np.deg2rad(120.0)
+    max_yaw_accel = np.deg2rad(240.0)
+
     sim = FastPixhawkQuadSim(
         dt=dt,
-        max_vel_xy=15.0,
-        max_accel_xy=6.0,
-        max_vel_up=3.0,
-        max_vel_down=2.0
+        max_vel_xy=max_vel_xy,
+        max_accel_xy=max_accel_xy,
+        max_vel_up=max_vel_up,
+        max_vel_down=max_vel_down,
+        max_yaw_rate=max_yaw_rate,
+        max_yaw_accel=max_yaw_accel,
     )
     sim.reset(initial_pos=np.array(c_init, dtype=np.float64), initial_yaw=c_yaw, initial_vel=c_vel)
 
@@ -174,13 +297,14 @@ def simulate_scenario(
         kp_yaw=float(kp_yaw),
         ki_yaw=float(ki_yaw),
         kd_yaw=float(kd_yaw),
-        max_lat_vel=4.0,
-        max_lat_accel=6.0,
-        max_accel=6.0,
+        max_lat_vel=1.5 if is_steady else 4.0,
+        max_lat_accel=2.0 if is_steady else 6.0,
+        max_accel=2.0 if is_steady else 6.0,
         max_decel=float(max_decel),
         max_accel_yaw=240.0,
-        min_limits=np.array([-0.5, -4.0, -3.0, -120.0]),
-        max_limits=np.array([15.0,  4.0,  2.0,  120.0]),
+        max_yawspeed_deg=60.0 if is_steady else 120.0,
+        min_limits=np.array([-0.5, -1.5, -1.0, -60.0]) if is_steady else np.array([-0.5, -4.0, -3.0, -120.0]),
+        max_limits=np.array([2.5,  1.5,  0.8,  60.0]) if is_steady else np.array([15.0,  4.0,  2.0,  120.0]),
         search_mode="momentum_cruise",
     )
 
@@ -516,8 +640,42 @@ BASELINE_PARAMS = np.array([
     30.0,   # kd_yaw
 ], dtype=np.float64)
 
+# Dedicated Search Bounds for Steady 1-2 m/s Targets (Lower Gains, Minimal Jerk, Smooth Damping)
+STEADY_BOUNDS = [
+    (0.20, 1.20),   # 0: kp_fwd (gentle forward proportional response)
+    (0.0, 0.25),    # 1: ki_fwd (forward integral gain)
+    (0.05, 0.35),   # 2: kd_fwd (damping)
+    (1.0, 2.5),     # 3: max_decel (m/s² braking limit)
+    (0.05, 0.35),   # 4: centering_damp
+    (0.30, 0.70),   # 5: min_centering_factor
+    (0.8, 2.5),     # 6: kp_lat
+    (0.0, 0.25),    # 7: ki_lat
+    (0.10, 0.50),   # 8: kd_lat
+    (1.5, 5.0),     # 9: kp_z
+    (0.0, 0.30),    # 10: ki_z
+    (0.20, 1.0),    # 11: kd_z
+    (50.0, 160.0),  # 12: kp_yaw (centered around proven ~80-120 range)
+    (0.0, 15.0),    # 13: ki_yaw
+    (5.0, 25.0),    # 14: kd_yaw (damped derivative without noise sensitivity)
+]
 
-
+STEADY_BASELINE_PARAMS = np.array([
+    0.55,   # kp_fwd
+    0.0,    # ki_fwd
+    0.15,   # kd_fwd
+    1.8,    # max_decel
+    0.20,   # centering_damp
+    0.50,   # min_centering_factor
+    1.5,    # kp_lat
+    0.0,    # ki_lat
+    0.25,   # kd_lat
+    3.0,    # kp_z
+    0.0,    # ki_z
+    0.50,   # kd_z
+    80.0,   # kp_yaw (empirically validated hover baseline)
+    0.0,    # ki_yaw
+    15.0,   # kd_yaw
+], dtype=np.float64)
 
 
 def run_random_search_optimization(
@@ -529,6 +687,8 @@ def run_random_search_optimization(
     lambda_image: float = 3.0,
     workers: int = 10,
     seed: int = 42,
+    bounds: Optional[List[Tuple[float, float]]] = None,
+    baseline_params: Optional[np.ndarray] = None,
 ) -> Dict[str, Any]:
     """
     Two-Stage Coarse-to-Fine Latin Hypercube Random Search (Bergstra & Bengio, 2012 / Solis & Wets, 1981):
@@ -541,11 +701,14 @@ def run_random_search_optimization(
         _GLOBAL_POOL = ctx.Pool(workers)
         print(f"[RANDOM-SEARCH] Initialized parallel worker pool with {workers} cores.")
 
-    bounds = DEFAULT_BOUNDS
+    if bounds is None:
+        bounds = DEFAULT_BOUNDS
+    if baseline_params is None:
+        baseline_params = BASELINE_PARAMS.copy()
     lower_b = np.array([b[0] for b in bounds])
     upper_b = np.array([b[1] for b in bounds])
     ranges = upper_b - lower_b
-    baseline_params = BASELINE_PARAMS.copy()
+    baseline_params = baseline_params.copy()
     param_keys = PARAM_KEYS
 
     print(f"\n[EVAL] Evaluating baseline parameters on realistic observation suite ({len(scenarios)} scenarios):")
@@ -762,6 +925,7 @@ if __name__ == "__main__":
     parser.add_argument("--suite", type=str, default="outputs/benchmarks/datasets/pid_realistic_tuning_suite_80.json")
     parser.add_argument("--val-suite", type=str, default="outputs/benchmarks/datasets/validation_suite_30.json")
     parser.add_argument("--out", type=str, default="control/weights/tuned_pid_gains.json", help="Output weights JSON path (default: control/weights/tuned_pid_gains.json)")
+    parser.add_argument("--steady", action="store_true", help="Tune for steady 1-2 m/s target with matched 2.5 m/s, 60 deg/s, 240 deg/s^2 flight envelope")
     parser.add_argument("--lambda-image", type=float, default=3.0, help="Weight for image plane error vs standoff error")
     parser.add_argument("--workers", type=int, default=10, help="Number of parallel CPU workers")
     parser.add_argument("--n-global", type=int, default=300, help="Stage 1 Latin Hypercube global trials (default: 300)")
@@ -769,9 +933,22 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     args = parser.parse_args()
 
-    suite_scenarios = create_tuning_suite(Path(args.suite))
+    if args.steady:
+        suite_path = Path("outputs/benchmarks/datasets/pid_steady_tuning_suite_56.json") if args.suite == "outputs/benchmarks/datasets/pid_realistic_tuning_suite_80.json" else Path(args.suite)
+        out_path = Path("control/weights/tuned_pid_gains_steady.json") if args.out == "control/weights/tuned_pid_gains.json" else Path(args.out)
+        val_suite_path = Path("outputs/benchmarks/datasets/val_steady_suite_28.json") if args.val_suite == "outputs/benchmarks/datasets/validation_suite_30.json" else Path(args.val_suite)
+        suite_scenarios = create_steady_tuning_suite(suite_path)
+        create_steady_validation_suite(val_suite_path)
+        bounds = STEADY_BOUNDS
+        baseline_p = STEADY_BASELINE_PARAMS.copy()
+    else:
+        suite_path = Path(args.suite)
+        out_path = Path(args.out)
+        val_suite_path = Path(args.val_suite)
+        suite_scenarios = create_tuning_suite(suite_path)
+        bounds = DEFAULT_BOUNDS
+        baseline_p = BASELINE_PARAMS.copy()
 
-    out_path = Path(args.out)
     res = run_random_search_optimization(
         scenarios=suite_scenarios,
         output_weights_path=out_path,
@@ -779,7 +956,9 @@ if __name__ == "__main__":
         n_local=args.n_local,
         lambda_image=args.lambda_image,
         workers=args.workers,
-        seed=args.seed
+        seed=args.seed,
+        bounds=bounds,
+        baseline_params=baseline_p
     )
 
     # Prepare candidate vectors for validation comparison
@@ -792,7 +971,7 @@ if __name__ == "__main__":
     }
 
     validate_on_held_out(
-        val_suite_path=Path(args.val_suite),
+        val_suite_path=val_suite_path,
         candidates=comparison_dict,
         lambda_image=args.lambda_image
     )

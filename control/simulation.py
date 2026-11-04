@@ -13,6 +13,8 @@ class FastPixhawkQuadSim:
         k_drag_quad=0.008,
         tau_att=0.035,
         max_tilt_rate=np.deg2rad(250.0),
+        max_yaw_rate=None,
+        max_yaw_accel=None,
     ):  # 50 Hz integration
         self.dt = dt
         
@@ -32,8 +34,8 @@ class FastPixhawkQuadSim:
         self.max_accel_xy   = max_accel_xy      # m/s^2 (0.66 g, ~33.5 deg tilt)
         self.max_accel_up   = max_vel_up        # m/s^2 (climb accel limit)
         self.max_accel_down = max_vel_down      # m/s^2 (descent accel limit)
-        self.max_yaw_rate   = np.deg2rad(120.0) # 120 deg/s
-        self.max_yaw_accel  = np.deg2rad(120.0) # 120 deg/s^2 (smooth yaw ramping)
+        self.max_yaw_rate   = float(max_yaw_rate) if max_yaw_rate is not None else np.deg2rad(120.0) # 120 deg/s
+        self.max_yaw_accel  = float(max_yaw_accel) if max_yaw_accel is not None else np.deg2rad(120.0) # 120 deg/s^2 (smooth yaw ramping)
         
         # Velocity hard limits (Calibrated top speed 18 m/s ~ 65 km/h for 2 kg platform)
         self.max_vel_xy     = max_vel_xy        # m/s (MPC_XY_VEL_MAX)

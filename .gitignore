@@ -104,6 +104,7 @@ control/weights/**
 !control/weights/recurrent_ppo_gen5_calibrated/
 !control/weights/recurrent_ppo_gen5_calibrated/best_model/
 !control/weights/recurrent_ppo_gen5_calibrated/best_model/best_model.zip
+!control/weights/tuned_pid_gains*.json
 
 # Training runs, validation batches, and experiment logs
 runs/

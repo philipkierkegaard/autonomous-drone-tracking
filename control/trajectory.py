@@ -31,6 +31,15 @@ class FlightProfile:
 
 
 PROFILES = {
+    "steady_slow": FlightProfile(
+        mean_speed=1.5,
+        speed_std=0.3,
+        turn_rate_std=0.15,
+        climb_rate_std=0.15,
+        max_accel=1.0,
+        altitude_bounds=(-1.8, -4.5),
+        waypoint_interval=3.5,
+    ),
     "cruising": FlightProfile(
         mean_speed=3.0,
         speed_std=0.5,
