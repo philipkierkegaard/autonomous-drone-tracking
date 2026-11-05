@@ -1118,10 +1118,10 @@ def main():
                         help="Physical serial UART port (e.g. /dev/ttyTHS1 or /dev/ttyUSB0)")
     parser.add_argument("--baud", type=int, default=921600,
                         help="Baud rate for serial UART transmission (default: 921600)")
-    parser.add_argument("--telemetry-mode", type=str, choices=["flight-log", "synthetic-maneuver", "static"], default="flight-log",
-                        help="Vehicle attitude/velocity telemetry ingestion mode")
-    parser.add_argument("--flight-log", type=str, default="logs/flight_logs/00000165.BIN",
-                        help="Path to physical ArduPilot .BIN flight log (default: 00000165.BIN)")
+    parser.add_argument("--telemetry-mode", type=str, choices=["flight-log", "synthetic-maneuver", "static"], default="synthetic-maneuver",
+                        help="Vehicle attitude/velocity telemetry ingestion mode (default: synthetic-maneuver)")
+    parser.add_argument("--flight-log", type=str, default=None,
+                        help="Optional path to physical ArduPilot .BIN flight log (e.g. logs/flight_logs/00000165.BIN)")
     parser.add_argument("--enable-zoom", action="store_true", default=False,
                         help="Enable dynamic digital foveal zoom tracking")
     parser.add_argument("--imgsz", type=int, default=None,
@@ -1148,6 +1148,9 @@ def main():
             if fallback.exists():
                 print(f"[WARN] Requested weights '{args.weights}' not found. Falling back to: {fallback.name}")
                 w_path = fallback
+
+    if args.flight_log and args.telemetry_mode == "synthetic-maneuver":
+        args.telemetry_mode = "flight-log"
 
     args.weights = str(w_path)
     profile_pipeline(args)
