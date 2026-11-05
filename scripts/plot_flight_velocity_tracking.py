@@ -267,14 +267,15 @@ def add_flight_mode_shading(ax: plt.Axes, intervals: List[Tuple[float, float, st
 
 
 def plot_combined_velocity_tracking(data: Dict[str, Any], t_min: float, t_max: float, out_path: Path,
-                                    relative_time: bool = True, subtitle_extra: str = ""):
-    """Generates a clean, uncluttered 2-panel figure showing Desired vs Actual velocity."""
+                                    relative_time: bool = True, subtitle_extra: str = "",
+                                    use_target: bool = True):
+    """Generates a clean, uncluttered 2-panel figure showing Target vs Actual velocity."""
     t_n = data["north"]["t"]
-    des_n = data["north"]["des"]
+    ref_n = data["north"]["target"] if use_target else data["north"]["des"]
     est_n = data["north"]["est"]
 
     t_e = data["east"]["t"]
-    des_e = data["east"]["des"]
+    ref_e = data["east"]["target"] if use_target else data["east"]["des"]
     est_e = data["east"]["est"]
 
     mask_n = (t_n >= t_min) & (t_n <= t_max)
@@ -286,13 +287,14 @@ def plot_combined_velocity_tracking(data: Dict[str, Any], t_min: float, t_max: f
     fig, (ax_n, ax_e) = plt.subplots(2, 1, figsize=(10, 6.5), sharex=True, dpi=300)
     plt.subplots_adjust(hspace=0.25)
 
-    c_des = "#d9381e"  # Crimson dashed line
+    c_ref = "#d9381e"  # Crimson dashed line
     c_act = "#1d3557"  # Navy solid line
+    ref_label = "Target" if use_target else "Desired"
 
     # -------------------------------------------------------------------------
     # Panel 1: North Velocity
     # -------------------------------------------------------------------------
-    ax_n.plot(t_plot_n, des_n[mask_n], color=c_des, linestyle="--", linewidth=2.0, label="Desired")
+    ax_n.plot(t_plot_n, ref_n[mask_n], color=c_ref, linestyle="--", linewidth=2.0, label=ref_label)
     ax_n.plot(t_plot_n, est_n[mask_n], color=c_act, linestyle="-", linewidth=1.8, label="Actual")
     ax_n.set_title("North Velocity", fontsize=13, fontweight="bold", pad=8)
     ax_n.set_ylabel("Velocity (m/s)", fontsize=11)
@@ -300,13 +302,13 @@ def plot_combined_velocity_tracking(data: Dict[str, Any], t_min: float, t_max: f
     ax_n.axhline(0, color="gray", linestyle="-", linewidth=0.8, alpha=0.5)
     ax_n.legend(loc="upper right", fontsize=10, framealpha=0.9)
 
-    y_lim_n = max(1.2, float(np.max(np.abs([des_n[mask_n], est_n[mask_n]])) * 1.25) if np.any(mask_n) else 1.5)
+    y_lim_n = max(1.2, float(np.max(np.abs([ref_n[mask_n], est_n[mask_n]])) * 1.25) if np.any(mask_n) else 1.5)
     ax_n.set_ylim(-y_lim_n, y_lim_n)
 
     # -------------------------------------------------------------------------
     # Panel 2: East Velocity
     # -------------------------------------------------------------------------
-    ax_e.plot(t_plot_e, des_e[mask_e], color=c_des, linestyle="--", linewidth=2.0, label="Desired")
+    ax_e.plot(t_plot_e, ref_e[mask_e], color=c_ref, linestyle="--", linewidth=2.0, label=ref_label)
     ax_e.plot(t_plot_e, est_e[mask_e], color=c_act, linestyle="-", linewidth=1.8, label="Actual")
     ax_e.set_title("East Velocity", fontsize=13, fontweight="bold", pad=8)
     ax_e.set_xlabel("Time (s)", fontsize=11)
@@ -315,7 +317,7 @@ def plot_combined_velocity_tracking(data: Dict[str, Any], t_min: float, t_max: f
     ax_e.axhline(0, color="gray", linestyle="-", linewidth=0.8, alpha=0.5)
     ax_e.legend(loc="upper right", fontsize=10, framealpha=0.9)
 
-    y_lim_e = max(1.2, float(np.max(np.abs([des_e[mask_e], est_e[mask_e]])) * 1.25) if np.any(mask_e) else 1.5)
+    y_lim_e = max(1.2, float(np.max(np.abs([ref_e[mask_e], est_e[mask_e]])) * 1.25) if np.any(mask_e) else 1.5)
     ax_e.set_ylim(-y_lim_e, y_lim_e)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -324,20 +326,20 @@ def plot_combined_velocity_tracking(data: Dict[str, Any], t_min: float, t_max: f
     print(f"[PLOT] ✓ Saved clean combined 2-panel velocity figure: {out_path}")
 
 
-def plot_single_axis(t_arr: np.ndarray, des: np.ndarray, est: np.ndarray, axis_name: str,
+def plot_single_axis(t_arr: np.ndarray, ref: np.ndarray, est: np.ndarray, axis_name: str,
                       intervals: List[Tuple[float, float, str]], t_min: float, t_max: float,
                       log_name: str, out_path: Path, relative_time: bool = True,
-                      subtitle_extra: str = ""):
-    """Generates a clean, minimalist standalone plot: Desired vs Actual velocity only."""
+                      subtitle_extra: str = "", ref_label: str = "Target"):
+    """Generates a clean, minimalist standalone plot: Target (or Desired) vs Actual velocity only."""
     mask = (t_arr >= t_min) & (t_arr <= t_max)
     t_plot = (t_arr[mask] - t_min) if relative_time else t_arr[mask]
 
     fig, ax = plt.subplots(figsize=(10, 4.8), dpi=300)
 
-    c_des = "#d9381e"  # Crimson dashed line for Desired
+    c_ref = "#d9381e"  # Crimson dashed line for Target/Desired
     c_act = "#1d3557"  # Deep Navy solid line for Actual
 
-    ax.plot(t_plot, des[mask], color=c_des, linestyle="--", linewidth=2.0, label="Desired")
+    ax.plot(t_plot, ref[mask], color=c_ref, linestyle="--", linewidth=2.0, label=ref_label)
     ax.plot(t_plot, est[mask], color=c_act, linestyle="-", linewidth=1.8, label="Actual")
 
     ax.set_title(f"{axis_name} Velocity", fontsize=13, fontweight="bold", pad=10)
@@ -346,7 +348,7 @@ def plot_single_axis(t_arr: np.ndarray, des: np.ndarray, est: np.ndarray, axis_n
     ax.grid(True, linestyle="--", alpha=0.45)
     ax.axhline(0, color="gray", linestyle="-", linewidth=0.8, alpha=0.5)
 
-    y_lim = max(1.2, float(np.max(np.abs([des[mask], est[mask]])) * 1.25) if np.any(mask) else 1.5)
+    y_lim = max(1.2, float(np.max(np.abs([ref[mask], est[mask]])) * 1.25) if np.any(mask) else 1.5)
     ax.set_ylim(-y_lim, y_lim)
 
     ax.legend(loc="upper right", fontsize=11, framealpha=0.95)
@@ -387,12 +389,18 @@ def print_telemetry_summary(data: Dict[str, Any]):
         print("-" * 90)
         for idx, (g_s, g_e) in enumerate(guided_segments, 1):
             dur = g_e - g_s
-            s_n = compute_tracking_metrics(data["north"]["t"], data["north"]["des"], data["north"]["est"], g_s, g_e)
-            s_e = compute_tracking_metrics(data["east"]["t"], data["east"]["des"], data["east"]["est"], g_s, g_e)
+            # Target velocity metrics (TVN / TVE vs VN / VE)
+            s_nt = compute_tracking_metrics(data["north"]["t"], data["north"]["target"], data["north"]["est"], g_s, g_e)
+            s_et = compute_tracking_metrics(data["east"]["t"], data["east"]["target"], data["east"]["est"], g_s, g_e)
+            # Desired velocity metrics (DVN / DVE vs VN / VE)
+            s_nd = compute_tracking_metrics(data["north"]["t"], data["north"]["des"], data["north"]["est"], g_s, g_e)
+            s_ed = compute_tracking_metrics(data["east"]["t"], data["east"]["des"], data["east"]["est"], g_s, g_e)
 
-            print(f"  Engagement #{idx:02d}: t = [{g_s:.1f}s to {g_e:.1f}s] (Duration: {dur:.1f}s, {s_n['count']} samples @ 10Hz)")
-            print(f"    • North Velocity: RMSE = {s_n['rmse']:.3f} m/s | MAE = {s_n['mae']:.3f} m/s | Corr r = {s_n['corr']:.3f} | Max Des: {s_n['max_des']:.2f} m/s | Max Real: {s_n['max_est']:.2f} m/s")
-            print(f"    • East Velocity:  RMSE = {s_e['rmse']:.3f} m/s | MAE = {s_e['mae']:.3f} m/s | Corr r = {s_e['corr']:.3f} | Max Des: {s_e['max_des']:.2f} m/s | Max Real: {s_e['max_est']:.2f} m/s")
+            print(f"  Engagement #{idx:02d}: t = [{g_s:.1f}s to {g_e:.1f}s] (Duration: {dur:.1f}s, {s_nt['count']} samples @ 10Hz)")
+            print(f"    • North Target (TVN): RMSE = {s_nt['rmse']:.3f} m/s | MAE = {s_nt['mae']:.3f} m/s | Corr r = {s_nt['corr']:.3f} | Max Tgt: {s_nt['max_des']:.2f} m/s | Max Real: {s_nt['max_est']:.2f} m/s")
+            print(f"    • North Desired(DVN): RMSE = {s_nd['rmse']:.3f} m/s | MAE = {s_nd['mae']:.3f} m/s | Corr r = {s_nd['corr']:.3f} | Max Des: {s_nd['max_des']:.2f} m/s | Max Real: {s_nd['max_est']:.2f} m/s")
+            print(f"    • East Target  (TVE): RMSE = {s_et['rmse']:.3f} m/s | MAE = {s_et['mae']:.3f} m/s | Corr r = {s_et['corr']:.3f} | Max Tgt: {s_et['max_des']:.2f} m/s | Max Real: {s_et['max_est']:.2f} m/s")
+            print(f"    • East Desired (DVE): RMSE = {s_ed['rmse']:.3f} m/s | MAE = {s_ed['mae']:.3f} m/s | Corr r = {s_ed['corr']:.3f} | Max Des: {s_ed['max_des']:.2f} m/s | Max Real: {s_ed['max_est']:.2f} m/s")
 
     print("=" * 90 + "\n")
 
@@ -420,6 +428,8 @@ def main():
                         help="Output directory to save plots (default: outputs/flight_analysis)")
     parser.add_argument("--save-individual", action="store_true", default=True,
                         help="Save separate standalone figures for North and East in addition to combined panel")
+    parser.add_argument("--use-desired", action="store_true", default=False,
+                        help="Plot raw desired velocity (DVN/DVE) instead of rate-limited target velocity (TVN/TVE, default)")
 
     args = parser.parse_args()
 
@@ -492,27 +502,33 @@ def main():
         subtitle = ""
 
     intervals = compute_mode_intervals(data, t_min, t_max)
+    use_target = not args.use_desired
+    ref_label = "Target" if use_target else "Desired"
+    ref_key = "target" if use_target else "des"
 
     # 4. Generate Separate Standalone Plots for North and East
     north_file = out_dir / f"{file_prefix}_north.png"
     plot_single_axis(
-        data["north"]["t"], data["north"]["des"], data["north"]["est"],
+        data["north"]["t"], data["north"][ref_key], data["north"]["est"],
         "North", intervals, t_min, t_max, stem, north_file,
-        relative_time=use_rel_time, subtitle_extra=subtitle
+        relative_time=use_rel_time, subtitle_extra=subtitle,
+        ref_label=ref_label
     )
 
     east_file = out_dir / f"{file_prefix}_east.png"
     plot_single_axis(
-        data["east"]["t"], data["east"]["des"], data["east"]["est"],
+        data["east"]["t"], data["east"][ref_key], data["east"]["est"],
         "East", intervals, t_min, t_max, stem, east_file,
-        relative_time=use_rel_time, subtitle_extra=subtitle
+        relative_time=use_rel_time, subtitle_extra=subtitle,
+        ref_label=ref_label
     )
 
     # 5. Generate Combined 2-Panel Figure
     combined_file = out_dir / f"{file_prefix}_combined.png"
     plot_combined_velocity_tracking(
         data, t_min, t_max, combined_file,
-        relative_time=use_rel_time, subtitle_extra=subtitle
+        relative_time=use_rel_time, subtitle_extra=subtitle,
+        use_target=use_target
     )
 
     print(f"\n[DONE] All velocity tracking plots generated successfully in: {out_dir}/\n")
