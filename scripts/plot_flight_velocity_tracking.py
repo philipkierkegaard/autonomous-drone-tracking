@@ -267,8 +267,8 @@ def add_flight_mode_shading(ax: plt.Axes, intervals: List[Tuple[float, float, st
 
 
 def plot_combined_velocity_tracking(data: Dict[str, Any], t_min: float, t_max: float, out_path: Path,
-                                    relative_time: bool = False, subtitle_extra: str = ""):
-    """Generates a 2-panel stacked figure (North & East Velocity) with tracking error."""
+                                    relative_time: bool = True, subtitle_extra: str = ""):
+    """Generates a clean, uncluttered 2-panel figure showing Desired vs Actual velocity."""
     t_n = data["north"]["t"]
     des_n = data["north"]["des"]
     est_n = data["north"]["est"]
@@ -277,153 +277,84 @@ def plot_combined_velocity_tracking(data: Dict[str, Any], t_min: float, t_max: f
     des_e = data["east"]["des"]
     est_e = data["east"]["est"]
 
-    intervals = compute_mode_intervals(data, t_min, t_max)
-
-    # Filter data for window
     mask_n = (t_n >= t_min) & (t_n <= t_max)
     mask_e = (t_e >= t_min) & (t_e <= t_max)
-
-    # Compute overall window stats
-    stats_n = compute_tracking_metrics(t_n, des_n, est_n, t_min, t_max)
-    stats_e = compute_tracking_metrics(t_e, des_e, est_e, t_min, t_max)
 
     t_plot_n = (t_n[mask_n] - t_min) if relative_time else t_n[mask_n]
     t_plot_e = (t_e[mask_e] - t_min) if relative_time else t_e[mask_e]
 
-    fig, (ax_n, ax_e) = plt.subplots(2, 1, figsize=(13, 8.5), sharex=True, dpi=300)
-    plt.subplots_adjust(hspace=0.22)
+    fig, (ax_n, ax_e) = plt.subplots(2, 1, figsize=(10, 6.5), sharex=True, dpi=300)
+    plt.subplots_adjust(hspace=0.25)
 
-    # Color palette
-    c_des = "#d9381e"    # Precision Crimson
-    c_est = "#1d3557"    # Deep Navy
-    c_err = "#6c5ce7"    # Purple Error
+    c_des = "#d9381e"  # Crimson dashed line
+    c_act = "#1d3557"  # Navy solid line
 
     # -------------------------------------------------------------------------
-    # Panel 1: North Velocity Tracking
+    # Panel 1: North Velocity
     # -------------------------------------------------------------------------
-    ax_n.plot(t_plot_n, des_n[mask_n], color=c_des, linestyle="--", linewidth=2.0, label="Desired North Velocity ($v_{N,\\mathrm{des}}$)")
-    ax_n.plot(t_plot_n, est_n[mask_n], color=c_est, linestyle="-", linewidth=1.8, label="Real Estimated North Velocity ($v_{N,\\mathrm{est}}$)")
+    ax_n.plot(t_plot_n, des_n[mask_n], color=c_des, linestyle="--", linewidth=2.0, label="Desired")
+    ax_n.plot(t_plot_n, est_n[mask_n], color=c_act, linestyle="-", linewidth=1.8, label="Actual")
+    ax_n.set_title("North Velocity", fontsize=13, fontweight="bold", pad=8)
+    ax_n.set_ylabel("Velocity (m/s)", fontsize=11)
+    ax_n.grid(True, linestyle="--", alpha=0.45)
+    ax_n.axhline(0, color="gray", linestyle="-", linewidth=0.8, alpha=0.5)
+    ax_n.legend(loc="upper right", fontsize=10, framealpha=0.9)
 
-    err_n = des_n[mask_n] - est_n[mask_n]
-    ax_n.fill_between(t_plot_n, des_n[mask_n], est_n[mask_n], color=c_des, alpha=0.10, label="Tracking Error Area")
-    ax_n.plot(t_plot_n, err_n, color=c_err, linestyle=":", linewidth=1.1, alpha=0.6, label="Tracking Error ($e_N = v_N^{\\mathrm{des}} - v_N^{\\mathrm{est}}$)")
-
-    ax_n.set_ylabel("North Velocity (m/s)", fontsize=12, fontweight="bold")
-    sub_str = f"  [{subtitle_extra}]" if subtitle_extra else ""
-    ax_n.set_title(f"North Velocity Tracking — {data['log_name']}{sub_str}\n"
-                   f"RMSE = {stats_n['rmse']:.3f} m/s  |  MAE = {stats_n['mae']:.3f} m/s  |  Pearson r = {stats_n['corr']:.3f}  |  Peak = {stats_n['max_est']:.2f} m/s",
-                   fontsize=12, pad=10)
-    ax_n.grid(True, linestyle="--", alpha=0.5)
-    ax_n.axhline(0, color="gray", linestyle="-", linewidth=0.8, alpha=0.7)
-
-    y_lim_n = max(1.2, float(np.max(np.abs([des_n[mask_n], est_n[mask_n]])) * 1.30) if np.any(mask_n) else 1.5)
+    y_lim_n = max(1.2, float(np.max(np.abs([des_n[mask_n], est_n[mask_n]])) * 1.25) if np.any(mask_n) else 1.5)
     ax_n.set_ylim(-y_lim_n, y_lim_n)
-    if not relative_time:
-        add_flight_mode_shading(ax_n, intervals, -y_lim_n, y_lim_n)
-    else:
-        ax_n.set_facecolor("#fafbfc")
 
     # -------------------------------------------------------------------------
-    # Panel 2: East Velocity Tracking
+    # Panel 2: East Velocity
     # -------------------------------------------------------------------------
-    ax_e.plot(t_plot_e, des_e[mask_e], color=c_des, linestyle="--", linewidth=2.0, label="Desired East Velocity ($v_{E,\\mathrm{des}}$)")
-    ax_e.plot(t_plot_e, est_e[mask_e], color=c_est, linestyle="-", linewidth=1.8, label="Real Estimated East Velocity ($v_{E,\\mathrm{est}}$)")
+    ax_e.plot(t_plot_e, des_e[mask_e], color=c_des, linestyle="--", linewidth=2.0, label="Desired")
+    ax_e.plot(t_plot_e, est_e[mask_e], color=c_act, linestyle="-", linewidth=1.8, label="Actual")
+    ax_e.set_title("East Velocity", fontsize=13, fontweight="bold", pad=8)
+    ax_e.set_xlabel("Time (s)", fontsize=11)
+    ax_e.set_ylabel("Velocity (m/s)", fontsize=11)
+    ax_e.grid(True, linestyle="--", alpha=0.45)
+    ax_e.axhline(0, color="gray", linestyle="-", linewidth=0.8, alpha=0.5)
+    ax_e.legend(loc="upper right", fontsize=10, framealpha=0.9)
 
-    err_e = des_e[mask_e] - est_e[mask_e]
-    ax_e.fill_between(t_plot_e, des_e[mask_e], est_e[mask_e], color=c_des, alpha=0.10, label="Tracking Error Area")
-    ax_e.plot(t_plot_e, err_e, color=c_err, linestyle=":", linewidth=1.1, alpha=0.6, label="Tracking Error ($e_E = v_E^{\\mathrm{des}} - v_E^{\\mathrm{est}}$)")
-
-    if relative_time:
-        x_label = f"Elapsed Time in Autonomous Pursuit (s)  [Boot Timestamp: {t_min:.1f}s – {t_max:.1f}s, Duration: {t_max - t_min:.1f}s]"
-        ax_e.set_facecolor("#fafbfc")
-    else:
-        x_label = "Flight Time (seconds since boot)"
-        add_flight_mode_shading(ax_e, intervals, -y_lim_n, y_lim_n)
-
-    ax_e.set_xlabel(x_label, fontsize=12, fontweight="bold")
-    ax_e.set_ylabel("East Velocity (m/s)", fontsize=12, fontweight="bold")
-    ax_e.set_title(f"East Velocity Tracking — {data['log_name']}{sub_str}\n"
-                   f"RMSE = {stats_e['rmse']:.3f} m/s  |  MAE = {stats_e['mae']:.3f} m/s  |  Pearson r = {stats_e['corr']:.3f}  |  Peak = {stats_e['max_est']:.2f} m/s",
-                   fontsize=12, pad=10)
-    ax_e.grid(True, linestyle="--", alpha=0.5)
-    ax_e.axhline(0, color="gray", linestyle="-", linewidth=0.8, alpha=0.7)
-
-    y_lim_e = max(1.2, float(np.max(np.abs([des_e[mask_e], est_e[mask_e]])) * 1.30) if np.any(mask_e) else 1.5)
+    y_lim_e = max(1.2, float(np.max(np.abs([des_e[mask_e], est_e[mask_e]])) * 1.25) if np.any(mask_e) else 1.5)
     ax_e.set_ylim(-y_lim_e, y_lim_e)
-
-    # Unified Legend at bottom or top
-    handles, labels = ax_n.get_legend_handles_labels()
-    fig.legend(handles, labels, loc="upper right", bbox_to_anchor=(0.98, 0.98), fontsize=10, framealpha=0.9, fancybox=True)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, bbox_inches="tight")
     plt.close(fig)
-    print(f"[PLOT] ✓ Saved combined 2-panel velocity tracking figure: {out_path}")
+    print(f"[PLOT] ✓ Saved clean combined 2-panel velocity figure: {out_path}")
 
 
 def plot_single_axis(t_arr: np.ndarray, des: np.ndarray, est: np.ndarray, axis_name: str,
                       intervals: List[Tuple[float, float, str]], t_min: float, t_max: float,
-                      log_name: str, out_path: Path, relative_time: bool = False,
+                      log_name: str, out_path: Path, relative_time: bool = True,
                       subtitle_extra: str = ""):
-    """Generates an individual standalone plot for a single axis (North or East)."""
+    """Generates a clean, minimalist standalone plot: Desired vs Actual velocity only."""
     mask = (t_arr >= t_min) & (t_arr <= t_max)
-    stats = compute_tracking_metrics(t_arr, des, est, t_min, t_max)
-
-    fig, ax = plt.subplots(figsize=(12, 5.5), dpi=300)
-
-    c_des = "#d9381e"   # Precision Crimson
-    c_est = "#1d3557"   # Deep Navy
-    c_err = "#6c5ce7"   # Purple Error
-
     t_plot = (t_arr[mask] - t_min) if relative_time else t_arr[mask]
 
-    ax.plot(t_plot, des[mask], color=c_des, linestyle="--", linewidth=2.0, label=f"Desired {axis_name} Velocity ($v_{{{axis_name[0]},\\mathrm{{des}}}}$)")
-    ax.plot(t_plot, est[mask], color=c_est, linestyle="-", linewidth=1.8, label=f"Real Estimated {axis_name} Velocity ($v_{{{axis_name[0]},\\mathrm{{est}}}}$)")
+    fig, ax = plt.subplots(figsize=(10, 4.8), dpi=300)
 
-    err = des[mask] - est[mask]
-    ax.fill_between(t_plot, des[mask], est[mask], color=c_des, alpha=0.12, label="Tracking Discrepancy")
-    ax.plot(t_plot, err, color=c_err, linestyle=":", linewidth=1.1, alpha=0.7, label=f"Error ($e_{{{axis_name[0]}}} = v_{{{axis_name[0]}}}^\\mathrm{{des}} - v_{{{axis_name[0]}}}^\\mathrm{{est}}$)")
+    c_des = "#d9381e"  # Crimson dashed line for Desired
+    c_act = "#1d3557"  # Deep Navy solid line for Actual
 
-    y_lim = max(1.2, float(np.max(np.abs([des[mask], est[mask]])) * 1.30) if np.any(mask) else 1.5)
+    ax.plot(t_plot, des[mask], color=c_des, linestyle="--", linewidth=2.0, label="Desired")
+    ax.plot(t_plot, est[mask], color=c_act, linestyle="-", linewidth=1.8, label="Actual")
+
+    ax.set_title(f"{axis_name} Velocity", fontsize=13, fontweight="bold", pad=10)
+    ax.set_xlabel("Time (s)", fontsize=11)
+    ax.set_ylabel("Velocity (m/s)", fontsize=11)
+    ax.grid(True, linestyle="--", alpha=0.45)
+    ax.axhline(0, color="gray", linestyle="-", linewidth=0.8, alpha=0.5)
+
+    y_lim = max(1.2, float(np.max(np.abs([des[mask], est[mask]])) * 1.25) if np.any(mask) else 1.5)
     ax.set_ylim(-y_lim, y_lim)
 
-    if not relative_time:
-        add_flight_mode_shading(ax, intervals, -y_lim, y_lim)
-        x_label = "Flight Time (seconds since boot)"
-    else:
-        # Subtle green background indicating full guided engagement
-        ax.set_facecolor("#fafbfc")
-        x_label = f"Elapsed Time in Autonomous Pursuit (s)  [Boot Timestamp: {t_min:.1f}s – {t_max:.1f}s]"
-
-    ax.set_xlabel(x_label, fontsize=12, fontweight="bold")
-    ax.set_ylabel(f"{axis_name} Velocity (m/s)", fontsize=12, fontweight="bold")
-
-    sub_str = f"  ({subtitle_extra})" if subtitle_extra else ""
-    ax.set_title(f"{axis_name} Velocity: Desired vs Real Estimated — {log_name}{sub_str}\n"
-                 f"Duration = {t_max - t_min:.1f}s  |  RMSE = {stats['rmse']:.3f} m/s  |  MAE = {stats['mae']:.3f} m/s  |  Pearson r = {stats['corr']:.3f}  |  Peak = {stats['max_est']:.2f} m/s",
-                 fontsize=12, pad=12)
-    ax.grid(True, linestyle="--", alpha=0.5)
-    ax.axhline(0, color="gray", linestyle="-", linewidth=0.8, alpha=0.7)
-
-    # Clean stats summary box in upper corner
-    stats_box = (
-        f"Tracking Fidelity Metrics:\n"
-        f"• RMSE: {stats['rmse']:.3f} m/s\n"
-        f"• MAE:  {stats['mae']:.3f} m/s\n"
-        f"• Correlation: r = {stats['corr']:.3f}\n"
-        f"• Peak Desired: {stats['max_des']:.2f} m/s\n"
-        f"• Peak Actual:  {stats['max_est']:.2f} m/s"
-    )
-    ax.text(0.02, 0.95, stats_box, transform=ax.transAxes, fontsize=9.5,
-            verticalalignment="top", fontfamily="monospace",
-            bbox=dict(boxstyle="round,pad=0.5", facecolor="white", edgecolor="#bdc3c7", alpha=0.9))
-
-    ax.legend(loc="upper right", fontsize=10, framealpha=0.9)
+    ax.legend(loc="upper right", fontsize=11, framealpha=0.95)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, bbox_inches="tight")
     plt.close(fig)
-    print(f"[PLOT] ✓ Saved standalone {axis_name} figure: {out_path}")
+    print(f"[PLOT] ✓ Saved clean {axis_name} figure: {out_path}")
 
 
 def print_telemetry_summary(data: Dict[str, Any]):
