@@ -1,30 +1,56 @@
+#!/usr/bin/env python3
 """
-Comprehensive 4-Axis System Identification and Latency Analysis Script.
+Comprehensive 6-Axis System Identification and Latency Analysis Script.
 Analyzes ArduPilot .BIN flight logs across:
   1. Pitch Attitude (deg)
   2. Roll Attitude (deg)
-  3. Yaw Rate (deg/s)
-  4. Vertical Climb / Descent Velocity (m/s)
+  3. Yaw Rate (deg/s) — using YDes / Y from RATE messages
+  4. Vertical Climb / Descent Velocity (m/s) — from CTUN
+  5. North Horizontal Velocity (m/s) — from PSCN (TVN / DVN vs VN)
+  6. East Horizontal Velocity (m/s) — from PSCE (TVE / DVE vs VE)
 
-Extracts empirical time constants (tau) and actuation delay (T_d).
+Features:
+- Native sampling rate preserved per signal (no cross-signal oversampling).
+- Multi-start global/local optimization over (tau, T_d, K) with coarse delay grid search.
+- Identifiability analysis: detects boundary hits and flat cost profiles.
+- Chronological Train / Validation split to evaluate generalization on unseen maneuvers.
+- Correct ArduPilot target labels (no misleading "stick" labels in autonomous mode).
+- Generates publication-ready 6-axis and dedicated velocity & yaw plots.
 """
 
+from __future__ import annotations
+
+import os
 import sys
+import argparse
+from pathlib import Path
+from typing import Tuple, Dict, Any, Optional, List
+
 import numpy as np
 import pandas as pd
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from scipy.optimize import minimize
+from scipy.signal import lfilter, lfiltic
 from pymavlink import mavutil
-from pathlib import Path
 
-def load_flight_log(log_path: str):
+
+def load_flight_log(log_path: str) -> Dict[str, pd.DataFrame]:
+    """
+    Parses ArduPilot DataFlash .BIN log and extracts telemetry streams.
+    Returns dictionary of DataFrames for attitude, rate, altitude, and horizontal velocity.
+    """
     print(f"Reading log: {log_path}...")
     mlog = mavutil.mavlink_connection(log_path)
-    
+
     att_data = []
     rate_data = []
     ctun_data = []
-    
+    pscn_data = []
+    psce_data = []
+    mode_data = []
+
     while True:
         m = mlog.recv_msg()
         if m is None:
@@ -34,7 +60,7 @@ def load_flight_log(log_path: str):
         if t_us is None:
             continue
         t_sec = t_us / 1e6
-        
+
         if mtype in ['ANG', 'ATT']:
             d = m.to_dict()
             att_data.append({
@@ -51,8 +77,15 @@ def load_flight_log(log_path: str):
             d = m.to_dict()
             rate_data.append({
                 'time': t_sec,
-                'r_des': d.get('RDes', 0.0),
-                'r_act': d.get('R', 0.0)
+                # Yaw Rate fields: YDes and Y
+                'yaw_rate_des': d.get('YDes', 0.0),
+                'yaw_rate_act': d.get('Y', 0.0),
+                # Roll Rate fields: RDes and R
+                'roll_rate_des': d.get('RDes', 0.0),
+                'roll_rate_act': d.get('R', 0.0),
+                # Pitch Rate fields: PDes and P
+                'pitch_rate_des': d.get('PDes', 0.0),
+                'pitch_rate_act': d.get('P', 0.0),
             })
         elif mtype == 'CTUN':
             d = m.to_dict()
@@ -63,7 +96,26 @@ def load_flight_log(log_path: str):
                 'vz_act': d.get('CRt', 0.0) / 100.0,
                 'alt': d.get('Alt', 0.0)
             })
-            
+        elif mtype == 'PSCN':
+            d = m.to_dict()
+            pscn_data.append({
+                'time': t_sec,
+                'tvn': d.get('TVN', 0.0),  # Target Velocity North (companion / guidance)
+                'dvn': d.get('DVN', 0.0),  # Desired Velocity North (ArduPilot shaped)
+                'vn': d.get('VN', 0.0),    # Actual Velocity North (EKF)
+            })
+        elif mtype == 'PSCE':
+            d = m.to_dict()
+            psce_data.append({
+                'time': t_sec,
+                'tve': d.get('TVE', 0.0),  # Target Velocity East (companion / guidance)
+                'dve': d.get('DVE', 0.0),  # Desired Velocity East (ArduPilot shaped)
+                've': d.get('VE', 0.0),    # Actual Velocity East (EKF)
+            })
+        elif mtype == 'MODE':
+            mode_num = getattr(m, 'Mode', getattr(m, 'ModeNum', 0))
+            mode_data.append({'time': t_sec, 'mode': mode_num})
+
     df_att_raw = pd.DataFrame(att_data)
     if not df_att_raw.empty and 'ANG' in df_att_raw['msg_type'].values:
         # Prioritize 400 Hz ANG messages over legacy down-sampled 10 Hz ATT
@@ -73,210 +125,568 @@ def load_flight_log(log_path: str):
     else:
         df_att = pd.DataFrame()
 
-    df_rate = pd.DataFrame(rate_data)
-    df_ctun = pd.DataFrame(ctun_data)
-    return df_att, df_rate, df_ctun
+    return {
+        'att': df_att,
+        'rate': pd.DataFrame(rate_data),
+        'ctun': pd.DataFrame(ctun_data),
+        'pscn': pd.DataFrame(pscn_data),
+        'psce': pd.DataFrame(psce_data),
+        'mode': pd.DataFrame(mode_data),
+    }
 
 
-def simulate_fopdt(t, u_target, y_init, tau, T_d):
+def simulate_fopdt(
+    t: np.ndarray,
+    u_target: np.ndarray,
+    y_init: float,
+    tau: float,
+    T_d: float,
+    K: float = 1.0
+) -> np.ndarray:
+    """
+    Simulates First-Order Plus Dead-Time (FOPDT) response:
+      tau * dy/dt + y(t) = K * u(t - T_d)
+    Uses exact discrete IIR filter with linear interpolation for fractional delay.
+    """
+    if len(t) < 2:
+        return np.full_like(u_target, y_init)
+
     dt = np.mean(np.diff(t))
     # Continuous fractional delay via linear interpolation
-    u_delayed = np.interp(t - T_d, t, u_target, left=u_target[0])
-    
-    # Unconditionally stable exact discrete exponential filter
+    u_delayed = np.interp(t - T_d, t, u_target, left=u_target[0]) * K
+
     alpha = np.exp(-dt / max(tau, 1e-4))
-    y_sim = np.zeros_like(u_target)
+    b = [1.0 - alpha]
+    a = [1.0, -alpha]
+    zi = lfiltic(b, a, y=[y_init])
+    y_filt, _ = lfilter(b, a, u_delayed[:-1], zi=zi)
+
+    y_sim = np.empty_like(u_target)
     y_sim[0] = y_init
-    for i in range(len(t) - 1):
-        y_sim[i+1] = alpha * y_sim[i] + (1.0 - alpha) * u_delayed[i]
+    y_sim[1:] = y_filt
     return y_sim
 
 
-def fit_first_order_delay(t, u_target, y_actual, bounds=((0.005, 0.80), (0.00, 0.15)), x0=[0.05, 0.02]):
-    def cost(params):
-        tau, T_d = params
-        y_sim = simulate_fopdt(t, u_target, y_actual[0], tau, T_d)
-        return np.mean((y_sim - y_actual) ** 2)
+def calculate_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
+    """Calculates RMSE, MAE, Pearson r, and Variance Accounted For (VAF)."""
+    err = y_true - y_pred
+    rmse = float(np.sqrt(np.mean(err ** 2)))
+    mae = float(np.mean(np.abs(err)))
+    var_true = float(np.var(y_true))
+    vaf = float((1.0 - np.var(err) / (var_true + 1e-8)) * 100.0)
 
-    res = minimize(cost, x0=x0, bounds=bounds, method='L-BFGS-B')
-    best_tau, best_td = res.x
-    y_sim = simulate_fopdt(t, u_target, y_actual[0], best_tau, best_td)
-    rmse = np.sqrt(res.fun)
-    return best_tau, best_td, y_sim, rmse
+    if np.std(y_true) > 1e-4 and np.std(y_pred) > 1e-4:
+        corr = float(np.corrcoef(y_true, y_pred)[0, 1])
+    else:
+        corr = 1.0 if np.allclose(y_true, y_pred, atol=0.05) else 0.0
+
+    return {'rmse': rmse, 'mae': mae, 'vaf': vaf, 'corr': corr}
 
 
-def calculate_metrics(y_true, y_pred):
-    rmse = np.sqrt(np.mean((y_true - y_pred) ** 2))
-    var_true = np.var(y_true)
-    vaf = (1.0 - np.var(y_true - y_pred) / (var_true + 1e-8)) * 100.0
-    return rmse, vaf
+def prepare_native_signal(
+    df: pd.DataFrame,
+    t_col: str,
+    u_col: str,
+    y_col: str,
+    t_start: float,
+    t_end: float
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+    """
+    Slices signal within [t_start, t_end] and builds a uniform grid matching
+    the channel's native logging rate (no cross-channel upsampling).
+    """
+    sub = df[(df[t_col] >= t_start) & (df[t_col] <= t_end)].copy().reset_index(drop=True)
+    if len(sub) < 5:
+        raise ValueError(f"Insufficient telemetry samples ({len(sub)}) in window [{t_start}, {t_end}]")
+
+    dt = float(np.median(sub[t_col].diff().dropna()))
+    if np.isnan(dt) or dt <= 0:
+        dt = 0.01
+
+    t_unif = np.arange(sub[t_col].min(), sub[t_col].max(), dt)
+    u_unif = np.interp(t_unif, sub[t_col], sub[u_col])
+    y_unif = np.interp(t_unif, sub[t_col], sub[y_col])
+    sample_hz = 1.0 / dt
+    return t_unif, u_unif, y_unif, sample_hz
+
+
+def fit_fopdt_multistart(
+    t: np.ndarray,
+    u: np.ndarray,
+    y: np.ndarray,
+    bounds_tau: Tuple[float, float] = (0.005, 1.5),
+    bounds_td: Tuple[float, float] = (0.0, 0.40),
+    fit_gain: bool = False,
+    bounds_k: Tuple[float, float] = (0.2, 1.8),
+    n_td_grid: int = 40,
+    n_tau_seeds: int = 5
+) -> Dict[str, Any]:
+    """
+    Performs robust multi-start optimization:
+    1. Evaluates coarse grid over (T_d, tau) to escape local minima.
+    2. Polishes best candidate using L-BFGS-B bounded optimization.
+    3. Runs identifiability check to detect boundary-hitting or unidentifiable parameters.
+    """
+    td_grid = np.linspace(bounds_td[0], bounds_td[1], n_td_grid)
+    tau_seeds = np.logspace(np.log10(bounds_tau[0]), np.log10(bounds_tau[1]), n_tau_seeds)
+
+    if fit_gain:
+        k_seeds = [0.5, 1.0, 1.5]
+        def cost(p):
+            tau, td, k = p
+            y_sim = simulate_fopdt(t, u, y[0], tau, td, K=k)
+            return float(np.mean((y_sim - y) ** 2))
+        
+        best_cost = float('inf')
+        best_cand = (tau_seeds[len(tau_seeds)//2], td_grid[len(td_grid)//2], 1.0)
+        for td_c in td_grid:
+            for tau_c in tau_seeds:
+                for k_c in k_seeds:
+                    c = cost([tau_c, td_c, k_c])
+                    if c < best_cost:
+                        best_cost = c
+                        best_cand = (tau_c, td_c, k_c)
+
+        bounds = [bounds_tau, bounds_td, bounds_k]
+        res = minimize(cost, x0=list(best_cand), bounds=bounds, method='L-BFGS-B')
+        best_tau, best_td, best_k = res.x
+    else:
+        best_k = 1.0
+        def cost(p):
+            tau, td = p
+            y_sim = simulate_fopdt(t, u, y[0], tau, td, K=1.0)
+            return float(np.mean((y_sim - y) ** 2))
+
+        best_cost = float('inf')
+        best_cand = (tau_seeds[len(tau_seeds)//2], td_grid[len(td_grid)//2])
+        for td_c in td_grid:
+            for tau_c in tau_seeds:
+                c = cost([tau_c, td_c])
+                if c < best_cost:
+                    best_cost = c
+                    best_cand = (tau_c, td_c)
+
+        bounds = [bounds_tau, bounds_td]
+        res = minimize(cost, x0=list(best_cand), bounds=bounds, method='L-BFGS-B')
+        best_tau, best_td = res.x
+
+    # --- Identifiability Checks ---
+    at_lower_td = (best_td <= bounds_td[0] + 0.002)
+    at_upper_td = (best_td >= bounds_td[1] - 0.005)
+    at_lower_tau = (best_tau <= bounds_tau[0] + 0.001)
+    at_upper_tau = (best_tau >= bounds_tau[1] - 0.01)
+
+    # Delay sensitivity check: cost variation across +/- 20 ms
+    step_td = 0.02
+    if fit_gain:
+        cost_m = cost([best_tau, max(bounds_td[0], best_td - step_td), best_k])
+        cost_p = cost([best_tau, min(bounds_td[1], best_td + step_td), best_k])
+    else:
+        cost_m = cost([best_tau, max(bounds_td[0], best_td - step_td)])
+        cost_p = cost([best_tau, min(bounds_td[1], best_td + step_td)])
+
+    rel_sensitivity = max(abs(cost_m - res.fun), abs(cost_p - res.fun)) / (res.fun + 1e-8)
+
+    status = "CALIBRATED"
+    notes = []
+    if at_upper_td:
+        status = "AT_UPPER_BOUND"
+        notes.append(f"T_d hit upper bound ({bounds_td[1]*1000:.0f} ms)")
+    elif at_lower_td:
+        status = "AT_LOWER_BOUND"
+        notes.append("T_d hit 0 ms")
+    elif rel_sensitivity < 0.005:
+        status = "UNIDENTIFIABLE"
+        notes.append("Delay profile flat (low sensitivity)")
+
+    if at_lower_tau:
+        notes.append(f"tau hit lower bound ({bounds_tau[0]*1000:.1f} ms)")
+    elif at_upper_tau:
+        notes.append(f"tau hit upper bound ({bounds_tau[1]*1000:.1f} ms)")
+
+    return {
+        'tau': float(best_tau),
+        'td': float(best_td),
+        'k': float(best_k),
+        'status': status,
+        'notes': "; ".join(notes) if notes else "Identifiable global minimum",
+        'identifiable': (status == "CALIBRATED"),
+        'rmse_train': float(np.sqrt(res.fun)),
+    }
 
 
 def main():
-    import argparse
-    parser = argparse.ArgumentParser(description="4-Axis FOPDT System Identification from ArduPilot .BIN log")
-    parser.add_argument("log", nargs="?", default="logs/flight_logs/flight_00000073.BIN", help="Path to .BIN flight log")
+    parser = argparse.ArgumentParser(
+        description="6-Axis FOPDT System Identification and Latency Analysis from ArduPilot .BIN log"
+    )
+    parser.add_argument("log", nargs="?", default="logs/flight_logs/00000165.BIN", help="Path to .BIN flight log")
     parser.add_argument("--t-start", type=float, default=None, help="Start timestamp in seconds")
     parser.add_argument("--t-end", type=float, default=None, help="End timestamp in seconds")
+    parser.add_argument(
+        "--val-split",
+        type=float,
+        default=0.30,
+        help="Fraction of time window reserved for out-of-sample validation (default: 0.30)"
+    )
+    parser.add_argument(
+        "--vel-target",
+        choices=["target", "desired"],
+        default="target",
+        help="Horizontal velocity reference: 'target' (TVN/TVE from companion) or 'desired' (DVN/DVE from ArduPilot)"
+    )
+    parser.add_argument(
+        "--no-yaw-gain",
+        dest="fit_yaw_gain",
+        action="store_false",
+        default=True,
+        help="Fix steady-state gain K=1.0 for yaw rate (default: fits gain K)"
+    )
+    parser.add_argument(
+        "--out-dir",
+        type=str,
+        default="logs/flight_logs",
+        help="Directory to save output identification plots"
+    )
     args = parser.parse_args()
 
     log_file = args.log
-    df_att, df_rate, df_ctun = load_flight_log(log_file)
-    
-    if df_att.empty:
-        print("[ERROR] No attitude (ANG/ATT) data found in log file.")
-        return
+    if not os.path.exists(log_file):
+        print(f"[ERROR] Flight log not found: {log_file}")
+        sys.exit(1)
 
-    # Determine time window for identification
+    dfs = load_flight_log(log_file)
+    df_att = dfs['att']
+    df_rate = dfs['rate']
+    df_ctun = dfs['ctun']
+    df_pscn = dfs['pscn']
+    df_psce = dfs['psce']
+
+    if df_att.empty:
+        print("[ERROR] No attitude telemetry found in log file.")
+        sys.exit(1)
+
+    # Window selection
     if args.t_start is not None and args.t_end is not None:
         t_start = float(args.t_start)
         t_end = float(args.t_end)
-    elif "flight_00000073.BIN" in str(log_file):
-        t_start, t_end = 127.0, 434.0
-    elif "00000118.BIN" in str(log_file):
-        # Default to longest stable flight segment (Segment 3)
-        t_start, t_end = 275.0, 405.0
+    elif "00000165.BIN" in str(log_file):
+        # Default to longest autonomous guided engagement
+        t_start, t_end = 302.07, 340.42
+    elif "00000135.BIN" in str(log_file):
+        t_start, t_end = 357.54, 413.89
+    elif "00000080.BIN" in str(log_file):
+        t_start, t_end = 227.0, 317.0
     else:
-        t_start = df_att['time'].min()
-        t_end = df_att['time'].max()
-        # Trim first and last 2 seconds if log is long enough
-        if (t_end - t_start) > 10.0:
-            t_start += 2.0
-            t_end -= 1.0
+        t_start = df_att['time'].min() + 2.0
+        t_end = df_att['time'].max() - 1.0
 
-    print(f"Analyzing time window: t = {t_start:.1f}s to {t_end:.1f}s (Duration: {t_end - t_start:.1f}s)")
-    mask_att = (df_att['time'] >= t_start) & (df_att['time'] <= t_end)
-    df_att = df_att[mask_att].reset_index(drop=True)
-    
-    if not df_rate.empty:
-        mask_rate = (df_rate['time'] >= t_start) & (df_rate['time'] <= t_end)
-        df_rate = df_rate[mask_rate].reset_index(drop=True)
-    
-    if not df_ctun.empty:
-        mask_ctun = (df_ctun['time'] >= t_start) & (df_ctun['time'] <= t_end)
-        df_ctun = df_ctun[mask_ctun].reset_index(drop=True)
-    
-    # Adaptive high-rate uniform grid (preserves up to 400 Hz data)
-    raw_dt = np.median(df_att['time'].diff().dropna())
-    grid_dt = max(0.0025, float(raw_dt)) if not np.isnan(raw_dt) else 0.01
-    
-    t_min = df_att['time'].min()
-    t_max = df_att['time'].max()
-    if not df_rate.empty:
-        t_min = max(t_min, df_rate['time'].min())
-        t_max = min(t_max, df_rate['time'].max())
-    if not df_ctun.empty:
-        t_min = max(t_min, df_ctun['time'].min())
-        t_max = min(t_max, df_ctun['time'].max())
-
-    t_uniform = np.arange(t_min, t_max, grid_dt)
-    
-    # 1. Pitch
-    u_pitch = np.interp(t_uniform, df_att['time'], df_att['des_pitch'])
-    y_pitch = np.interp(t_uniform, df_att['time'], df_att['pitch'])
-    tau_p, td_p, y_sim_p, rmse_p = fit_first_order_delay(t_uniform, u_pitch, y_pitch)
-    _, vaf_p = calculate_metrics(y_pitch, y_sim_p)
-
-    # 2. Roll
-    u_roll = np.interp(t_uniform, df_att['time'], df_att['des_roll'])
-    y_roll = np.interp(t_uniform, df_att['time'], df_att['roll'])
-    tau_r, td_r, y_sim_r, rmse_r = fit_first_order_delay(t_uniform, u_roll, y_roll)
-    _, vaf_r = calculate_metrics(y_roll, y_sim_r)
-
-    # 3. Yaw Rate
-    u_yaw = np.interp(t_uniform, df_rate['time'], df_rate['r_des'])
-    y_yaw = np.interp(t_uniform, df_rate['time'], df_rate['r_act'])
-    tau_y, td_y, y_sim_y, rmse_y = fit_first_order_delay(t_uniform, u_yaw, y_yaw)
-    _, vaf_y = calculate_metrics(y_yaw, y_sim_y)
-
-    # 4. Vertical Climb / Descent Rate (Vz)
-    u_vz = np.interp(t_uniform, df_ctun['time'], df_ctun['vz_des'])
-    y_vz = np.interp(t_uniform, df_ctun['time'], df_ctun['vz_act'])
-    tau_z, td_z, y_sim_z, rmse_z = fit_first_order_delay(t_uniform, u_vz, y_vz, bounds=((0.05, 0.80), (0.00, 0.15)))
-    _, vaf_z = calculate_metrics(y_vz, y_sim_z)
-
-    stem = Path(log_file).stem
-    print("\n" + "="*70)
-    print(f"        COMPLETE 4-AXIS SYSTEM IDENTIFICATION ({stem.upper()})")
-    print("="*70)
-    print(f"1. PITCH:      tau = {tau_p*1000:5.1f} ms, T_d = {td_p*1000:4.1f} ms | RMSE = {rmse_p:5.2f}°    | VAF = {vaf_p:5.1f}%")
-    print(f"2. ROLL:       tau = {tau_r*1000:5.1f} ms, T_d = {td_r*1000:4.1f} ms | RMSE = {rmse_r:5.2f}°    | VAF = {vaf_r:5.1f}%")
-    print(f"3. YAW RATE:   tau = {tau_y*1000:5.1f} ms, T_d = {td_y*1000:4.1f} ms | RMSE = {rmse_y:5.2f}°/s  | VAF = {vaf_y:5.1f}%")
-    print(f"4. CLIMB (Vz): tau = {tau_z*1000:5.1f} ms, T_d = {td_z*1000:4.1f} ms | RMSE = {rmse_z:5.2f} m/s  | VAF = {vaf_z:5.1f}%")
-    print("="*70)
-
-    # Generate Comprehensive 4-Subplot Figure
-    if "flight_00000073.BIN" in str(log_file):
-        win_start = 138.0
+    print(f"\nAnalyzing time window: t = {t_start:.2f}s to {t_end:.2f}s (Duration: {t_end - t_start:.2f}s)")
+    if args.val_split > 0:
+        val_duration = (t_end - t_start) * args.val_split
+        train_duration = (t_end - t_start) * (1.0 - args.val_split)
+        print(f"Split: Fit/Train = {train_duration:.2f}s (70%) | Validation = {val_duration:.2f}s (30%)")
     else:
-        # Start 5 seconds into flight to show active maneuvers
-        win_start = min(t_uniform[0] + 5.0, t_uniform[-1] - 20.0) if (t_uniform[-1] - t_uniform[0]) > 25.0 else t_uniform[0]
+        print("Split: Full window used for fit (no validation split)")
 
-    win_len = min(20.0, float(t_uniform[-1] - win_start))
-    win_mask = (t_uniform >= win_start) & (t_uniform <= win_start + win_len)
-    tw = t_uniform[win_mask] - win_start
+    vel_n_col = 'tvn' if args.vel_target == 'target' else 'dvn'
+    vel_e_col = 'tve' if args.vel_target == 'target' else 'dve'
+    vel_label_type = "Target" if args.vel_target == 'target' else "Desired"
 
-    fig, axes = plt.subplots(4, 1, figsize=(14, 11), sharex=True)
+    channel_specs = [
+        {
+            'name': 'Pitch Attitude',
+            'axis_key': 'pitch',
+            'df': df_att,
+            'tc': 'time', 'uc': 'des_pitch', 'yc': 'pitch',
+            'unit': 'deg',
+            'b_tau': (0.005, 0.80), 'b_td': (0.0, 0.50),
+            'fit_gain': False,
+            'u_label': 'ArduPilot target Pitch',
+            'y_label': 'Actual Pitch (EKF)'
+        },
+        {
+            'name': 'Roll Attitude',
+            'axis_key': 'roll',
+            'df': df_att,
+            'tc': 'time', 'uc': 'des_roll', 'yc': 'roll',
+            'unit': 'deg',
+            'b_tau': (0.005, 0.80), 'b_td': (0.0, 0.50),
+            'fit_gain': False,
+            'u_label': 'ArduPilot target Roll',
+            'y_label': 'Actual Roll (EKF)'
+        },
+        {
+            'name': 'Yaw Rate',
+            'axis_key': 'yaw_rate',
+            'df': df_rate,
+            'tc': 'time', 'uc': 'yaw_rate_des', 'yc': 'yaw_rate_act',
+            'unit': 'deg/s',
+            'b_tau': (0.005, 1.50), 'b_td': (0.0, 0.60),
+            'fit_gain': args.fit_yaw_gain,
+            'u_label': 'ArduPilot target Yaw Rate',
+            'y_label': 'Actual Yaw Rate (Gyro)'
+        },
+        {
+            'name': 'Climb Rate',
+            'axis_key': 'vz',
+            'df': df_ctun,
+            'tc': 'time', 'uc': 'vz_des', 'yc': 'vz_act',
+            'unit': 'm/s',
+            'b_tau': (0.02, 1.50), 'b_td': (0.0, 0.40),
+            'fit_gain': False,
+            'u_label': 'ArduPilot target Climb Rate',
+            'y_label': 'Actual Climb Rate (Baro/EKF)'
+        },
+        {
+            'name': 'North Velocity',
+            'axis_key': 'vn',
+            'df': df_pscn,
+            'tc': 'time', 'uc': vel_n_col, 'yc': 'vn',
+            'unit': 'm/s',
+            'b_tau': (0.05, 2.50), 'b_td': (0.0, 0.60),
+            'fit_gain': False,
+            'u_label': f'ArduPilot {vel_label_type} North Velocity',
+            'y_label': 'Actual North Velocity (EKF)'
+        },
+        {
+            'name': 'East Velocity',
+            'axis_key': 've',
+            'df': df_psce,
+            'tc': 'time', 'uc': vel_e_col, 'yc': 've',
+            'unit': 'm/s',
+            'b_tau': (0.05, 2.50), 'b_td': (0.0, 0.60),
+            'fit_gain': False,
+            'u_label': f'ArduPilot {vel_label_type} East Velocity',
+            'y_label': 'Actual East Velocity (EKF)'
+        },
+    ]
 
-    # 1. Pitch
-    axes[0].plot(tw, u_pitch[win_mask], 'k--', label='Desired Pitch (Stick)', linewidth=1.6)
-    axes[0].plot(tw, y_pitch[win_mask], 'C0-', label='Actual Pitch (EKF)', linewidth=2.0)
-    axes[0].plot(tw, y_sim_p[win_mask], 'C3:', label=f'Model Fit (tau={tau_p*1000:.0f}ms, T_d={td_p*1000:.0f}ms)', linewidth=2.2)
-    axes[0].set_title(f"1. Pitch Dynamics (tau = {tau_p*1000:.1f} ms, Delay T_d = {td_p*1000:.1f} ms | RMSE = {rmse_p:.2f}°)", fontsize=11, fontweight='bold')
-    axes[0].set_ylabel("Pitch (deg)", fontsize=10)
-    axes[0].grid(True, linestyle=':', alpha=0.6)
-    axes[0].legend(loc='upper right', fontsize=9)
+    results = []
+    plot_data = []
 
-    # 2. Roll
-    axes[1].plot(tw, u_roll[win_mask], 'k--', label='Desired Roll (Stick)', linewidth=1.6)
-    axes[1].plot(tw, y_roll[win_mask], 'C1-', label='Actual Roll (EKF)', linewidth=2.0)
-    axes[1].plot(tw, y_sim_r[win_mask], 'C3:', label=f'Model Fit (tau={tau_r*1000:.0f}ms, T_d={td_r*1000:.0f}ms)', linewidth=2.2)
-    axes[1].set_title(f"2. Roll Dynamics (tau = {tau_r*1000:.1f} ms, Delay T_d = {td_r*1000:.1f} ms | RMSE = {rmse_r:.2f}°)", fontsize=11, fontweight='bold')
-    axes[1].set_ylabel("Roll (deg)", fontsize=10)
-    axes[1].grid(True, linestyle=':', alpha=0.6)
-    axes[1].legend(loc='upper right', fontsize=9)
+    print("\n" + "=" * 90)
+    print(f"       COMPLETE 6-AXIS SYSTEM IDENTIFICATION ({Path(log_file).stem.upper()})")
+    print("=" * 90)
+    print(f"{'CHANNEL':18s} | {'RATE':6s} | {'TAU':8s} | {'T_D':8s} | {'VAL RMSE':10s} | {'VAL VAF':8s} | {'STATUS':12s} | NOTES")
+    print("-" * 90)
 
-    # 3. Yaw Rate
-    axes[2].plot(tw, u_yaw[win_mask], 'k--', label='Desired Yaw Rate (Stick)', linewidth=1.6)
-    axes[2].plot(tw, y_yaw[win_mask], 'C2-', label='Actual Yaw Rate (Gyro)', linewidth=2.0)
-    axes[2].plot(tw, y_sim_y[win_mask], 'C3:', label=f'Model Fit (tau={tau_y*1000:.0f}ms, T_d={td_y*1000:.0f}ms)', linewidth=2.2)
-    axes[2].set_title(f"3. Yaw Rate Dynamics (tau = {tau_y*1000:.1f} ms, Delay T_d = {td_y*1000:.1f} ms | RMSE = {rmse_y:.2f}°/s)", fontsize=11, fontweight='bold')
-    axes[2].set_ylabel("Yaw Rate (°/s)", fontsize=10)
-    axes[2].grid(True, linestyle=':', alpha=0.6)
-    axes[2].legend(loc='upper right', fontsize=9)
+    for spec in channel_specs:
+        df_sig = spec['df']
+        if df_sig.empty:
+            print(f"{spec['name']:18s} | [NO DATA IN LOG]")
+            continue
 
-    # 4. Vertical Climb Rate (Vz)
-    axes[3].plot(tw, u_vz[win_mask], 'k--', label='Desired Climb Rate (Throttle Stick)', linewidth=1.6)
-    axes[3].plot(tw, y_vz[win_mask], 'C4-', label='Actual Climb Rate (Baro/EKF)', linewidth=2.0)
-    axes[3].plot(tw, y_sim_z[win_mask], 'C3:', label=f'Model Fit (tau={tau_z*1000:.0f}ms, T_d={td_z*1000:.0f}ms)', linewidth=2.2)
-    axes[3].set_title(f"4. Vertical Climb Rate Dynamics (tau = {tau_z*1000:.1f} ms, Delay T_d = {td_z*1000:.1f} ms | RMSE = {rmse_z:.2f} m/s)", fontsize=11, fontweight='bold')
-    axes[3].set_xlabel("Time in Window (seconds)", fontsize=10)
-    axes[3].set_ylabel("Climb Rate (m/s)", fontsize=10)
-    axes[3].grid(True, linestyle=':', alpha=0.6)
-    axes[3].legend(loc='upper right', fontsize=9)
+        try:
+            t_u, u_u, y_u, sample_hz = prepare_native_signal(
+                df_sig, spec['tc'], spec['uc'], spec['yc'], t_start, t_end
+            )
+        except Exception as e:
+            print(f"{spec['name']:18s} | [EXTRACTION ERROR: {e}]")
+            continue
 
-    plt.tight_layout()
+        # Train / Validation Split
+        if args.val_split > 0 and len(t_u) > 10:
+            split_idx = int(len(t_u) * (1.0 - args.val_split))
+            t_train, u_train, y_train = t_u[:split_idx], u_u[:split_idx], y_u[:split_idx]
+            t_val, u_val, y_val = t_u[split_idx:], u_u[split_idx:], y_u[split_idx:]
+            t_split_sec = float(t_train[-1])
+        else:
+            t_train, u_train, y_train = t_u, u_u, y_u
+            t_val, u_val, y_val = t_u, u_u, y_u
+            t_split_sec = None
+
+        fit_res = fit_fopdt_multistart(
+            t_train, u_train, y_train,
+            bounds_tau=spec['b_tau'],
+            bounds_td=spec['b_td'],
+            fit_gain=spec['fit_gain']
+        )
+
+        tau = fit_res['tau']
+        td = fit_res['td']
+        k = fit_res['k']
+
+        # Training simulation & evaluation
+        y_sim_train = simulate_fopdt(t_train, u_train, y_train[0], tau, td, K=k)
+        metrics_train = calculate_metrics(y_train, y_sim_train)
+
+        # Validation simulation & evaluation
+        y_sim_val = simulate_fopdt(t_val, u_val, y_val[0], tau, td, K=k)
+        metrics_val = calculate_metrics(y_val, y_sim_val)
+
+        # Full window simulation for plotting
+        y_sim_full = simulate_fopdt(t_u, u_u, y_u[0], tau, td, K=k)
+
+        res_item = {
+            'spec': spec,
+            'rate_hz': sample_hz,
+            'tau': tau,
+            'td': td,
+            'k': k,
+            'status': fit_res['status'],
+            'notes': fit_res['notes'],
+            'identifiable': fit_res['identifiable'],
+            'train': metrics_train,
+            'val': metrics_val,
+        }
+        results.append(res_item)
+
+        plot_data.append({
+            'spec': spec,
+            't': t_u,
+            'u': u_u,
+            'y': y_u,
+            'y_sim': y_sim_full,
+            't_split': t_split_sec,
+            'tau': tau,
+            'td': td,
+            'k': k,
+            'metrics_val': metrics_val,
+            'metrics_train': metrics_train,
+            'status': fit_res['status'],
+        })
+
+        unit = spec['unit']
+        val_rmse_str = f"{metrics_val['rmse']:5.2f} {unit}"
+        val_vaf_str = f"{metrics_val['vaf']:5.1f}%"
+        status_disp = fit_res['status']
+        if status_disp != "CALIBRATED":
+            status_disp = f"*{status_disp}"
+
+        print(
+            f"{spec['name']:18s} | {sample_hz:4.0f}Hz | {tau*1000:6.1f}ms | {td*1000:6.1f}ms | "
+            f"{val_rmse_str:10s} | {val_vaf_str:8s} | {status_disp:12s} | "
+            f"Train VAF: {metrics_train['vaf']:4.1f}% [{fit_res['notes']}]"
+        )
+
+    print("=" * 90)
+    print("* Parameters flagged with an asterisk hit search boundaries or have flat delay sensitivity.")
+    print("  Do not report unidentifiable parameters as calibrated dynamic models.")
+
+    # -------------------------------------------------------------------------
+    # Plots Generation
+    # -------------------------------------------------------------------------
     stem = Path(log_file).stem
-    out_file = f"logs/flight_logs/{stem}_4axis_sysid_plot.png"
-    plt.savefig(out_file, dpi=150)
-    print(f"\nSaved 4-Axis SysID plot to: {out_file}")
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    fig_dir = Path("docs/reports/figures")
+    fig_dir.mkdir(parents=True, exist_ok=True)
 
-    # Generate Clean Standalone Yaw Rate Figure
-    fig_yaw, ay = plt.subplots(figsize=(10, 4.5))
-    ay.plot(tw, u_yaw[win_mask], 'k--', label='Desired Yaw Rate (Stick)', linewidth=1.6)
-    ay.plot(tw, y_yaw[win_mask], 'C2-', label='Actual Yaw Rate (Gyro)', linewidth=2.0)
-    ay.plot(tw, y_sim_y[win_mask], 'C3:', label=f'Model Fit (tau={tau_y*1000:.1f}ms, T_d={td_y*1000:.1f}ms)', linewidth=2.2)
+    # 1. Complete 6-Axis Plot
+    n_plots = len(plot_data)
+    if n_plots > 0:
+        fig, axes = plt.subplots(n_plots, 1, figsize=(14, 2.5 * n_plots), sharex=True)
+        if n_plots == 1:
+            axes = [axes]
 
-    ay.set_title(f"Yaw Rate Dynamics (tau = {tau_y*1000:.1f} ms, Delay T_d = {td_y*1000:.1f} ms | RMSE = {rmse_y:.2f}°/s)", fontsize=11, fontweight='bold')
-    ay.set_xlabel("Time in Window (seconds)", fontsize=10)
-    ay.set_ylabel("Yaw Rate (°/s)", fontsize=10)
-    ay.grid(True, linestyle=':', alpha=0.6)
-    ay.legend(loc='upper right', fontsize=9)
+        for i, p in enumerate(plot_data):
+            ax = axes[i]
+            sp = p['spec']
+            t_rel = p['t'] - t_start
 
-    fig_yaw.tight_layout()
-    yaw_out = f"docs/reports/figures/{stem}_yaw_sysid_plot.png"
-    fig_yaw.savefig(yaw_out, dpi=300)
-    print(f"Saved Clean Yaw SysID plot to: {yaw_out}")
+            ax.plot(t_rel, p['u'], 'k--', linewidth=1.5, label=sp['u_label'])
+            ax.plot(t_rel, p['y'], 'C0-', linewidth=1.8, label=sp['y_label'])
+            ax.plot(
+                t_rel, p['y_sim'], 'C3:', linewidth=2.2,
+                label=f"Model (tau={p['tau']*1000:.0f}ms, T_d={p['td']*1000:.0f}ms)"
+            )
+
+            if p['t_split'] is not None:
+                split_rel = p['t_split'] - t_start
+                ax.axvline(split_rel, color='gray', linestyle='-.', alpha=0.8, linewidth=1.2)
+                if i == 0:
+                    ax.text(split_rel * 0.5, ax.get_ylim()[1] * 0.9 if ax.get_ylim()[1] != 0 else 0.5,
+                            "FIT / TRAIN (70%)", color='dimgray', fontsize=9, fontweight='bold', ha='center')
+                    ax.text(split_rel + (t_rel[-1] - split_rel) * 0.5,
+                            ax.get_ylim()[1] * 0.9 if ax.get_ylim()[1] != 0 else 0.5,
+                            "VALIDATION (30%)", color='indigo', fontsize=9, fontweight='bold', ha='center')
+
+            title_str = (
+                f"{i+1}. {sp['name']} Dynamics "
+                f"[tau={p['tau']*1000:.1f}ms, T_d={p['td']*1000:.1f}ms | "
+                f"Val RMSE={p['metrics_val']['rmse']:.2f}{sp['unit']}, Val VAF={p['metrics_val']['vaf']:.1f}%] "
+                f"[{p['status']}]"
+            )
+            ax.set_title(title_str, fontsize=10, fontweight='bold')
+            ax.set_ylabel(f"{sp['name'].split()[0]} ({sp['unit']})", fontsize=9)
+            ax.grid(True, linestyle=':', alpha=0.6)
+            ax.legend(loc='upper right', fontsize=8, framealpha=0.9)
+
+        axes[-1].set_xlabel(f"Time in Window (seconds relative to t = {t_start:.1f}s)", fontsize=10)
+        plt.tight_layout()
+        six_axis_path = out_dir / f"{stem}_6axis_sysid_plot.png"
+        fig.savefig(six_axis_path, dpi=160)
+        plt.close(fig)
+        print(f"\nSaved 6-Axis SysID plot to: {six_axis_path}")
+
+    # 2. Dedicated Standalone Horizontal Velocity Tracking Plot (North & East)
+    vel_plots = [p for p in plot_data if p['spec']['axis_key'] in ['vn', 've']]
+    if len(vel_plots) == 2:
+        fig_vel, (ax_n, ax_e) = plt.subplots(2, 1, figsize=(12, 6.5), sharex=True)
+        for ax, p, title_prefix in zip([ax_n, ax_e], vel_plots, ["North Velocity", "East Velocity"]):
+            t_rel = p['t'] - t_start
+            ax.plot(t_rel, p['u'], 'k--', linewidth=1.6, label=p['spec']['u_label'])
+            ax.plot(t_rel, p['y'], 'C0-', linewidth=2.0, label=p['spec']['y_label'])
+            ax.plot(
+                t_rel, p['y_sim'], 'C3:', linewidth=2.2,
+                label=f"FOPDT Fit (tau={p['tau']*1000:.0f}ms, T_d={p['td']*1000:.0f}ms)"
+            )
+            if p['t_split'] is not None:
+                split_rel = p['t_split'] - t_start
+                ax.axvline(split_rel, color='gray', linestyle='-.', alpha=0.8, linewidth=1.2)
+            ax.set_title(
+                f"{title_prefix} Response & Delay [tau={p['tau']*1000:.1f}ms, T_d={p['td']*1000:.1f}ms | "
+                f"Val RMSE={p['metrics_val']['rmse']:.2f} m/s, Val VAF={p['metrics_val']['vaf']:.1f}%]",
+                fontsize=11, fontweight='bold'
+            )
+            ax.set_ylabel("Velocity (m/s)", fontsize=10)
+            ax.grid(True, linestyle=':', alpha=0.6)
+            ax.legend(loc='upper right', fontsize=9)
+
+        ax_e.set_xlabel(f"Time in Window (seconds relative to t = {t_start:.1f}s)", fontsize=10)
+        plt.tight_layout()
+        vel_out = fig_dir / f"{stem}_horizontal_vel_sysid_plot.png"
+        fig_vel.savefig(vel_out, dpi=200)
+        plt.close(fig_vel)
+        print(f"Saved Horizontal Velocity SysID plot to: {vel_out}")
+
+    # 3. Dedicated Standalone Yaw Rate Plot
+    yaw_plots = [p for p in plot_data if p['spec']['axis_key'] == 'yaw_rate']
+    if yaw_plots:
+        p_yaw = yaw_plots[0]
+        fig_yaw, ay = plt.subplots(figsize=(11, 4.5))
+        t_rel = p_yaw['t'] - t_start
+        ay.plot(t_rel, p_yaw['u'], 'k--', linewidth=1.6, label=p_yaw['spec']['u_label'])
+        ay.plot(t_rel, p_yaw['y'], 'C2-', linewidth=2.0, label=p_yaw['spec']['y_label'])
+        ay.plot(
+            t_rel, p_yaw['y_sim'], 'C3:', linewidth=2.2,
+            label=f"Model Fit (tau={p_yaw['tau']*1000:.1f}ms, T_d={p_yaw['td']*1000:.1f}ms)"
+        )
+        if p_yaw['t_split'] is not None:
+            split_rel = p_yaw['t_split'] - t_start
+            ay.axvline(split_rel, color='gray', linestyle='-.', alpha=0.8, linewidth=1.2)
+            ay.text(split_rel * 0.5, ay.get_ylim()[1] * 0.88 if ay.get_ylim()[1] != 0 else 10,
+                    "TRAIN (70%)", color='dimgray', fontsize=9, fontweight='bold', ha='center')
+            ay.text(split_rel + (t_rel[-1] - split_rel) * 0.5,
+                    ay.get_ylim()[1] * 0.88 if ay.get_ylim()[1] != 0 else 10,
+                    "VALIDATION (30%)", color='indigo', fontsize=9, fontweight='bold', ha='center')
+
+        ay.set_title(
+            f"Yaw Rate Dynamics (YDes / Y) [tau={p_yaw['tau']*1000:.1f}ms, T_d={p_yaw['td']*1000:.1f}ms | "
+            f"Val RMSE={p_yaw['metrics_val']['rmse']:.2f}°/s, Val VAF={p_yaw['metrics_val']['vaf']:.1f}%] "
+            f"[{p_yaw['status']}]",
+            fontsize=11, fontweight='bold'
+        )
+        ay.set_xlabel(f"Time in Window (seconds relative to t = {t_start:.1f}s)", fontsize=10)
+        ay.set_ylabel("Yaw Rate (°/s)", fontsize=10)
+        ay.grid(True, linestyle=':', alpha=0.6)
+        ay.legend(loc='upper right', fontsize=9)
+        plt.tight_layout()
+        yaw_out = fig_dir / f"{stem}_yaw_sysid_plot.png"
+        fig_yaw.savefig(yaw_out, dpi=200)
+        plt.close(fig_yaw)
+        print(f"Saved Yaw Rate SysID plot to: {yaw_out}")
+
 
 if __name__ == "__main__":
     main()
