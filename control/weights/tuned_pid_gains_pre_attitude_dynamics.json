@@ -1,0 +1,43 @@
+{
+  "status": "SUCCESS",
+  "optimization_time_s": 3837.7,
+  "lambda_image": 15.0,
+  "num_scenarios": 80,
+  "baseline_cost": 573.2944,
+  "tuned_cost": 262.4635,
+  "cost_reduction_pct": 54.22,
+  "baseline_parameters": {
+    "kp_forward": 1.2,
+    "ki_forward": 0.35,
+    "kd_forward": 0.2,
+    "max_decel": 3.0,
+    "centering_damping": 0.7,
+    "min_centering_factor": 0.35,
+    "kp_lat": 2.0,
+    "ki_lat": 0.15,
+    "kd_lat": 0.4,
+    "kp_z": 6.0,
+    "ki_z": 0.2,
+    "kd_z": 1.0,
+    "kp_yaw": 200.0,
+    "ki_yaw": 5.0,
+    "kd_yaw": 35.0
+  },
+  "tuned_parameters": {
+    "kp_forward": 0.5513988676339123,
+    "ki_forward": 0.052667646084163786,
+    "kd_forward": 0.3032011569902938,
+    "max_decel": 2.450244530033334,
+    "centering_damping": 0.31113583820293206,
+    "min_centering_factor": 0.6497876245386804,
+    "kp_lat": 2.798024066985397,
+    "ki_lat": 0.1123530104101074,
+    "kd_lat": 0.25266841177910676,
+    "kp_z": 3.6434255139643272,
+    "ki_z": 0.5301181835351595,
+    "kd_z": 0.5481234501400266,
+    "kp_yaw": 211.63780915848608,
+    "ki_yaw": 17.396459263161336,
+    "kd_yaw": 14.182590673527143
+  }
+}

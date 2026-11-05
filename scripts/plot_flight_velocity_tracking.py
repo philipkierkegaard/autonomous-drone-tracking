@@ -295,7 +295,7 @@ def plot_combined_velocity_tracking(data: Dict[str, Any], t_min: float, t_max: f
     # Panel 1: North Velocity
     # -------------------------------------------------------------------------
     ax_n.plot(t_plot_n, ref_n[mask_n], color=c_ref, linestyle="--", linewidth=2.0, label=ref_label)
-    ax_n.plot(t_plot_n, est_n[mask_n], color=c_act, linestyle="-", linewidth=1.8, label="Actual")
+    ax_n.plot(t_plot_n, est_n[mask_n], color=c_act, linestyle="-", linewidth=1.8, label="Estimated")
     ax_n.set_title("North Velocity", fontsize=13, fontweight="bold", pad=8)
     ax_n.set_ylabel("Velocity (m/s)", fontsize=11)
     ax_n.grid(True, linestyle="--", alpha=0.45)
@@ -309,9 +309,9 @@ def plot_combined_velocity_tracking(data: Dict[str, Any], t_min: float, t_max: f
     # Panel 2: East Velocity
     # -------------------------------------------------------------------------
     ax_e.plot(t_plot_e, ref_e[mask_e], color=c_ref, linestyle="--", linewidth=2.0, label=ref_label)
-    ax_e.plot(t_plot_e, est_e[mask_e], color=c_act, linestyle="-", linewidth=1.8, label="Actual")
+    ax_e.plot(t_plot_e, est_e[mask_e], color=c_act, linestyle="-", linewidth=1.8, label="Estimated")
     ax_e.set_title("East Velocity", fontsize=13, fontweight="bold", pad=8)
-    ax_e.set_xlabel("Time (s)", fontsize=11)
+    ax_e.set_xlabel("Time since GUIDED activation (s)", fontsize=11)
     ax_e.set_ylabel("Velocity (m/s)", fontsize=11)
     ax_e.grid(True, linestyle="--", alpha=0.45)
     ax_e.axhline(0, color="gray", linestyle="-", linewidth=0.8, alpha=0.5)
@@ -340,7 +340,7 @@ def plot_single_axis(t_arr: np.ndarray, ref: np.ndarray, est: np.ndarray, axis_n
     c_act = "#1d3557"  # Deep Navy solid line for Actual
 
     ax.plot(t_plot, ref[mask], color=c_ref, linestyle="--", linewidth=2.0, label=ref_label)
-    ax.plot(t_plot, est[mask], color=c_act, linestyle="-", linewidth=1.8, label="Actual")
+    ax.plot(t_plot, est[mask], color=c_act, linestyle="-", linewidth=1.8, label="Estimated")
 
     ax.set_title(f"{axis_name} Velocity", fontsize=13, fontweight="bold", pad=10)
     ax.set_xlabel("Time (s)", fontsize=11)

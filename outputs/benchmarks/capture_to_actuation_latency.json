@@ -1,62 +1,127 @@
 {
-  "device": "NVIDIA Jetson Orin Nano (MAXN Power Mode)",
-  "weights": "perception/weights/yolov8n_drone_768_hybrid_nwd_c51_best.engine",
-  "source": "Sony IMX477 MIPI CSI-2 (nvarguscamerasrc)",
-  "use_csi": true,
-  "timed_frames": 1000,
-  "warmup_frames": 50,
+  "mode": "async",
+  "weights": "perception/weights/yolov8n_drone_768_hybrid_nwd_c51_best.pt",
+  "source": "perception/raw_data/Anti-UAV/videos/video12.mp4",
+  "use_csi": false,
+  "pid_gains": "control/weights/tuned_pid_gains.json",
+  "timed_frames": 20,
   "software_metrics": {
     "dequeue": {
-      "mean": 17.807,
-      "std": 1.074,
-      "median": 17.924,
-      "p95": 19.265,
-      "max": 20.730
+      "mean": 1.2234958354383707,
+      "std": 0.2435397648570616,
+      "median": 1.1901669204235077,
+      "p95": 1.6798961209133267,
+      "p99": 1.7923129210248587,
+      "max": 1.820417121052742,
+      "count": 20
     },
     "preprocess": {
-      "mean": 0.330,
-      "std": 0.038,
-      "median": 0.325,
-      "p95": 0.371,
-      "max": 0.763
+      "mean": 0.11376875918358564,
+      "std": 0.06394405559857275,
+      "median": 0.08706236258149147,
+      "p95": 0.22939743939787158,
+      "p99": 0.30511312652379263,
+      "max": 0.32404204830527306,
+      "count": 20
     },
     "perception": {
-      "mean": 15.099,
-      "std": 0.553,
-      "median": 14.976,
-      "p95": 16.413,
-      "max": 17.993
+      "mean": 10.31962907873094,
+      "std": 0.40120023180570064,
+      "median": 10.27441630139947,
+      "p95": 10.947148036211729,
+      "p99": 11.162196230143309,
+      "max": 11.215958278626204,
+      "count": 20
+    },
+    "vision_lock": {
+      "mean": 0.00322714913636446,
+      "std": 0.0009698686587660786,
+      "median": 0.0029795337468385696,
+      "p95": 0.004900014027953148,
+      "p99": 0.005280105397105216,
+      "max": 0.005375128239393234,
+      "count": 20
+    },
+    "vision_compute": {
+      "mean": 10.436624987050891,
+      "std": 0.44072891997729646,
+      "median": 10.417771525681019,
+      "p95": 11.266352445818484,
+      "p99": 11.387604069896042,
+      "max": 11.417916975915432,
+      "count": 20
+    },
+    "control_lock": {
+      "mean": 0.004484529860995032,
+      "std": 0.00170025932023006,
+      "median": 0.004250090569257736,
+      "p95": 0.007020542398095131,
+      "p99": 0.007804157212376595,
+      "max": 0.00800006091594696,
+      "count": 11
     },
     "control": {
-      "mean": 0.081,
-      "std": 0.043,
-      "median": 0.072,
-      "p95": 0.113,
-      "max": 0.378
+      "mean": 0.16146208244291219,
+      "std": 0.07199886873714416,
+      "median": 0.13154186308383942,
+      "p95": 0.2822503447532654,
+      "p99": 0.3598835319280625,
+      "max": 0.3792918287217617,
+      "count": 11
     },
     "actuation_serialize": {
-      "mean": 0.115,
-      "std": 0.018,
-      "median": 0.116,
-      "p95": 0.126,
-      "max": 0.420
+      "mean": 0.08064749735322865,
+      "std": 0.15203514431553403,
+      "median": 0.033833086490631104,
+      "p95": 0.30283303931355476,
+      "p99": 0.5092331208288672,
+      "max": 0.560833141207695,
+      "count": 11
     },
-    "compute_total": {
-      "mean": 15.625,
-      "std": 0.592,
-      "median": 15.495,
-      "p95": 17.050,
-      "max": 18.812
+    "control_step": {
+      "mean": 0.24659410965713588,
+      "std": 0.2212186724462842,
+      "median": 0.16662385314702988,
+      "p95": 0.5831036251038313,
+      "p99": 0.869720568880439,
+      "max": 0.9413748048245907,
+      "count": 11
+    },
+    "control_period": {
+      "mean": 20.386969601430675,
+      "std": 6.706436967337128,
+      "median": 21.29741571843624,
+      "p95": 24.972625076770782,
+      "p99": 24.975625053048134,
+      "max": 24.97637504711747,
+      "count": 11
+    },
+    "e2e_capture_to_actuation": {
+      "mean": 14.79544664140452,
+      "std": 2.1338075561604772,
+      "median": 14.37975000590086,
+      "p95": 17.86960382014513,
+      "p99": 18.035987205803394,
+      "max": 18.07758305221796,
+      "count": 11
+    },
+    "e2e_perc_to_actuation": {
+      "mean": 4.292515021833506,
+      "std": 2.2714631719738017,
+      "median": 3.766292240470648,
+      "p95": 7.6660828199237585,
+      "p99": 7.810882804915309,
+      "max": 7.847082801163197,
+      "count": 11
     }
   },
-  "sampling_frequency_hz": 29.9,
-  "sampling_jitter_std_ms": 0.88,
-  "compute_capacity_fps": 64.0,
-  "deadline_headroom_ms": 17.71,
-  "deadline_headroom_pct": 53.1,
+  "vision_fps": 80.23777119183711,
+  "control_hz": 49.05093888646521,
+  "compute_capacity_fps": 95.81641586631092,
+  "deadline_headroom_ms": 22.896708346282445,
   "deadline_overruns": 0,
-  "optical_domain_ms": 32.67,
-  "actuation_domain_ms": 43.03,
-  "photon_to_thrust_total_mean_ms": 91.32,
-  "photon_to_thrust_total_p95_ms": 92.75
+  "software_e2e_mean_ms": 14.79544664140452,
+  "software_e2e_p95_ms": 17.86960382014513,
+  "photon_to_thrust_total_mean_ms": 90.46023830807118,
+  "photon_to_thrust_total_p95_ms": 93.5343954868118
 }
