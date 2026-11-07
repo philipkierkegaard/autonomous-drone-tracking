@@ -344,8 +344,8 @@ def main():
     parser.add_argument(
         "--out-dir",
         type=str,
-        default="logs/flight_logs",
-        help="Directory to save output identification plots"
+        default="logs/flight_logs/plots",
+        help="Directory to save output identification plots (default: logs/flight_logs/plots)"
     )
     args = parser.parse_args()
 
@@ -369,6 +369,9 @@ def main():
     if args.t_start is not None and args.t_end is not None:
         t_start = float(args.t_start)
         t_end = float(args.t_end)
+    elif "00000167.BIN" in str(log_file):
+        # Default to highest-fidelity autonomous tracking engagement (Engagement #4)
+        t_start, t_end = 2316.17, 2325.51
     elif "00000165.BIN" in str(log_file):
         # Default to longest autonomous guided engagement
         t_start, t_end = 302.07, 340.42
@@ -645,8 +648,10 @@ def main():
 
         ax_e.set_xlabel(f"Time in Window (seconds relative to t = {t_start:.1f}s)", fontsize=10)
         plt.tight_layout()
-        vel_out = fig_dir / f"{stem}_horizontal_vel_sysid_plot.png"
+        vel_out = out_dir / f"{stem}_horizontal_vel_sysid_plot.png"
         fig_vel.savefig(vel_out, dpi=200)
+        # Also maintain copy in docs/reports/figures/ for documentation
+        fig_vel.savefig(fig_dir / f"{stem}_horizontal_vel_sysid_plot.png", dpi=200)
         plt.close(fig_vel)
         print(f"Saved Horizontal Velocity SysID plot to: {vel_out}")
 
@@ -682,8 +687,10 @@ def main():
         ay.grid(True, linestyle=':', alpha=0.6)
         ay.legend(loc='upper right', fontsize=9)
         plt.tight_layout()
-        yaw_out = fig_dir / f"{stem}_yaw_sysid_plot.png"
+        yaw_out = out_dir / f"{stem}_yaw_sysid_plot.png"
         fig_yaw.savefig(yaw_out, dpi=200)
+        # Also maintain copy in docs/reports/figures/ for documentation
+        fig_yaw.savefig(fig_dir / f"{stem}_yaw_sysid_plot.png", dpi=200)
         plt.close(fig_yaw)
         print(f"Saved Yaw Rate SysID plot to: {yaw_out}")
 

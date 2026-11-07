@@ -64,6 +64,7 @@ def make_residual_env(
     residual_scales: Sequence[float] = (3.0, 2.0, 1.0, 30.0),
     dwell_time_required_s: float = 2.0,
     terminate_on_catch: bool = False,
+    tau_yaw: float = 0.15,
 ):
     def _init():
         env = ResidualDronePursuitEnv(
@@ -77,6 +78,7 @@ def make_residual_env(
             residual_scales=residual_scales,
             dwell_time_required_s=dwell_time_required_s,
             terminate_on_catch=terminate_on_catch,
+            tau_yaw=tau_yaw,
         )
         env.reset(seed=seed + rank)
         return env
@@ -96,6 +98,7 @@ class ResidualTaskMetricEvalCallback(BaseCallback):
         best_model_save_path: Optional[Union[str, Path]] = None,
         log_path: Optional[Union[str, Path]] = None,
         verbose: int = 1,
+        config_dict: Optional[Dict[str, Any]] = None,
     ):
         super().__init__(verbose)
         self.eval_env = eval_env
@@ -104,6 +107,7 @@ class ResidualTaskMetricEvalCallback(BaseCallback):
         self.eval_freq = eval_freq
         self.best_model_save_path = Path(best_model_save_path) if best_model_save_path else None
         self.log_path = Path(log_path) if log_path else None
+        self.config_dict = config_dict
         self.best_score = -float("inf")
         self.best_success_rate = 0.0
         self.eval_history: List[Dict[str, Any]] = []
@@ -236,6 +240,12 @@ class ResidualTaskMetricEvalCallback(BaseCallback):
                 torch.save(self.model.policy.state_dict(), str(self.best_model_save_path / "actor_weights.pt"))
             except Exception:
                 pass
+            if self.config_dict is not None:
+                try:
+                    with open(self.best_model_save_path / "config.json", "w", encoding="utf-8") as f:
+                        json.dump(self.config_dict, f, indent=2)
+                except Exception:
+                    pass
             print(f"[BEST] New best model saved! Score: {task_score:.1f} (Catch: {metrics['success_rate_pct']:.1f}%)")
 
         if self.log_path is not None:
@@ -267,6 +277,7 @@ def train_residual_ppo(
     residual_scales: Sequence[float] = (3.0, 2.0, 1.0, 30.0),
     profile_dist: Optional[Dict[str, float]] = None,
     terminate_on_catch: bool = False,
+    tau_yaw: float = 0.15,
 ) -> None:
     if output_dir is None:
         output_dir = PROJECT_ROOT / "outputs" / "models" / f"residual_ppo_{time.strftime('%Y%m%d_%H%M%S')}"
@@ -278,6 +289,18 @@ def train_residual_ppo(
     log_dir = Path(log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
 
+    config_dict = {
+        "residual_scales": [float(x) for x in residual_scales],
+        "pid_gains_path": str(pid_gains_path),
+        "tau_yaw": float(tau_yaw),
+        "seed": seed,
+        "reward_mode": reward_mode,
+        "hidden_size": hidden_size,
+        "terminate_on_catch": terminate_on_catch,
+    }
+    with open(output_dir / "config.json", "w", encoding="utf-8") as f:
+        json.dump(config_dict, f, indent=2)
+
     if profile_dist is None:
         # 20% cruising, 40% evasive, 40% hyper-evasive
         profile_dist = [0.20, 0.40, 0.40]
@@ -287,6 +310,7 @@ def train_residual_ppo(
     print(f"  Target Timesteps:    {total_timesteps:,}")
     print(f"  Parallel Envs:       {n_envs}")
     print(f"  Base Controller:     Tuned Kinematic PID ({pid_gains_path})")
+    print(f"  Sim Yaw Constant:    tau_yaw = {tau_yaw:.3f} s")
     print(f"  Residual Scales:     Surge: +/-{residual_scales[0]} m/s, Sway: +/-{residual_scales[1]} m/s, Heave: +/-{residual_scales[2]} m/s, Yaw: +/-{residual_scales[3]} deg/s")
     print(f"  Reward Mode:         {reward_mode}")
     print(f"  Terminate on Catch:  {terminate_on_catch} (False = maximize continuous dwell across scenario)")
@@ -308,6 +332,7 @@ def train_residual_ppo(
             pid_gains_path=pid_gains_path,
             residual_scales=residual_scales,
             terminate_on_catch=terminate_on_catch,
+            tau_yaw=tau_yaw,
         )
         for i in range(n_envs)
     ]
@@ -334,6 +359,7 @@ def train_residual_ppo(
         residual_scales=residual_scales,
         dwell_time_required_s=2.0,
         terminate_on_catch=terminate_on_catch,
+        tau_yaw=tau_yaw,
     )
 
     val_dataset_path = PROJECT_ROOT / "outputs" / "benchmarks" / "datasets" / "validation_suite_30.json"
@@ -349,6 +375,7 @@ def train_residual_ppo(
         eval_freq=max(100, eval_freq // n_envs),
         best_model_save_path=output_dir / "best_model",
         log_path=output_dir / "eval_results",
+        config_dict=config_dict,
         verbose=1
     )
 
@@ -439,8 +466,10 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint-freq", type=int, default=50_000, help="Checkpoint frequency in timesteps (default: 50,000)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed (default: 42)")
     parser.add_argument("--reward-mode", type=str, default="theory_fast_catch_compounding_dwell", help="Reward function mode")
-    parser.add_argument("--pid-gains", type=str, default="control/weights/tuned_pid_gains.json", help="Path to tuned PID gains JSON")
-    parser.add_argument("--output-dir", type=str, default="outputs/models/residual_ppo_v1", help="Output model directory")
+    parser.add_argument("--pid-gains", type=str, default="control/weights/tuned_pid_gains.json", help="Path to tuned PID gains JSON (default: control/weights/tuned_pid_gains.json)")
+    parser.add_argument("--tau-yaw", type=float, default=0.150, help="Yaw rate time constant tau_yaw in seconds for simulation (default: 0.150)")
+    parser.add_argument("--residual-scales", type=float, nargs=4, default=[3.5, 3.5, 3.5, 10.0], help="Residual scales [Surge, Sway, Heave, Yaw] (default: 3.5 3.5 3.5 10.0)")
+    parser.add_argument("--output-dir", type=str, default="outputs/models/residual_ppo_v8_tau150_wide", help="Output model directory")
     parser.add_argument(
         "--terminate-on-catch",
         action=argparse.BooleanOptionalAction,
@@ -463,5 +492,7 @@ if __name__ == "__main__":
         reward_mode=args.reward_mode,
         output_dir=args.output_dir,
         pid_gains_path=args.pid_gains,
+        residual_scales=args.residual_scales,
+        tau_yaw=args.tau_yaw,
         terminate_on_catch=args.terminate_on_catch,
     )

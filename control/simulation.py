@@ -15,13 +15,16 @@ class FastPixhawkQuadSim:
         max_tilt_rate=np.deg2rad(250.0),
         max_yaw_rate=None,
         max_yaw_accel=None,
+        tau_yaw=0.15,
+        tau_v_horiz=0.32,
+        tau_v_vert=0.22,
     ):  # 50 Hz integration
         self.dt = dt
         
         # Closed-loop tracking time constants (PX4 velocity & yaw loops)
-        self.tau_v_horiz = 0.32   # Horizontal velocity response (smooth progressive ramp)
-        self.tau_v_vert  = 0.22   # Vertical velocity response
-        self.tau_yaw     = 0.15   # Yaw rate response
+        self.tau_v_horiz = float(tau_v_horiz)   # Horizontal velocity response (smooth progressive ramp)
+        self.tau_v_vert  = float(tau_v_vert)    # Vertical velocity response
+        self.tau_yaw     = float(tau_yaw)       # Yaw rate response
         
         # Physical attitude response time constant (35 ms calibrated from Flight 120 SysID)
         self.tau_att     = float(tau_att)

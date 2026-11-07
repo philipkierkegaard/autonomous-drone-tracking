@@ -12,10 +12,12 @@ Computes:
 import sys
 import json
 import time
+import argparse
 from pathlib import Path
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 import numpy as np
 from scipy import stats
+from concurrent.futures import ProcessPoolExecutor
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -23,6 +25,28 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from benchmarks.control.benchmark_controller import run_dataset_benchmark
 from control.dataset_generator import PursuitDataset
+
+
+def _eval_fold_worker(args):
+    (
+        fold_file,
+        controller_type,
+        model_path,
+        pid_gains_path,
+        output_dir,
+        tau_yaw,
+    ) = args
+    return run_dataset_benchmark(
+        dataset_path=fold_file,
+        controller_type=controller_type,
+        model_path=str(model_path) if model_path else None,
+        pid_gains=str(pid_gains_path) if pid_gains_path else None,
+        use_kalman=True,
+        noise_mode="empirical",
+        frame_drop_rate=0.05,
+        output_dir=output_dir,
+        tau_yaw=tau_yaw,
+    )
 
 
 def compute_ci(data: List[float], confidence: float = 0.95):
@@ -52,80 +76,136 @@ def compute_paired_stats(data_rrl: List[float], data_pid: List[float], confidenc
 
 
 def main():
+    parser = argparse.ArgumentParser(description="10x600 Paired Confidence Interval Benchmark")
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="outputs/models/residual_ppo_v9_wide35/best_model/best_model.zip",
+        help="Path to residual RL model checkpoint"
+    )
+    parser.add_argument(
+        "--pid-gains",
+        type=str,
+        default="control/weights/tuned_pid_gains_pre_attitude_dynamics.json",
+        help="Path to baseline PID gains JSON"
+    )
+    parser.add_argument(
+        "--tau-yaw",
+        type=float,
+        default=0.150,
+        help="Sim yaw time constant in seconds (default: 0.150)"
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=3,
+        help="Number of parallel worker processes for evaluating folds (default: 3)"
+    )
+    parser.add_argument(
+        "--report-name",
+        type=str,
+        default="ci_10x600_v9_final_report",
+        help="Base filename for output JSON and Markdown reports"
+    )
+    args = parser.parse_args()
+
     dataset_dir = PROJECT_ROOT / "outputs" / "benchmarks" / "datasets" / "ci_10x600"
     output_dir = PROJECT_ROOT / "outputs" / "benchmarks" / "control"
-    model_path = PROJECT_ROOT / "outputs" / "models" / "residual_ppo_v6_hard_2s_dwell" / "best_model" / "best_model.zip"
-    pid_gains_path = PROJECT_ROOT / "control" / "weights" / "tuned_pid_gains.json"
+    model_path = Path(args.model)
+    if not model_path.is_absolute():
+        model_path = PROJECT_ROOT / model_path
+    pid_gains_path = Path(args.pid_gains)
+    if not pid_gains_path.is_absolute():
+        pid_gains_path = PROJECT_ROOT / pid_gains_path
 
     fold_files = sorted(list(dataset_dir.glob("ci_benchmark_600_fold_*.json")))
     if not fold_files:
         print("[ERROR] No fold files found in", dataset_dir)
         sys.exit(1)
 
+    # Determine RRL ctrl_tag matching benchmark_controller.py
+    p = model_path
+    if p.parent.name in ["best_model", "checkpoints"]:
+        tag_name = f"{p.parent.parent.name}_{p.parent.name}" if p.parent.name == "best_model" else f"{p.parent.parent.name}_{p.stem}"
+    else:
+        tag_name = p.parent.name if p.parent.name not in ["weights", "."] else p.stem
+    rrl_ctrl_tag = tag_name if tag_name.startswith("residual_") else f"residual_{tag_name}"
+    tau_suffix = f"_tau{int(args.tau_yaw * 1000)}" if args.tau_yaw is not None else ""
+
     print("=" * 95)
     print("  AUTONOMOUS DRONE PURSUIT: 10 x 600 PAIRED CONFIDENCE INTERVAL PIPELINE")
     print(f"  Folds to Benchmark:  {len(fold_files)} folds (600 scenarios/fold)")
     print(f"  Total Runs:          {len(fold_files) * 600 * 2:,} simulations (6,000 PID + 6,000 RRL)")
-    print(f"  PID Gains:           {pid_gains_path.relative_to(PROJECT_ROOT)}")
-    print(f"  RRL Model:           {model_path.relative_to(PROJECT_ROOT)}")
+    print(f"  PID Gains:           {pid_gains_path.relative_to(PROJECT_ROOT) if pid_gains_path.is_relative_to(PROJECT_ROOT) else pid_gains_path}")
+    print(f"  RRL Model:           {model_path.relative_to(PROJECT_ROOT) if model_path.is_relative_to(PROJECT_ROOT) else model_path}")
+    print(f"  RRL Tag:             {rrl_ctrl_tag}")
+    print(f"  Parallel Workers:    {args.workers}")
     print("=" * 95)
-
-    fold_results_pid = []
-    fold_results_rrl = []
 
     start_all = time.perf_counter()
 
+    # 1. PID Fold Results (check existing or compute)
+    fold_results_pid = []
+    pid_missing_tasks = []
     for idx, fold_file in enumerate(fold_files, 1):
-        print(f"\n=========================================================================================")
-        print(f"  EXECUTING FOLD [{idx:02d}/10]: {fold_file.stem}")
-        print(f"=========================================================================================")
-
-        # 1. PID Benchmark on Fold
         pid_json_expected = output_dir / f"benchmark_results_{fold_file.stem}_pid_tuned_kalman_empirical_d5.json"
         if pid_json_expected.exists():
-            print(f"---> [FOLD {idx:02d}/10] Found existing PID results: {pid_json_expected.name}. Loading...")
+            print(f"---> [PID FOLD {idx:02d}/10] Found existing PID results: {pid_json_expected.name}")
             with open(pid_json_expected, "r", encoding="utf-8") as f:
-                pid_res = json.load(f)
+                fold_results_pid.append(json.load(f))
         else:
-            print(f"\n---> [FOLD {idx:02d}/10] Running PID Baseline...")
-            t0 = time.perf_counter()
-            _ = run_dataset_benchmark(
-                dataset_path=fold_file,
-                controller_type="pid",
-                pid_gains=str(pid_gains_path),
-                use_kalman=True,
-                noise_mode="empirical",
-                frame_drop_rate=0.05,
-                output_dir=output_dir
-            )
-            with open(pid_json_expected, "r", encoding="utf-8") as f:
-                pid_res = json.load(f)
-            print(f"---> [FOLD {idx:02d}/10] PID finished in {time.perf_counter() - t0:.1f}s")
-        fold_results_pid.append(pid_res)
+            pid_missing_tasks.append((idx, fold_file, pid_json_expected))
 
-        # 2. Residual RL Benchmark on Fold
-        rrl_json_expected = output_dir / f"benchmark_results_{fold_file.stem}_residual_ppo_v6_hard_2s_dwell_best_model_kalman_empirical_d5.json"
+    if pid_missing_tasks:
+        print(f"\n[INFO] Running {len(pid_missing_tasks)} missing PID folds with {args.workers} workers...")
+        worker_args = [
+            (f_file, "pid", None, pid_gains_path, output_dir, args.tau_yaw)
+            for _, f_file, _ in pid_missing_tasks
+        ]
+        with ProcessPoolExecutor(max_workers=args.workers) as pool:
+            pool.map(_eval_fold_worker, worker_args)
+        # Reload all
+        fold_results_pid = []
+        for idx, fold_file in enumerate(fold_files, 1):
+            pid_json_expected = output_dir / f"benchmark_results_{fold_file.stem}_pid_tuned_kalman_empirical_d5.json"
+            with open(pid_json_expected, "r", encoding="utf-8") as f:
+                fold_results_pid.append(json.load(f))
+
+    # 2. RRL Fold Results (check existing or compute)
+    rrl_missing_tasks = []
+    for idx, fold_file in enumerate(fold_files, 1):
+        rrl_json_expected = output_dir / f"benchmark_results_{fold_file.stem}_{rrl_ctrl_tag}_kalman_empirical_d5{tau_suffix}.json"
         if rrl_json_expected.exists():
-            print(f"---> [FOLD {idx:02d}/10] Found existing RRL results: {rrl_json_expected.name}. Loading...")
-            with open(rrl_json_expected, "r", encoding="utf-8") as f:
-                rrl_res = json.load(f)
+            print(f"---> [RRL FOLD {idx:02d}/10] Found existing RRL results: {rrl_json_expected.name}")
         else:
-            print(f"\n---> [FOLD {idx:02d}/10] Running Residual RL Policy...")
-            t1 = time.perf_counter()
-            _ = run_dataset_benchmark(
-                dataset_path=fold_file,
-                controller_type="residual",
-                model_path=str(model_path),
-                pid_gains=str(pid_gains_path),
-                use_kalman=True,
-                noise_mode="empirical",
-                frame_drop_rate=0.05,
-                output_dir=output_dir
-            )
-            with open(rrl_json_expected, "r", encoding="utf-8") as f:
-                rrl_res = json.load(f)
-            print(f"---> [FOLD {idx:02d}/10] RRL finished in {time.perf_counter() - t1:.1f}s")
-        fold_results_rrl.append(rrl_res)
+            rrl_missing_tasks.append((idx, fold_file, rrl_json_expected))
+
+    if rrl_missing_tasks:
+        print(f"\n[INFO] Evaluating {len(rrl_missing_tasks)} missing RRL folds using {args.workers} parallel workers...")
+        worker_args = [
+            (f_file, "residual", model_path, pid_gains_path, output_dir, args.tau_yaw)
+            for _, f_file, _ in rrl_missing_tasks
+        ]
+        t_rrl_start = time.perf_counter()
+        if args.workers > 1 and len(worker_args) > 1:
+            with ProcessPoolExecutor(max_workers=args.workers) as pool:
+                list(pool.map(_eval_fold_worker, worker_args))
+        else:
+            for w_arg in worker_args:
+                _eval_fold_worker(w_arg)
+        print(f"[INFO] Completed {len(rrl_missing_tasks)} RRL folds in {(time.perf_counter() - t_rrl_start)/60:.1f} minutes!")
+
+    # Reload all 10 RRL fold results
+    fold_results_rrl = []
+    for idx, fold_file in enumerate(fold_files, 1):
+        rrl_json_expected = output_dir / f"benchmark_results_{fold_file.stem}_{rrl_ctrl_tag}_kalman_empirical_d5{tau_suffix}.json"
+        if not rrl_json_expected.exists():
+            # Try without tau suffix if not found
+            fallback = output_dir / f"benchmark_results_{fold_file.stem}_{rrl_ctrl_tag}_kalman_empirical_d5.json"
+            if fallback.exists():
+                rrl_json_expected = fallback
+        with open(rrl_json_expected, "r", encoding="utf-8") as f:
+            fold_results_rrl.append(json.load(f))
 
     total_time = time.perf_counter() - start_all
     print(f"\n[DONE] All 10 folds (12,000 runs) evaluated in {total_time/60:.1f} minutes!")
@@ -221,20 +301,23 @@ def main():
             }
 
     # Save JSON report
-    report_json_path = output_dir / "ci_10x600_final_report.json"
+    report_json_path = output_dir / f"{args.report_name}.json"
     with open(report_json_path, "w", encoding="utf-8") as f:
         json.dump(analysis, f, indent=2)
 
     # Generate Markdown Table Report
-    report_md_path = output_dir / "ci_10x600_final_report.md"
+    report_md_path = output_dir / f"{args.report_name}.md"
+    rrl_label = rrl_ctrl_tag.replace("_", " ").title()
     md_lines = [
-        "# Controller Comparison with 95% Confidence Intervals (10 x 600 Trajectories)",
+        f"# Controller Comparison with 95% Confidence Intervals (10 x 600 Trajectories: Tuned PID vs {rrl_label})",
         f"**Sample Size**: 10 folds x 600 scenarios = 6,000 trajectories per controller (12,000 total runs)  ",
         f"**Method**: Paired Student's t 95% Confidence Intervals & Two-Tailed Significance Testing  ",
+        f"**RRL Model**: `{model_path.name}` (`{rrl_ctrl_tag}`)  ",
+        f"**PID Base**: `{pid_gains_path.name}`  ",
         "",
         "## 1. Overall Aggregate Metrics (6,000 Trajectories)",
         "",
-        "| Evaluation Metric | Tuned PID Baseline (95% CI) | Residual RL v6 (95% CI) | Paired Difference (Δ, 95% CI) | p-value | Significance |",
+        f"| Evaluation Metric | Tuned PID Baseline (95% CI) | {rrl_label} (95% CI) | Paired Difference (Δ, 95% CI) | p-value | Significance |",
         "| :--- | :---: | :---: | :---: | :---: | :---: |"
     ]
 
@@ -253,7 +336,7 @@ def main():
         "",
         "## 2. Profile Breakdown (2.0s Dwell Catch Success Rate)",
         "",
-        "| Target Profile | Tuned PID Baseline (95% CI) | Residual RL v6 (95% CI) | Paired Difference (Δ, 95% CI) | p-value |",
+        f"| Target Profile | Tuned PID Baseline (95% CI) | {rrl_label} (95% CI) | Paired Difference (Δ, 95% CI) | p-value |",
         "| :--- | :---: | :---: | :---: | :---: |"
     ])
 
@@ -271,7 +354,7 @@ def main():
         "",
         "## 3. Profile Breakdown (Time-to-Success for 2.0s Dwell, including 2s dwell)",
         "",
-        "| Target Profile | Tuned PID Baseline (95% CI) | Residual RL v6 (95% CI) | Paired Difference (Δ, 95% CI) | p-value |",
+        f"| Target Profile | Tuned PID Baseline (95% CI) | {rrl_label} (95% CI) | Paired Difference (Δ, 95% CI) | p-value |",
         "| :--- | :---: | :---: | :---: | :---: |"
     ])
 

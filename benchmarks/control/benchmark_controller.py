@@ -65,6 +65,12 @@ def create_pid_controller(
     ki_yaw = 0.0
     kd_yaw = 20.0
 
+    max_lat_vel = 4.0
+    max_accel_val = 6.0
+    max_limits = np.array([15.0, 4.0, 2.0, 120.0])
+    min_limits = np.array([-0.5, -4.0, -3.0, -120.0])
+    max_yaw_spd = 120.0
+
     if gains_path is None:
         default_tuned = PROJECT_ROOT / "control" / "weights" / "tuned_pid_gains.json"
         if default_tuned.exists():
@@ -92,6 +98,16 @@ def create_pid_controller(
                 kp_yaw = float(params.get("kp_yaw", kp_yaw))
                 ki_yaw = float(params.get("ki_yaw", ki_yaw))
                 kd_yaw = float(params.get("kd_yaw", kd_yaw))
+
+                dyn = g_data.get("dynamics_envelope", {})
+                max_speed_env = dyn.get("max_speed_m_s", None)
+                if max_speed_env is not None and max_speed_env <= 3.0:
+                    max_lat_vel = min(1.5, max_speed_env)
+                    max_accel_val = 2.0
+                    max_yaw_spd = 60.0
+                    max_limits = np.array([max_speed_env, max_lat_vel, 0.8, max_yaw_spd])
+                    min_limits = np.array([-0.5, -max_lat_vel, -1.0, -max_yaw_spd])
+
                 print(f"[PID] Loaded tuned gains from {p_path.name}: "
                       f"Fwd(kp={kp_fwd:.3f}, ki={ki_fwd:.3f}, kd={kd_fwd:.3f}), "
                       f"Lat(kp={kp_lat:.3f}, ki={ki_lat:.3f}, kd={kd_lat:.3f}), "
@@ -124,13 +140,14 @@ def create_pid_controller(
         kp_yaw=kp_yaw,
         ki_yaw=ki_yaw,
         kd_yaw=kd_yaw,
-        max_lat_vel=4.0,
-        max_lat_accel=6.0,
-        max_accel=6.0,
+        max_lat_vel=max_lat_vel,
+        max_lat_accel=max_accel_val,
+        max_accel=max_accel_val,
         max_decel=max_decel,
         max_accel_yaw=240.0,
-        min_limits=np.array([-0.5, -4.0, -3.0, -120.0]),
-        max_limits=np.array([15.0,  4.0,  2.0,  120.0]),
+        max_yawspeed_deg=max_yaw_spd,
+        min_limits=min_limits,
+        max_limits=max_limits,
         search_mode="momentum_cruise",
     )
 
@@ -160,25 +177,39 @@ def evaluate_single_run(
     return_history: bool = False,
     enable_ego_compensation: bool = True,
     collision_dist_m: float = 0.5,
+    tau_yaw: Optional[float] = None,
+    tau_v_vert: Optional[float] = None,
+    tau_v_horiz: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
     Executes a single closed-loop pursuit simulation run and computes performance metrics.
     Can run either a parameterized scenario from PursuitDataset or standalone parameters.
     """
+    is_steady = (scenario is not None and getattr(scenario, "profile", "") == "steady_slow") or (profile == "steady_slow")
+    sim_tau_yaw = tau_yaw if tau_yaw is not None else (0.770 if is_steady else 0.150)
     sim_kwargs = dict(
         dt=dt,
-        max_vel_xy=15.0,
-        max_accel_xy=6.0,
-        max_vel_up=3.0,
-        max_vel_down=2.0
+        max_vel_xy=2.0 if is_steady else 15.0,
+        max_accel_xy=2.0 if is_steady else 6.0,
+        max_vel_up=1.0 if is_steady else 3.0,
+        max_vel_down=0.8 if is_steady else 2.0,
+        tau_yaw=sim_tau_yaw,
+        max_yaw_rate=np.deg2rad(60.0) if is_steady else np.deg2rad(120.0),
     )
+    if tau_v_vert is not None:
+        sim_kwargs["tau_v_vert"] = float(tau_v_vert)
+    if tau_v_horiz is not None:
+        sim_kwargs["tau_v_horiz"] = float(tau_v_horiz)
 
     if scenario is not None:
         target_oracle = scenario.create_target_oracle()
         sim = FastPixhawkQuadSim(**sim_kwargs)
         c_yaw = scenario.initial_chaser_yaw
         c, s = np.cos(c_yaw), np.sin(c_yaw)
-        c_speed = float(getattr(scenario, "initial_chaser_speed", 4.0))
+        fallback_speed = 1.2 if is_steady else 4.0
+        c_speed = float(getattr(scenario, "initial_chaser_speed", fallback_speed))
+        if is_steady:
+            c_speed = min(c_speed, 2.0)
         v_init = np.array([c * c_speed, s * c_speed, 0.0], dtype=np.float64)
         sim.reset(initial_pos=scenario.initial_chaser_pos, initial_yaw=c_yaw, initial_vel=v_init)
         profile = scenario.profile
@@ -195,7 +226,8 @@ def evaluate_single_run(
             seed=seed
         )
         sim = FastPixhawkQuadSim(**sim_kwargs)
-        v_init = np.array([4.0, 0.0, 0.0], dtype=np.float64)
+        v_speed = 1.2 if is_steady else 4.0
+        v_init = np.array([v_speed, 0.0, 0.0], dtype=np.float64)
         sim.reset(initial_pos=[0.0, 0.0, -2.5], initial_yaw=0.0, initial_vel=v_init)
         encounter_type = "tail_chase"
         scenario_id = f"{profile}_{seed}"
@@ -605,6 +637,10 @@ def run_benchmark_matrix(
     model_path: Optional[Union[str, Path]] = None,
     output_dir: Path = PROJECT_ROOT / "outputs" / "benchmarks" / "control",
     noise_mode: str = "empirical",
+    tau_yaw: Optional[float] = None,
+    tau_v_vert: Optional[float] = None,
+    tau_v_horiz: Optional[float] = None,
+    pid_gains: Optional[Union[str, Path]] = None,
 ) -> Dict[str, Any]:
     """
     Executes the full Monte Carlo benchmarking matrix and exports structured reports & plots.
@@ -644,7 +680,7 @@ def run_benchmark_matrix(
             w_nominal=0.0859
         )
     else:
-        shared_ctrl = create_pid_controller(max_decel=max_decel)
+        shared_ctrl = create_pid_controller(gains_path=pid_gains, max_decel=max_decel)
 
     for profile in profiles:
         for drop_rate in drop_rates:
@@ -661,7 +697,10 @@ def run_benchmark_matrix(
                         controller_type=controller_type,
                         model_path=model_path,
                         controller=shared_ctrl,
-                        noise_mode=noise_mode
+                        noise_mode=noise_mode,
+                        tau_yaw=tau_yaw,
+                        tau_v_vert=tau_v_vert,
+                        tau_v_horiz=tau_v_horiz,
                     )
                     raw_results.append(res)
                     completed += 1
@@ -715,13 +754,15 @@ def run_benchmark_matrix(
             "duration_s": duration,
             "profiles": profiles,
             "drop_rates": drop_rates,
-            "seeds_per_condition": num_seeds
+            "seeds_per_condition": num_seeds,
+            "tau_yaw_s": tau_yaw,
         },
         "summary": summary_table,
         "raw_results": raw_results
     }
 
-    json_path = output_dir / f"{controller_type.lower()}_benchmark.json"
+    tau_suffix = f"_tau{int(tau_yaw*1000)}" if tau_yaw is not None else ""
+    json_path = output_dir / f"{controller_type.lower()}_benchmark{tau_suffix}.json"
     with open(json_path, "w") as f:
         json.dump(report_data, f, indent=2)
     print(f"[REPORT] Structured benchmark data saved to: {json_path}")
@@ -740,7 +781,7 @@ def run_benchmark_matrix(
     # -------------------------------------------------------------
     # Generate Scientific Comparison Plots
     # -------------------------------------------------------------
-    plot_path = output_dir / f"{controller_type.lower()}_benchmark_analysis.png"
+    plot_path = output_dir / f"{controller_type.lower()}_benchmark_analysis{tau_suffix}.png"
     _generate_benchmark_plots(summary_table, profiles, drop_rates, plot_path)
     print(f"[PLOTS] Benchmark performance plots saved to: {plot_path}")
 
@@ -831,6 +872,9 @@ def run_dataset_benchmark(
     pid_gains: Optional[Union[str, Path]] = None,
     output_dir: Path = PROJECT_ROOT / "outputs" / "benchmarks" / "control",
     noise_mode: str = "empirical",
+    tau_yaw: Optional[float] = None,
+    tau_v_vert: Optional[float] = None,
+    tau_v_horiz: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
     Evaluates the controller across a standardized PursuitDataset manifest and prints grouped metrics.
@@ -885,7 +929,10 @@ def run_dataset_benchmark(
             controller_type=controller_type,
             model_path=model_path,
             controller=shared_ctrl,
-            noise_mode=noise_mode
+            noise_mode=noise_mode,
+            tau_yaw=tau_yaw,
+            tau_v_vert=tau_v_vert,
+            tau_v_horiz=tau_v_horiz,
         )
         raw_results.append(res)
         if idx % 20 == 0 or idx == len(dataset):
@@ -1018,13 +1065,21 @@ def run_dataset_benchmark(
         p = Path(model_path)
         tag_name = p.parent.name if p.parent.name not in ["weights", ".", "checkpoints"] else p.stem
         ctrl_tag = f"rl_{tag_name}"
-    out_json = output_dir / f"benchmark_results_{dataset.name}_{ctrl_tag}_{mode_str.lower()}_{noise_mode}_d{int(frame_drop_rate*100)}.json"
+    tau_suffix = f"_tau{int(tau_yaw*1000)}" if tau_yaw is not None else ""
+    if tau_v_vert is not None:
+        tau_suffix += f"_vvert{int(tau_v_vert*1000)}"
+    if tau_v_horiz is not None:
+        tau_suffix += f"_vhoriz{int(tau_v_horiz*1000)}"
+    out_json = output_dir / f"benchmark_results_{dataset.name}_{ctrl_tag}_{mode_str.lower()}_{noise_mode}_d{int(frame_drop_rate*100)}{tau_suffix}.json"
     with open(out_json, "w", encoding="utf-8") as f:
         json.dump({
             "dataset": dataset.name,
             "controller": ctrl_tag,
             "model_path": str(model_path) if model_path else None,
             "noise_mode": noise_mode,
+            "tau_yaw_s": tau_yaw,
+            "tau_v_vert_s": tau_v_vert,
+            "tau_v_horiz_s": tau_v_horiz,
             "overall": {
                 "success_rate_1s_pct": overall_succ_1s,
                 "success_rate_2s_pct": overall_succ_2s,
@@ -1061,6 +1116,9 @@ if __name__ == "__main__":
     parser.add_argument("--drop-rate", type=float, default=0.0, help="Frame drop rate when running dataset (default: 0.0)")
     parser.add_argument("--noise-mode", type=str, default="empirical", choices=["empirical", "bernoulli", "none"], help="Perception noise model: 'empirical' (calibrated Jetson YOLO noise + AR(1) colored jitter), 'bernoulli' (simple random dropouts on ground truth), or 'none' (default: empirical)")
     parser.add_argument("--pid-gains", type=str, default="control/weights/tuned_pid_gains.json", help="Path to tuned PID gains JSON (default: control/weights/tuned_pid_gains.json)")
+    parser.add_argument("--tau-yaw", type=float, default=None, help="Chaser yaw rate first-order time constant tau_yaw in seconds (e.g. 0.770 for Pixhawk sysid, 0.150 for legacy simulation)")
+    parser.add_argument("--tau-v-vert", type=float, default=None, help="Chaser vertical velocity first-order time constant tau_v_vert in seconds (default: 0.220)")
+    parser.add_argument("--tau-v-horiz", type=float, default=None, help="Chaser horizontal velocity first-order time constant tau_v_horiz in seconds (default: 0.320)")
     args = parser.parse_args()
 
     controllers_to_run = ["pid", "rl"] if args.controller == "both" else [args.controller]
@@ -1075,8 +1133,11 @@ if __name__ == "__main__":
                 max_decel=args.max_decel,
                 controller_type=ctrl,
                 model_path=args.model_path,
+                noise_mode=args.noise_mode,
+                tau_yaw=args.tau_yaw,
+                tau_v_vert=args.tau_v_vert,
+                tau_v_horiz=args.tau_v_horiz,
                 pid_gains=args.pid_gains,
-                noise_mode=args.noise_mode
             )
         else:
             run_benchmark_matrix(
@@ -1086,5 +1147,9 @@ if __name__ == "__main__":
                 max_decel=args.max_decel,
                 controller_type=ctrl,
                 model_path=args.model_path,
-                noise_mode=args.noise_mode
+                noise_mode=args.noise_mode,
+                tau_yaw=args.tau_yaw,
+                tau_v_vert=args.tau_v_vert,
+                tau_v_horiz=args.tau_v_horiz,
+                pid_gains=args.pid_gains,
             )

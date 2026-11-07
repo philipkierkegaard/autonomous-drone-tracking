@@ -46,6 +46,8 @@ Thumbs.db
 *.flv
 *.wmv
 *.gif
+*.png
+*.jpeg
 outputs/videos/
 control/rendering/drone_chase/
 **/drone_chase/

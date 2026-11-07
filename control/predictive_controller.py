@@ -498,6 +498,29 @@ class ResidualVisualServoController(RecurrentVisualServoController):
         desired_bbox_size: float = 110.0,
         **kwargs
     ):
+        # Auto-discover training config if available alongside model
+        if model_path is not None:
+            m_path = Path(model_path)
+            candidates = [
+                m_path.parent / "config.json",
+                m_path.parent.parent / "config.json",
+                m_path.parent / "training_metadata.json",
+                m_path.parent.parent / "training_metadata.json",
+            ]
+            for c_path in candidates:
+                if c_path.exists():
+                    try:
+                        import json
+                        with open(c_path, "r", encoding="utf-8") as f:
+                            cfg = json.load(f)
+                        if residual_scales == (3.0, 2.0, 1.0, 30.0) and "residual_scales" in cfg:
+                            residual_scales = cfg["residual_scales"]
+                        if pid_gains_path == "control/weights/tuned_pid_gains.json" and "pid_gains_path" in cfg:
+                            pid_gains_path = cfg["pid_gains_path"]
+                        break
+                    except Exception:
+                        pass
+
         from benchmarks.control.benchmark_controller import create_pid_controller
         self.pid = create_pid_controller(
             gains_path=pid_gains_path,

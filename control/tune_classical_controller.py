@@ -227,7 +227,9 @@ def simulate_scenario(
     dt: float = 0.02,
     lambda_image: float = 3.0,
     camera_fps: float = 30.0,
-    frame_drop_rate: float = 0.05
+    frame_drop_rate: float = 0.05,
+    tau_yaw: Optional[float] = None,
+    max_speed: Optional[float] = None,
 ) -> Dict[str, float]:
     """
     Simulates a flight scenario under given candidate PID parameters driven by the
@@ -248,19 +250,24 @@ def simulate_scenario(
     c_init = scenario.get("initial_chaser_pos", [0.0, 0.0, -2.5])
     c_yaw = float(scenario.get("initial_chaser_yaw", 0.0))
     is_steady = (scenario.get("profile") == "steady_slow")
+
+    # Effective dynamics parameters
+    effective_tau_yaw = float(tau_yaw) if tau_yaw is not None else (0.770 if is_steady else 0.150)
+    effective_max_speed = float(max_speed) if max_speed is not None else (2.0 if is_steady else 15.0)
+
     # Diverse operational initial velocities: read from scenario or fallback to deterministic cycle
-    fallback_speeds = [0.0, 1.2, 1.8] if is_steady else [0.0, 4.0, 5.0, 6.5]
+    fallback_speeds = [0.0, 1.0, 1.5] if is_steady else [0.0, 4.0, 5.0, 6.5]
     seed_idx = int(scenario.get("seed", 0)) % len(fallback_speeds)
-    c_speed = float(scenario.get("initial_chaser_speed", fallback_speeds[seed_idx]))
+    c_speed = min(float(scenario.get("initial_chaser_speed", fallback_speeds[seed_idx])), effective_max_speed)
     c_vel = np.array([np.cos(c_yaw) * c_speed, np.sin(c_yaw) * c_speed, 0.0], dtype=np.float64)
 
-    # 1. Quadrotor simulator matching physical flight envelope (matched to 2.5 m/s, 60 deg/s for steady profile)
-    max_vel_xy = 2.5 if is_steady else 15.0
+    # 1. Quadrotor simulator matching physical flight envelope (calibrated for 2.0 m/s slow tracking & 770ms yaw)
+    max_vel_xy = effective_max_speed
     max_accel_xy = 2.0 if is_steady else 6.0
     max_vel_up = 1.0 if is_steady else 3.0
     max_vel_down = 0.8 if is_steady else 2.0
     max_yaw_rate = np.deg2rad(60.0) if is_steady else np.deg2rad(120.0)
-    max_yaw_accel = np.deg2rad(240.0)
+    max_yaw_accel = np.deg2rad(300.0)
 
     sim = FastPixhawkQuadSim(
         dt=dt,
@@ -270,10 +277,12 @@ def simulate_scenario(
         max_vel_down=max_vel_down,
         max_yaw_rate=max_yaw_rate,
         max_yaw_accel=max_yaw_accel,
+        tau_yaw=effective_tau_yaw,
     )
     sim.reset(initial_pos=np.array(c_init, dtype=np.float64), initial_yaw=c_yaw, initial_vel=c_vel)
 
     # 2. Candidate Controller with Momentum Cruise recovery
+    max_lat_vel = min(1.5, effective_max_speed) if is_steady else 4.0
     ctrl = KinematicVisualServoController(
         camera_uptilt_deg=15.0,
         hfov_deg=62.0,
@@ -297,14 +306,14 @@ def simulate_scenario(
         kp_yaw=float(kp_yaw),
         ki_yaw=float(ki_yaw),
         kd_yaw=float(kd_yaw),
-        max_lat_vel=1.5 if is_steady else 4.0,
+        max_lat_vel=max_lat_vel,
         max_lat_accel=2.0 if is_steady else 6.0,
         max_accel=2.0 if is_steady else 6.0,
         max_decel=float(max_decel),
         max_accel_yaw=240.0,
         max_yawspeed_deg=60.0 if is_steady else 120.0,
-        min_limits=np.array([-0.5, -1.5, -1.0, -60.0]) if is_steady else np.array([-0.5, -4.0, -3.0, -120.0]),
-        max_limits=np.array([2.5,  1.5,  0.8,  60.0]) if is_steady else np.array([15.0,  4.0,  2.0,  120.0]),
+        min_limits=np.array([-0.5, -max_lat_vel, -1.0, -60.0]) if is_steady else np.array([-0.5, -4.0, -3.0, -120.0]),
+        max_limits=np.array([effective_max_speed,  max_lat_vel,  0.8,  60.0]) if is_steady else np.array([15.0,  4.0,  2.0,  120.0]),
         search_mode="momentum_cruise",
     )
 
@@ -571,9 +580,17 @@ def simulate_scenario(
     }
 
 
-def _eval_worker(args: Tuple[Dict[str, Any], np.ndarray, float]) -> float:
-    sc, params, lambda_image = args
-    res = simulate_scenario(sc, params, lambda_image=lambda_image)
+def _eval_worker(args: Tuple[Any, ...]) -> float:
+    if len(args) == 3:
+        sc, params, lambda_image = args
+        tau_yaw, max_speed = None, None
+    elif len(args) == 5:
+        sc, params, lambda_image, tau_yaw, max_speed = args
+    else:
+        sc, params, lambda_image = args[:3]
+        tau_yaw = args[3] if len(args) > 3 else None
+        max_speed = args[4] if len(args) > 4 else None
+    res = simulate_scenario(sc, params, lambda_image=lambda_image, tau_yaw=tau_yaw, max_speed=max_speed)
     return res["cost"]
 
 
@@ -584,15 +601,17 @@ _GLOBAL_POOL = None
 def evaluate_candidate(
     params: np.ndarray,
     scenarios: List[Dict[str, Any]],
-    lambda_image: float = 3.0
+    lambda_image: float = 3.0,
+    tau_yaw: Optional[float] = None,
+    max_speed: Optional[float] = None,
 ) -> float:
     """Evaluates candidate parameters across the tuning scenarios and returns mean cost."""
     global _GLOBAL_POOL
     if _GLOBAL_POOL is not None:
-        work_items = [(sc, params, lambda_image) for sc in scenarios]
+        work_items = [(sc, params, lambda_image, tau_yaw, max_speed) for sc in scenarios]
         costs = _GLOBAL_POOL.map(_eval_worker, work_items)
     else:
-        costs = [simulate_scenario(sc, params, lambda_image=lambda_image)["cost"] for sc in scenarios]
+        costs = [simulate_scenario(sc, params, lambda_image=lambda_image, tau_yaw=tau_yaw, max_speed=max_speed)["cost"] for sc in scenarios]
     return float(np.mean(costs))
 
 
@@ -645,7 +664,7 @@ STEADY_BOUNDS = [
     (0.20, 1.20),   # 0: kp_fwd (gentle forward proportional response)
     (0.0, 0.25),    # 1: ki_fwd (forward integral gain)
     (0.05, 0.35),   # 2: kd_fwd (damping)
-    (1.0, 2.5),     # 3: max_decel (m/s² braking limit)
+    (0.8, 2.0),     # 3: max_decel (m/s² braking limit for 2.0 m/s envelope)
     (0.05, 0.35),   # 4: centering_damp
     (0.30, 0.70),   # 5: min_centering_factor
     (0.8, 2.5),     # 6: kp_lat
@@ -654,16 +673,16 @@ STEADY_BOUNDS = [
     (1.5, 5.0),     # 9: kp_z
     (0.0, 0.30),    # 10: ki_z
     (0.20, 1.0),    # 11: kd_z
-    (50.0, 160.0),  # 12: kp_yaw (centered around proven ~80-120 range)
+    (20.0, 140.0),  # 12: kp_yaw (accommodates 770ms lag without phase lag oscillation)
     (0.0, 15.0),    # 13: ki_yaw
-    (5.0, 25.0),    # 14: kd_yaw (damped derivative without noise sensitivity)
+    (2.0, 25.0),    # 14: kd_yaw (damped derivative)
 ]
 
 STEADY_BASELINE_PARAMS = np.array([
     0.55,   # kp_fwd
     0.0,    # ki_fwd
     0.15,   # kd_fwd
-    1.8,    # max_decel
+    1.5,    # max_decel
     0.20,   # centering_damp
     0.50,   # min_centering_factor
     1.5,    # kp_lat
@@ -672,9 +691,9 @@ STEADY_BASELINE_PARAMS = np.array([
     3.0,    # kp_z
     0.0,    # ki_z
     0.50,   # kd_z
-    80.0,   # kp_yaw (empirically validated hover baseline)
+    60.0,   # kp_yaw (empirically stable with 770ms yaw lag)
     0.0,    # ki_yaw
-    15.0,   # kd_yaw
+    10.0,   # kd_yaw
 ], dtype=np.float64)
 
 
@@ -689,6 +708,8 @@ def run_random_search_optimization(
     seed: int = 42,
     bounds: Optional[List[Tuple[float, float]]] = None,
     baseline_params: Optional[np.ndarray] = None,
+    tau_yaw: Optional[float] = None,
+    max_speed: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
     Two-Stage Coarse-to-Fine Latin Hypercube Random Search (Bergstra & Bengio, 2012 / Solis & Wets, 1981):
@@ -711,9 +732,13 @@ def run_random_search_optimization(
     baseline_params = baseline_params.copy()
     param_keys = PARAM_KEYS
 
+    effective_tau_yaw = float(tau_yaw) if tau_yaw is not None else (0.770 if (scenarios and scenarios[0].get("profile") == "steady_slow") else 0.150)
+    effective_max_speed = float(max_speed) if max_speed is not None else (2.0 if (scenarios and scenarios[0].get("profile") == "steady_slow") else 15.0)
+
     print(f"\n[EVAL] Evaluating baseline parameters on realistic observation suite ({len(scenarios)} scenarios):")
+    print(f"       Enforcing Dynamics: tau_yaw = {effective_tau_yaw*1000:.0f} ms | max_speed = {effective_max_speed:.1f} m/s")
     t0 = time.time()
-    baseline_cost = evaluate_candidate(baseline_params, scenarios, lambda_image=lambda_image)
+    baseline_cost = evaluate_candidate(baseline_params, scenarios, lambda_image=lambda_image, tau_yaw=effective_tau_yaw, max_speed=effective_max_speed)
     print(f"       Baseline Mean Cost: {baseline_cost:.4f} (evaluated in {time.time()-t0:.2f}s)")
 
     best_cost = baseline_cost
@@ -734,7 +759,7 @@ def run_random_search_optimization(
     stage1_results = []
     for i in range(n_global):
         cand = global_candidates[i]
-        cost = evaluate_candidate(cand, scenarios, lambda_image=lambda_image)
+        cost = evaluate_candidate(cand, scenarios, lambda_image=lambda_image, tau_yaw=effective_tau_yaw, max_speed=effective_max_speed)
         stage1_results.append((cost, cand.copy(), i + 1))
 
         if cost < best_cost:
@@ -742,7 +767,7 @@ def run_random_search_optimization(
             best_cost = cost
             best_params = cand.copy()
             best_trial_overall = i + 1
-            print(f"  [★ STAGE 1 NEW BEST] Trial {i+1:3d}/{n_global} | Cost: {best_cost:.4f} | Improvement: {improvement:+.1f}% | Lat kp={cand[6]:.2f}, kd={cand[8]:.2f}", flush=True)
+            print(f"  [★ STAGE 1 NEW BEST] Trial {i+1:3d}/{n_global} | Cost: {best_cost:.4f} | Improvement: {improvement:+.1f}% | Yaw kp={cand[12]:.2f}, kd={cand[14]:.2f}", flush=True)
         elif (i + 1) % 50 == 0 or (i + 1) == n_global:
             elapsed_now = time.time() - t_start
             rate = (i + 1) / elapsed_now
@@ -782,14 +807,14 @@ def run_random_search_optimization(
         delta = rng_local.normal(0.0, scale_factor * ranges, size=len(bounds))
         cand = np.clip(elite_center + delta, lower_b, upper_b)
 
-        cost = evaluate_candidate(cand, scenarios, lambda_image=lambda_image)
+        cost = evaluate_candidate(cand, scenarios, lambda_image=lambda_image, tau_yaw=effective_tau_yaw, max_speed=effective_max_speed)
 
         if cost < best_cost:
             improvement = (best_cost - cost) / best_cost * 100.0 if best_cost < 1e5 else 0.0
             best_cost = cost
             best_params = cand.copy()
             best_trial_overall = overall_idx
-            print(f"  [★ STAGE 2 NEW BEST] Trial {j+1:3d}/{n_local} (Overall #{overall_idx}) | Cost: {best_cost:.4f} | Improvement: {improvement:+.1f}% | Lat kp={cand[6]:.2f}, kd={cand[8]:.2f}", flush=True)
+            print(f"  [★ STAGE 2 NEW BEST] Trial {j+1:3d}/{n_local} (Overall #{overall_idx}) | Cost: {best_cost:.4f} | Improvement: {improvement:+.1f}% | Yaw kp={cand[12]:.2f}, kd={cand[14]:.2f}", flush=True)
         elif (j + 1) % 50 == 0 or (j + 1) == n_local:
             elapsed_now = time.time() - stage2_t0
             rate = (j + 1) / elapsed_now
@@ -828,7 +853,9 @@ def run_random_search_optimization(
         "optimization_time_s": round(total_elapsed, 1),
         "lambda_image": lambda_image,
         "num_scenarios": len(scenarios),
-        "attitude_dynamics": {
+        "dynamics_envelope": {
+            "tau_yaw_s": effective_tau_yaw,
+            "max_speed_m_s": effective_max_speed,
             "tau_att_s": 0.035,
             "max_tilt_rate_deg_s": 250.0
         },
@@ -852,19 +879,87 @@ def run_random_search_optimization(
     return results
 
 
+def plot_validation_comparison(results_map: Dict[str, Dict[str, float]], plot_path: Path):
+    """Saves a 4-panel comparison bar chart comparing candidate controllers on the held-out suite."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        plot_path.parent.mkdir(parents=True, exist_ok=True)
+        names = list(results_map.keys())
+
+        fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+        fig.suptitle("Held-Out Validation: Slow-Moving Target (tau_yaw = 770 ms, max_speed = 2.0 m/s)", fontsize=13, fontweight="bold")
+
+        colors = ["#7f8c8d", "#27ae60", "#e67e22", "#2980b9"][:len(names)]
+
+        # 1. FOV In-view
+        ax = axes[0, 0]
+        vals = [results_map[n]["fov"] for n in names]
+        bars = ax.bar(names, vals, color=colors)
+        ax.set_ylabel("In-View FOV (%)")
+        ax.set_title("Camera Target In-View Percentage")
+        ax.set_ylim(0, 105)
+        for b in bars:
+            ax.text(b.get_x() + b.get_width() / 2, b.get_height() + 1, f"{b.get_height():.1f}%", ha='center', va='bottom', fontsize=9)
+
+        # 2. 1.0s Catch Rate
+        ax = axes[0, 1]
+        vals = [results_map[n]["catch_1s_pct"] for n in names]
+        bars = ax.bar(names, vals, color=colors)
+        ax.set_ylabel("Catch Rate (%)")
+        ax.set_title("1.0s Continuous Basket Catch Rate")
+        ax.set_ylim(0, 105)
+        for b in bars:
+            ax.text(b.get_x() + b.get_width() / 2, b.get_height() + 1, f"{b.get_height():.1f}%", ha='center', va='bottom', fontsize=9)
+
+        # 3. Mean Dwell Time
+        ax = axes[1, 0]
+        vals = [results_map[n]["dwell"] for n in names]
+        bars = ax.bar(names, vals, color=colors)
+        ax.set_ylabel("Dwell Duration (s)")
+        ax.set_title("Mean Continuous Dwell Time (max 18s)")
+        for b in bars:
+            ax.text(b.get_x() + b.get_width() / 2, b.get_height() + 0.1, f"{b.get_height():.2f}s", ha='center', va='bottom', fontsize=9)
+
+        # 4. Standoff RMSE
+        ax = axes[1, 1]
+        vals = [results_map[n]["standoff_rmse"] for n in names]
+        bars = ax.bar(names, vals, color=colors)
+        ax.set_ylabel("RMSE Error (m)")
+        ax.set_title("Standoff Distance RMSE (Target: 3.5m)")
+        for b in bars:
+            ax.text(b.get_x() + b.get_width() / 2, b.get_height() + 0.05, f"{b.get_height():.2f}m", ha='center', va='bottom', fontsize=9)
+
+        for ax_row in axes:
+            for ax_item in ax_row:
+                ax_item.grid(axis='y', linestyle='--', alpha=0.5)
+                ax_item.tick_params(axis='x', rotation=8)
+
+        plt.tight_layout()
+        plt.savefig(plot_path, dpi=200)
+        plt.close()
+        print(f"[PLOT] Saved validation comparison figure to: {plot_path}")
+    except Exception as e:
+        print(f"[WARN] Could not generate comparison plot: {e}")
+
+
 def validate_on_held_out(
     val_suite_path: Path,
     candidates: Union[Dict[str, np.ndarray], np.ndarray],
     tuned_params: Optional[np.ndarray] = None,
     prev_params: Optional[np.ndarray] = None,
-    lambda_image: float = 3.0
+    lambda_image: float = 3.0,
+    tau_yaw: Optional[float] = None,
+    max_speed: Optional[float] = None,
+    plot_path: Optional[Path] = None,
 ):
-    """Directly compares candidate controllers on the independent 30-scenario validation suite."""
+    """Directly compares candidate controllers on the independent validation suite."""
     if not val_suite_path.exists():
         print(f"[WARN] Validation suite not found at {val_suite_path}")
         return
 
-    print(f"\n[EVAL-VALIDATION] Testing on held-out test suite: {val_suite_path.name} (30 scenarios)...")
+    print(f"\n[EVAL-VALIDATION] Testing on held-out test suite: {val_suite_path.name}...")
     with open(val_suite_path, "r", encoding="utf-8") as f:
         val_data = json.load(f)
     scenarios = val_data["scenarios"]
@@ -883,7 +978,7 @@ def validate_on_held_out(
     for name, params in cand_dict.items():
         if params is None:
             continue
-        res_list = [simulate_scenario(s, params, lambda_image=lambda_image) for s in scenarios]
+        res_list = [simulate_scenario(s, params, lambda_image=lambda_image, tau_yaw=tau_yaw, max_speed=max_speed) for s in scenarios]
         dwell_s = [r["max_dwell_s"] for r in res_list]
         results_map[name] = {
             "fov": float(np.mean([r["in_view_pct"] for r in res_list])),
@@ -919,13 +1014,19 @@ def validate_on_held_out(
         print(row)
     print(sep + "\n")
 
+    if plot_path is not None:
+        plot_validation_comparison(results_map, plot_path)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Tune Kinematic Controller via Two-Stage Latin Hypercube Random Search Under Realistic Observations & Attitude Dynamics")
     parser.add_argument("--suite", type=str, default="outputs/benchmarks/datasets/pid_realistic_tuning_suite_80.json")
     parser.add_argument("--val-suite", type=str, default="outputs/benchmarks/datasets/validation_suite_30.json")
-    parser.add_argument("--out", type=str, default="control/weights/tuned_pid_gains.json", help="Output weights JSON path (default: control/weights/tuned_pid_gains.json)")
-    parser.add_argument("--steady", action="store_true", help="Tune for steady 1-2 m/s target with matched 2.5 m/s, 60 deg/s, 240 deg/s^2 flight envelope")
+    parser.add_argument("--out", type=str, default=None, help="Output weights JSON path (default: control/weights/tuned_pid_gains_slow_tau770.json when --steady, else control/weights/tuned_pid_gains.json)")
+    parser.add_argument("--steady", action="store_true", help="Tune for steady 1-2 m/s target with matched 2.0 m/s max speed, 60 deg/s, 770 ms yaw lag")
+    parser.add_argument("--tau-yaw", type=float, default=None, help="Yaw rate time constant tau_yaw in seconds (default: 0.770 for steady, 0.150 for aggressive)")
+    parser.add_argument("--max-speed", type=float, default=None, help="Max forward/horizontal velocity in m/s (default: 2.0 for steady, 15.0 for aggressive)")
+    parser.add_argument("--plot-path", type=str, default="logs/flight_logs/plots/pid_slow_tau770_validation_comparison.png", help="Path to save validation comparison plot")
     parser.add_argument("--lambda-image", type=float, default=3.0, help="Weight for image plane error vs standoff error")
     parser.add_argument("--workers", type=int, default=10, help="Number of parallel CPU workers")
     parser.add_argument("--n-global", type=int, default=300, help="Stage 1 Latin Hypercube global trials (default: 300)")
@@ -933,9 +1034,15 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     args = parser.parse_args()
 
+    effective_tau_yaw = args.tau_yaw if args.tau_yaw is not None else (0.770 if args.steady else 0.150)
+    effective_max_speed = args.max_speed if args.max_speed is not None else (2.0 if args.steady else 15.0)
+
     if args.steady:
         suite_path = Path("outputs/benchmarks/datasets/pid_steady_tuning_suite_56.json") if args.suite == "outputs/benchmarks/datasets/pid_realistic_tuning_suite_80.json" else Path(args.suite)
-        out_path = Path("control/weights/tuned_pid_gains_steady.json") if args.out == "control/weights/tuned_pid_gains.json" else Path(args.out)
+        if args.out:
+            out_path = Path(args.out)
+        else:
+            out_path = Path("control/weights/tuned_pid_gains_slow_tau770.json")
         val_suite_path = Path("outputs/benchmarks/datasets/val_steady_suite_28.json") if args.val_suite == "outputs/benchmarks/datasets/validation_suite_30.json" else Path(args.val_suite)
         suite_scenarios = create_steady_tuning_suite(suite_path)
         create_steady_validation_suite(val_suite_path)
@@ -943,11 +1050,35 @@ if __name__ == "__main__":
         baseline_p = STEADY_BASELINE_PARAMS.copy()
     else:
         suite_path = Path(args.suite)
-        out_path = Path(args.out)
+        out_path = Path(args.out) if args.out else Path("control/weights/tuned_pid_gains.json")
         val_suite_path = Path(args.val_suite)
         suite_scenarios = create_tuning_suite(suite_path)
-        bounds = DEFAULT_BOUNDS
-        baseline_p = BASELINE_PARAMS.copy()
+        if effective_tau_yaw > 0.20:
+            bounds = [
+                (0.65, 2.5),    # 0: kp_fwd
+                (0.0, 0.40),    # 1: ki_fwd
+                (0.10, 0.45),   # 2: kd_fwd
+                (2.0, 6.0),     # 3: max_decel
+                (0.05, 0.35),   # 4: centering_damp
+                (0.30, 0.70),   # 5: min_centering_factor
+                (1.2, 3.5),     # 6: kp_lat
+                (0.0, 0.40),    # 7: ki_lat
+                (0.15, 0.70),   # 8: kd_lat
+                (2.5, 8.0),     # 9: kp_z
+                (0.0, 0.50),    # 10: ki_z
+                (0.3, 1.5),     # 11: kd_z
+                (50.0, 220.0),  # 12: kp_yaw (tuned for 120 deg/s with 300ms delay)
+                (0.0, 15.0),    # 13: ki_yaw
+                (8.0, 40.0),    # 14: kd_yaw (damped derivative to arrest 120 deg/s momentum)
+            ]
+            baseline_p = np.array([
+                1.3, 0.0, 0.22, 3.5, 0.18, 0.50,
+                2.2, 0.0, 0.35, 4.5, 0.0, 0.70,
+                130.0, 0.0, 16.0
+            ], dtype=np.float64)
+        else:
+            bounds = DEFAULT_BOUNDS
+            baseline_p = BASELINE_PARAMS.copy()
 
     res = run_random_search_optimization(
         scenarios=suite_scenarios,
@@ -958,7 +1089,9 @@ if __name__ == "__main__":
         workers=args.workers,
         seed=args.seed,
         bounds=bounds,
-        baseline_params=baseline_p
+        baseline_params=baseline_p,
+        tau_yaw=effective_tau_yaw,
+        max_speed=effective_max_speed,
     )
 
     # Prepare candidate vectors for validation comparison
@@ -967,11 +1100,19 @@ if __name__ == "__main__":
 
     comparison_dict = {
         "BASELINE PID": baseline_vec,
-        "RANDOM SEARCH PID": tuned_vec,
+        "RETUNED DEEP (tau=770ms)": tuned_vec,
     }
+    prev_steady_path = Path("control/weights/tuned_pid_gains_steady.json")
+    if prev_steady_path.exists():
+        with open(prev_steady_path, "r", encoding="utf-8") as f:
+            prev_data = json.load(f)
+            comparison_dict["PREV STEADY (tau=150ms)"] = np.array([prev_data["tuned_parameters"][k] for k in PARAM_KEYS])
 
     validate_on_held_out(
         val_suite_path=val_suite_path,
         candidates=comparison_dict,
-        lambda_image=args.lambda_image
+        lambda_image=args.lambda_image,
+        tau_yaw=effective_tau_yaw,
+        max_speed=effective_max_speed,
+        plot_path=Path(args.plot_path) if args.plot_path else None
     )

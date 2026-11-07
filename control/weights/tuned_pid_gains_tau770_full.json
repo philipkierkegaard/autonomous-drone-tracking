@@ -1,0 +1,1858 @@
+{
+  "status": "SUCCESS",
+  "method": "TWO_STAGE_LATIN_HYPERCUBE_RANDOM_SEARCH",
+  "seed": 42,
+  "n_global": 150,
+  "n_local": 150,
+  "total_trials": 300,
+  "best_trial_overall": 241,
+  "stage1_best_cost": 63.1245,
+  "final_tuned_cost": 53.2745,
+  "optimization_time_s": 292.1,
+  "lambda_image": 3.0,
+  "num_scenarios": 80,
+  "dynamics_envelope": {
+    "tau_yaw_s": 0.77,
+    "max_speed_m_s": 15.0,
+    "tau_att_s": 0.035,
+    "max_tilt_rate_deg_s": 250.0
+  },
+  "baseline_cost": 69.3081,
+  "cost_reduction_pct": 23.13,
+  "baseline_parameters": {
+    "kp_forward": 1.2,
+    "ki_forward": 0.0,
+    "kd_forward": 0.2,
+    "max_decel": 3.5,
+    "centering_damping": 0.2,
+    "min_centering_factor": 0.5,
+    "kp_lat": 2.0,
+    "ki_lat": 0.0,
+    "kd_lat": 0.35,
+    "kp_z": 4.0,
+    "ki_z": 0.0,
+    "kd_z": 0.6,
+    "kp_yaw": 70.0,
+    "ki_yaw": 0.0,
+    "kd_yaw": 8.0
+  },
+  "tuned_parameters": {
+    "kp_forward": 1.396814076167186,
+    "ki_forward": 0.06172109563496036,
+    "kd_forward": 0.321177399497439,
+    "max_decel": 5.515587393663446,
+    "centering_damping": 0.07384689873657671,
+    "min_centering_factor": 0.4434155479913298,
+    "kp_lat": 2.7531451331754067,
+    "ki_lat": 0.229875071584845,
+    "kd_lat": 0.28599500115617077,
+    "kp_z": 4.438229308378485,
+    "ki_z": 0.1963584291891827,
+    "kd_z": 1.3238552556104974,
+    "kp_yaw": 93.38833741775221,
+    "ki_yaw": 13.115965066036644,
+    "kd_yaw": 5.959915721614525
+  },
+  "history": [
+    {
+      "stage": 1,
+      "trial": 1,
+      "cost": 79.18055733695287,
+      "best_cost_so_far": 69.30805603432884
+    },
+    {
+      "stage": 1,
+      "trial": 2,
+      "cost": 77.86709032697493,
+      "best_cost_so_far": 69.30805603432884
+    },
+    {
+      "stage": 1,
+      "trial": 3,
+      "cost": 85.2490002586974,
+      "best_cost_so_far": 69.30805603432884
+    },
+    {
+      "stage": 1,
+      "trial": 4,
+      "cost": 63.1244518178486,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 5,
+      "cost": 89.88786805880576,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 6,
+      "cost": 84.04908342508206,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 7,
+      "cost": 94.84711341142727,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 8,
+      "cost": 90.6735909808161,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 9,
+      "cost": 105.7094443365587,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 10,
+      "cost": 81.6176332840918,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 11,
+      "cost": 68.79283455568972,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 12,
+      "cost": 92.6525686658767,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 13,
+      "cost": 92.2692871146287,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 14,
+      "cost": 82.62088929085115,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 15,
+      "cost": 91.79841112543394,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 16,
+      "cost": 67.58784337437822,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 17,
+      "cost": 81.82124507406255,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 18,
+      "cost": 88.13737912775835,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 19,
+      "cost": 81.69244315844729,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 20,
+      "cost": 89.54424370964826,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 21,
+      "cost": 82.35558295073773,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 22,
+      "cost": 95.03794132654981,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 23,
+      "cost": 84.74792530009398,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 24,
+      "cost": 92.20735693513389,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 25,
+      "cost": 86.39828108428377,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 26,
+      "cost": 90.62582947635526,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 27,
+      "cost": 72.08059696042105,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 28,
+      "cost": 72.99387267189172,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 29,
+      "cost": 83.796573106772,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 30,
+      "cost": 89.91862661443861,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 31,
+      "cost": 85.72253787393295,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 32,
+      "cost": 79.7305525869692,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 33,
+      "cost": 75.99202731170041,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 34,
+      "cost": 70.30283015724639,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 35,
+      "cost": 90.76305489160978,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 36,
+      "cost": 81.27915951581886,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 37,
+      "cost": 74.16414303973,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 38,
+      "cost": 76.87033977070952,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 39,
+      "cost": 71.24966755538257,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 40,
+      "cost": 82.58607779031608,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 41,
+      "cost": 85.16787697683375,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 42,
+      "cost": 90.63287715560894,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 43,
+      "cost": 79.63537582058665,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 44,
+      "cost": 80.86943650072598,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 45,
+      "cost": 66.43097845080528,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 46,
+      "cost": 87.41299572659048,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 47,
+      "cost": 104.43442744920358,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 48,
+      "cost": 92.45379776047608,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 49,
+      "cost": 93.65397566122871,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 50,
+      "cost": 72.74074963496749,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 51,
+      "cost": 78.59556961988292,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 52,
+      "cost": 78.82038480866923,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 53,
+      "cost": 88.23255555787757,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 54,
+      "cost": 82.68549522050255,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 55,
+      "cost": 82.3262314834499,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 56,
+      "cost": 99.56683024667727,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 57,
+      "cost": 89.25530220946058,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 58,
+      "cost": 73.14245036551395,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 59,
+      "cost": 83.91645051982744,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 60,
+      "cost": 76.60652882508775,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 61,
+      "cost": 77.29852314836975,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 62,
+      "cost": 81.00088642951285,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 63,
+      "cost": 88.20379786946656,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 64,
+      "cost": 85.29667309372944,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 65,
+      "cost": 80.43131275166894,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 66,
+      "cost": 96.29452787917936,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 67,
+      "cost": 94.09043336347898,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 68,
+      "cost": 71.43608152872741,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 69,
+      "cost": 69.75308346950379,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 70,
+      "cost": 70.02195255189959,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 71,
+      "cost": 98.07373049626577,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 72,
+      "cost": 77.83045211446,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 73,
+      "cost": 75.24224266435697,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 74,
+      "cost": 87.79379182982612,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 75,
+      "cost": 68.90059302024738,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 76,
+      "cost": 92.61794834564782,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 77,
+      "cost": 63.595161118968875,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 78,
+      "cost": 88.54681945287928,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 79,
+      "cost": 97.1163107462537,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 80,
+      "cost": 80.14290675040886,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 81,
+      "cost": 74.22211188191561,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 82,
+      "cost": 90.09311932195286,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 83,
+      "cost": 76.67821287447468,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 84,
+      "cost": 82.600050305809,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 85,
+      "cost": 66.18449851855713,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 86,
+      "cost": 80.77915271287681,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 87,
+      "cost": 75.86547990386983,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 88,
+      "cost": 79.74988440534578,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 89,
+      "cost": 86.76379632090017,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 90,
+      "cost": 88.93274671212377,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 91,
+      "cost": 90.48808127239955,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 92,
+      "cost": 91.62950622676121,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 93,
+      "cost": 77.5696094289855,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 94,
+      "cost": 70.61264135999082,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 95,
+      "cost": 90.791265895475,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 96,
+      "cost": 89.77425977274643,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 97,
+      "cost": 88.42467672956718,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 98,
+      "cost": 77.12159859729829,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 99,
+      "cost": 82.64647541177483,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 100,
+      "cost": 127.95401422299915,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 101,
+      "cost": 82.9691780988009,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 102,
+      "cost": 92.15828351480351,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 103,
+      "cost": 70.72464279800928,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 104,
+      "cost": 85.78976608578583,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 105,
+      "cost": 67.92219135251187,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 106,
+      "cost": 65.63953268223278,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 107,
+      "cost": 75.94429368357785,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 108,
+      "cost": 83.68682817480999,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 109,
+      "cost": 76.81454077430551,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 110,
+      "cost": 71.19195629215724,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 111,
+      "cost": 124.22526913779093,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 112,
+      "cost": 89.09127639550925,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 113,
+      "cost": 68.89193744178469,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 114,
+      "cost": 84.30928643904954,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 115,
+      "cost": 82.75996816862668,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 116,
+      "cost": 88.95518581312325,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 117,
+      "cost": 73.84154438917928,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 118,
+      "cost": 76.1261826147211,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 119,
+      "cost": 89.50882605694993,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 120,
+      "cost": 91.79833269938001,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 121,
+      "cost": 82.31763283307832,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 122,
+      "cost": 89.29414489626006,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 123,
+      "cost": 83.38385426746405,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 124,
+      "cost": 99.0562205972803,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 125,
+      "cost": 85.46040648112633,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 126,
+      "cost": 87.51250989404409,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 127,
+      "cost": 80.47067126639934,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 128,
+      "cost": 86.18077485166836,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 129,
+      "cost": 76.54935792504577,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 130,
+      "cost": 92.19650427436888,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 131,
+      "cost": 72.59201059628182,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 132,
+      "cost": 78.50064734153031,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 133,
+      "cost": 66.25927565098038,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 134,
+      "cost": 76.47702567687779,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 135,
+      "cost": 77.54248747110037,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 136,
+      "cost": 91.40705629022503,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 137,
+      "cost": 95.28384760716423,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 138,
+      "cost": 71.2636508290791,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 139,
+      "cost": 92.70571154291133,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 140,
+      "cost": 114.17350154597098,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 141,
+      "cost": 69.12918852390527,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 142,
+      "cost": 81.60565516064821,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 143,
+      "cost": 76.4669865332382,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 144,
+      "cost": 74.60953936187711,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 145,
+      "cost": 77.841923723642,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 146,
+      "cost": 93.00064765454638,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 147,
+      "cost": 93.21497942794115,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 148,
+      "cost": 104.2758456022298,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 149,
+      "cost": 82.39773770771289,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 1,
+      "trial": 150,
+      "cost": 94.86497781643531,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 2,
+      "trial": 151,
+      "cost": 70.27885129137586,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 2,
+      "trial": 152,
+      "cost": 77.77380747498069,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 2,
+      "trial": 153,
+      "cost": 76.46424569642625,
+      "best_cost_so_far": 63.1244518178486
+    },
+    {
+      "stage": 2,
+      "trial": 154,
+      "cost": 62.71268381277481,
+      "best_cost_so_far": 62.71268381277481
+    },
+    {
+      "stage": 2,
+      "trial": 155,
+      "cost": 65.89488998782424,
+      "best_cost_so_far": 62.71268381277481
+    },
+    {
+      "stage": 2,
+      "trial": 156,
+      "cost": 86.12239459692229,
+      "best_cost_so_far": 62.71268381277481
+    },
+    {
+      "stage": 2,
+      "trial": 157,
+      "cost": 75.783840263821,
+      "best_cost_so_far": 62.71268381277481
+    },
+    {
+      "stage": 2,
+      "trial": 158,
+      "cost": 80.18654540525873,
+      "best_cost_so_far": 62.71268381277481
+    },
+    {
+      "stage": 2,
+      "trial": 159,
+      "cost": 72.47564442836479,
+      "best_cost_so_far": 62.71268381277481
+    },
+    {
+      "stage": 2,
+      "trial": 160,
+      "cost": 53.52449773580271,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 161,
+      "cost": 81.20765438097457,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 162,
+      "cost": 74.19293521006497,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 163,
+      "cost": 63.20803117807611,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 164,
+      "cost": 65.17871558672906,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 165,
+      "cost": 76.81123174501549,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 166,
+      "cost": 68.78029431035836,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 167,
+      "cost": 80.35549092301278,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 168,
+      "cost": 77.29062272336425,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 169,
+      "cost": 75.07733099891752,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 170,
+      "cost": 73.51905683565089,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 171,
+      "cost": 59.7958147097213,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 172,
+      "cost": 80.12487995472364,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 173,
+      "cost": 80.17194770053247,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 174,
+      "cost": 86.21346729179652,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 175,
+      "cost": 85.9745950441293,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 176,
+      "cost": 76.03257198530696,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 177,
+      "cost": 68.41135096399867,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 178,
+      "cost": 69.63492537389673,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 179,
+      "cost": 70.08004887526513,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 180,
+      "cost": 68.04698646016118,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 181,
+      "cost": 73.23705403593458,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 182,
+      "cost": 73.23296653166774,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 183,
+      "cost": 74.57980576977975,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 184,
+      "cost": 76.78978473081995,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 185,
+      "cost": 83.05975305216951,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 186,
+      "cost": 80.71948689008659,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 187,
+      "cost": 79.75087057179903,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 188,
+      "cost": 71.1969957947055,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 189,
+      "cost": 77.18441238129202,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 190,
+      "cost": 73.37443432928728,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 191,
+      "cost": 76.1187922851108,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 192,
+      "cost": 80.92772428298215,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 193,
+      "cost": 92.9452156596816,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 194,
+      "cost": 74.38553980488291,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 195,
+      "cost": 72.99178043643505,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 196,
+      "cost": 84.60813508793218,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 197,
+      "cost": 69.57676902219191,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 198,
+      "cost": 69.08638098786449,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 199,
+      "cost": 82.23676244254122,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 200,
+      "cost": 76.17575307806968,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 201,
+      "cost": 83.52425658801391,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 202,
+      "cost": 75.02217030546379,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 203,
+      "cost": 78.27084465401943,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 204,
+      "cost": 74.33168923161058,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 205,
+      "cost": 75.61036405865426,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 206,
+      "cost": 61.19779227523973,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 207,
+      "cost": 66.58628152822826,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 208,
+      "cost": 80.78551944564234,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 209,
+      "cost": 75.19088922881846,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 210,
+      "cost": 88.17525075732163,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 211,
+      "cost": 74.81062692057267,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 212,
+      "cost": 89.75269638426224,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 213,
+      "cost": 65.96018296733845,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 214,
+      "cost": 66.57461348836749,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 215,
+      "cost": 64.59342041448713,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 216,
+      "cost": 73.52911925928188,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 217,
+      "cost": 69.93216573231398,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 218,
+      "cost": 62.686468467472935,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 219,
+      "cost": 68.66335433655831,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 220,
+      "cost": 59.62132291041987,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 221,
+      "cost": 78.03018485105935,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 222,
+      "cost": 76.01551018948967,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 223,
+      "cost": 68.69897596548867,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 224,
+      "cost": 61.241598963737474,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 225,
+      "cost": 67.26912251162108,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 226,
+      "cost": 65.47770393382751,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 227,
+      "cost": 71.95283329868948,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 228,
+      "cost": 63.09078813783212,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 229,
+      "cost": 70.01496924059586,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 230,
+      "cost": 65.22987605725753,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 231,
+      "cost": 82.49250820843159,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 232,
+      "cost": 70.58499661637981,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 233,
+      "cost": 80.7028933976613,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 234,
+      "cost": 77.98392480759694,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 235,
+      "cost": 65.766490701285,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 236,
+      "cost": 63.66645866821773,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 237,
+      "cost": 66.65667222320879,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 238,
+      "cost": 85.86634259879699,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 239,
+      "cost": 74.55709330551467,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 240,
+      "cost": 87.06398828556378,
+      "best_cost_so_far": 53.52449773580271
+    },
+    {
+      "stage": 2,
+      "trial": 241,
+      "cost": 53.27453580381488,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 242,
+      "cost": 78.40660168121596,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 243,
+      "cost": 78.14843897216157,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 244,
+      "cost": 75.08627584143494,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 245,
+      "cost": 72.0330919934095,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 246,
+      "cost": 74.37526006729223,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 247,
+      "cost": 69.93084331768539,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 248,
+      "cost": 77.56584903612655,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 249,
+      "cost": 82.97673906915449,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 250,
+      "cost": 78.76638668255991,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 251,
+      "cost": 68.3919752404415,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 252,
+      "cost": 65.29416577563785,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 253,
+      "cost": 98.34550203141416,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 254,
+      "cost": 101.7545147805937,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 255,
+      "cost": 76.60768252398931,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 256,
+      "cost": 65.02219728941255,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 257,
+      "cost": 75.10541732572662,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 258,
+      "cost": 67.90180554325575,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 259,
+      "cost": 62.35177719919407,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 260,
+      "cost": 75.84930747893081,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 261,
+      "cost": 72.264978242869,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 262,
+      "cost": 61.65044602108842,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 263,
+      "cost": 67.44991801531091,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 264,
+      "cost": 75.34285401477447,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 265,
+      "cost": 70.70995618462267,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 266,
+      "cost": 69.12237142399893,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 267,
+      "cost": 74.1220190836287,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 268,
+      "cost": 80.05161157456982,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 269,
+      "cost": 69.93057667357077,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 270,
+      "cost": 74.79639501400655,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 271,
+      "cost": 78.9122026684345,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 272,
+      "cost": 73.07702460791961,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 273,
+      "cost": 82.13163329200806,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 274,
+      "cost": 94.02991711667649,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 275,
+      "cost": 63.39393379708888,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 276,
+      "cost": 65.79172197352688,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 277,
+      "cost": 83.59216770684745,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 278,
+      "cost": 69.76591304813216,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 279,
+      "cost": 62.73327166055598,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 280,
+      "cost": 68.23468122229795,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 281,
+      "cost": 75.00725345354576,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 282,
+      "cost": 76.4760907871302,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 283,
+      "cost": 70.16616945853634,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 284,
+      "cost": 72.41198052167037,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 285,
+      "cost": 73.88007870182469,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 286,
+      "cost": 87.12368414131868,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 287,
+      "cost": 88.1613907909362,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 288,
+      "cost": 73.23248044569395,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 289,
+      "cost": 74.6638910671476,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 290,
+      "cost": 58.83213766858389,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 291,
+      "cost": 73.68070174160461,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 292,
+      "cost": 80.28747856944844,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 293,
+      "cost": 72.74449576901841,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 294,
+      "cost": 72.90990378060481,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 295,
+      "cost": 59.38286660953579,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 296,
+      "cost": 85.52559094831277,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 297,
+      "cost": 73.53112829527889,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 298,
+      "cost": 58.63022038086071,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 299,
+      "cost": 66.70508845954166,
+      "best_cost_so_far": 53.27453580381488
+    },
+    {
+      "stage": 2,
+      "trial": 300,
+      "cost": 75.1322090356517,
+      "best_cost_so_far": 53.27453580381488
+    }
+  ]
+}

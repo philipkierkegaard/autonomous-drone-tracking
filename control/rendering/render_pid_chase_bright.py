@@ -32,29 +32,39 @@ if str(PROJECT_ROOT) not in sys.path:
 from control.dataset_generator import PursuitScenario
 from benchmarks.control.benchmark_controller import create_pid_controller, evaluate_single_run
 
-ARTIFACT_DIR = Path("/Users/philipkierkegaard/.gemini/antigravity-ide/brain/7dc8da15-984b-4499-8ca6-5e32efd45198")
+ARTIFACT_DIR = Path("/Users/philipkierkegaard/.gemini/antigravity/brain/3f6fb6d1-ed45-4315-9b5d-b3cca4e6bef7")
 
 
 def render_pid_bright_video(
     scenario: PursuitScenario,
     pid_controller: Any,
     output_path: Path,
-    fps: int = 25
+    fps: int = 25,
+    controller_name: Optional[str] = None,
+    tau_yaw: Optional[float] = 0.150
 ) -> str:
-    """Renders a broadcast-quality bright-mode pursuit video of the tuned PID controller."""
+    """Renders a broadcast-quality bright-mode pursuit video of the controller."""
+    if controller_name is None:
+        if hasattr(pid_controller, "residual_scales") or "Residual" in type(pid_controller).__name__:
+            controller_name = "Residual RL (PPO v9 Wide35)"
+        else:
+            controller_name = "Tuned Kinematic PID"
+
     print(f"\n[BENCH-RUN] Simulating benchmark perception & control for: {scenario.scenario_id}")
+    print(f"            Controller: {controller_name} (tau_yaw = {tau_yaw:.3f}s)")
     
     pid_controller.reset()
     res = evaluate_single_run(
         scenario=scenario,
         controller=pid_controller,
-        controller_type="pid",
+        controller_type="residual" if ("Residual" in type(pid_controller).__name__) else "pid",
         noise_mode="empirical",
         frame_drop_rate=0.05,
         standoff_nominal=3.5,
         use_kalman=True,
         return_history=True,
-        enable_ego_compensation=True
+        enable_ego_compensation=True,
+        tau_yaw=tau_yaw,
     )
 
     h = res["history"]
@@ -158,7 +168,7 @@ def render_pid_bright_video(
 
         # History trails up to current time
         ax_map.plot(target_pos_all[:idx+1, 0], target_pos_all[:idx+1, 1], color="#DC2626", lw=2.6, label="Target (Evasive)", alpha=0.95)
-        ax_map.plot(chaser_pos_all[:idx+1, 0], chaser_pos_all[:idx+1, 1], color="#2563EB", lw=2.8, label="Tuned Optical Looming PID", alpha=0.95)
+        ax_map.plot(chaser_pos_all[:idx+1, 0], chaser_pos_all[:idx+1, 1], color="#2563EB", lw=2.8, label=f"Chaser ({controller_name})", alpha=0.95)
 
         # Origin points
         ax_map.scatter([target_pos_all[0, 0]], [target_pos_all[0, 1]], color="#DC2626", marker="o", s=45, alpha=0.7, label="Target Start")
@@ -217,15 +227,19 @@ def render_pid_bright_video(
         ax_cam.text(0.95, 0.40, f"HDG: {np.rad2deg(c_yaw)%360:.0f}°", color="#64748B", fontsize=7.0, ha="right", va="top")
 
         if telem.get("status") in ("LOCKED", "COASTING"):
-            ex = telem.get("error_x", 0.0)
-            ey = telem.get("error_y", 0.0)
-            bw = telem.get("bbox_w", 110.0) / 640.0
-            bh = telem.get("bbox_h", 70.0) / 360.0
+            ex = float(np.clip(telem.get("error_x", 0.0), -1.0, 1.0))
+            ey = float(np.clip(telem.get("error_y", 0.0), -1.0, 1.0))
+            # Camera frame maps normalized [-1, 1] horizontally to [-1, 1] and vertically to [-0.5625, 0.5625]
+            # Since camera ey is positive downwards, in matplotlib's positive-up system: y_center = -ey * 0.5625
+            cam_y = -ey * 0.5625
+            bw = (telem.get("bbox_w", 110.0) / 640.0) * 2.0
+            bh = (telem.get("bbox_h", 70.0) / 360.0) * 1.125
             rect_col = "#059669" if in_basket else "#D97706"
-            bbox_patch = patches.Rectangle((ex - bw/2, ey - bh/2), bw, bh, fill=False, edgecolor=rect_col, lw=2.6)
+            bbox_patch = patches.Rectangle((ex - bw/2, cam_y - bh/2), bw, bh, fill=False, edgecolor=rect_col, lw=2.6)
             ax_cam.add_patch(bbox_patch)
             tag_bg = "#ECFDF5" if in_basket else "#FFFBEB"
-            ax_cam.text(ex, ey - bh/2 - 0.07, f"TGT {dist:.1f}m", color=rect_col, fontsize=8.5, ha="center", weight="bold",
+            tag_y = max(-0.50, min(0.48, cam_y - bh/2 - 0.07))
+            ax_cam.text(ex, tag_y, f"TGT {dist:.1f}m", color=rect_col, fontsize=8.5, ha="center", weight="bold",
                         bbox=dict(boxstyle="round,pad=0.25", facecolor=tag_bg, edgecolor=rect_col, lw=1.2))
         else:
             ax_cam.text(0, 0, "SEARCHING / TARGET LOST", color="#DC2626", fontsize=11, ha="center", weight="bold")
@@ -282,7 +296,7 @@ def render_pid_bright_video(
         # 3. Telemetry Key-Value Pairs
         hud_rows = [
             ("Drone Speed", f"{speed_drone:.2f} m/s", "Commanded Fwd (Vx)", f"{c_cmd[0]:.2f} m/s"),
-            ("Profile / Type", f"{scenario.profile.upper()} ({enc_str})", "Yaw Rate Cmd", f"{np.rad2deg(c_cmd[3]):.1f} °/s"),
+            ("Profile / Type", f"{scenario.profile.upper()} ({enc_str})", "Yaw Rate Cmd", f"{c_cmd[3]:.1f} °/s"),
             ("FOV Lock Retention", f"{fov_lock:.1f}% locked", "Max Dwell Achieved", f"{dwell_max:.2f} s"),
         ]
 
@@ -297,7 +311,7 @@ def render_pid_bright_video(
         # Supertitle
         catch_str = f"INTERCEPTION SUCCESS (Max Dwell: {dwell_max:.2f}s | FOV Lock: {fov_lock:.1f}%)" if s1 else "PURSUING"
         fig.suptitle(
-            f"Scenario: {scenario.scenario_id} | Time: {t_curr:4.1f}s / {times[-1]:.1f}s | Controller: Tuned Kinematic PID | {catch_str}",
+            f"Scenario: {scenario.scenario_id} | Time: {t_curr:4.1f}s / {times[-1]:.1f}s | Controller: {controller_name} | {catch_str}",
             fontsize=10.5, fontweight="bold", color="#0F172A", x=0.5, ha="center", y=0.965
         )
 
@@ -343,6 +357,12 @@ def main():
         help="Output MP4 path."
     )
     parser.add_argument(
+        "--pid-gains",
+        type=str,
+        default=str(PROJECT_ROOT / "control" / "weights" / "tuned_pid_gains_slow_tau770.json"),
+        help="Path to PID gains JSON (default: tuned_pid_gains_slow_tau770.json)."
+    )
+    parser.add_argument(
         "--fps",
         type=int,
         default=25,
@@ -359,7 +379,7 @@ def main():
     sc = PursuitScenario.from_dict(scenarios[args.scenario_id])
 
     pid_controller = create_pid_controller(
-        gains_path=PROJECT_ROOT / "control" / "weights" / "tuned_pid_gains.json",
+        gains_path=args.pid_gains,
         standoff_nominal=3.5,
         desired_bbox_size=110.0,
     )

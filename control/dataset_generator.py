@@ -76,7 +76,14 @@ class PursuitScenario:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "PursuitScenario":
-        return cls(**data)
+        import dataclasses
+        valid_fields = {f.name for f in dataclasses.fields(cls)}
+        filtered = {k: v for k, v in data.items() if k in valid_fields}
+        obj = cls(**filtered)
+        for k, v in data.items():
+            if k not in valid_fields:
+                setattr(obj, k, v)
+        return obj
 
 
 class PursuitDataset:

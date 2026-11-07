@@ -12,8 +12,16 @@ REMOTE_DIR="/home/philip/Development/autonomous-drone-tracking"
 
 EXTRA_EXCLUDES=()
 if [ "$1" == "--code-only" ] || [ "$1" == "-c" ]; then
-  echo "⚡ Running CODE-ONLY sync (skipping model weights)..."
-  EXTRA_EXCLUDES+=(--exclude '*.pt' --exclude '*.zip' --exclude '*.bin' --exclude 'control/weights/' --exclude 'perception/weights/')
+  echo "⚡ Running CODE-ONLY sync (skipping heavy model weights, syncing code & PID gain JSONs)..."
+  EXTRA_EXCLUDES+=(
+    --include 'control/weights/*.json'
+    --exclude 'control/weights/*/'
+    --exclude 'control/weights/*'
+    --exclude 'perception/weights/'
+    --exclude '*.pt'
+    --exclude '*.zip'
+    --exclude '*.bin'
+  )
 else
   echo "🚀 Syncing code & active models to Jetson (${JETSON_USER}@${JETSON_IP})..."
 fi
@@ -32,6 +40,7 @@ rsync -avz --progress \
   --exclude 'docs/' \
   --exclude 'datasets/' \
   --exclude 'data/' \
+  --exclude 'wandb/' \
   --exclude 'perception/raw_data/' \
   --exclude 'control/rendering/' \
   --exclude 'control/weights/*/checkpoints/' \

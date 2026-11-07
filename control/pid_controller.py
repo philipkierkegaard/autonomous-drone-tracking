@@ -488,8 +488,8 @@ class KinematicVisualServoController:
             dt_vision = dt
 
         # Smart Re-acquisition Detection:
-        # Occurs if target is in view after being lost (not was_tracking or not initialized),
-        # if prolonged coasting occurred (>100ms / ~3 frames), or if track ID changed.
+        # Occurs if target is in view after genuine lost search (not was_tracking or not initialized),
+        # if prolonged coasting occurred (>500ms), or if track ID changed.
         current_target_id = telemetry.get("target_id", None)
         target_id_changed = (
             current_target_id is not None
@@ -500,7 +500,7 @@ class KinematicVisualServoController:
             target_in_view and (
                 not self.was_tracking
                 or not self.initialized
-                or self.coast_time > 0.10
+                or self.coast_time > 0.50
                 or target_id_changed
             )
         )
@@ -540,8 +540,8 @@ class KinematicVisualServoController:
         else:
             self.coast_time += dt
 
-        # Update tracking continuity states
-        self.was_tracking = bool(target_in_view)
+        # Update tracking continuity states: target is considered tracked if not in SEARCHING mode
+        self.was_tracking = bool(status != "SEARCHING")
         if current_target_id is not None:
             self.prev_target_id = current_target_id
 
@@ -654,8 +654,8 @@ class KinematicVisualServoController:
             self.initialized = True
         else:
             if is_coasting:
-                # During coasting/target loss, smoothly decay filtered derivative
-                self.filtered_deriv *= max(0.0, 1.0 - 2.0 * dt)
+                # During coasting/target loss, hold derivative smoothly and update prev_error
+                self.prev_error = e.copy()
                 deriv = self.filtered_deriv
             elif is_new_vision_frame:
                 dt_d = dt_vision if dt_vision > 1e-4 else dt

@@ -72,11 +72,13 @@ class DronePursuitEnv(gym.Env):
         profile_distribution: Optional[Tuple[float, float, float]] = None,
         dwell_time_required_s: float = 2.0,
         terminate_on_catch: bool = True,
+        tau_yaw: float = 0.15,
     ):
         super().__init__()
 
         self.reward_mode = reward_mode
         self.profile_distribution = profile_distribution
+        self.tau_yaw = float(tau_yaw)
         self.dt = dt
         self.max_duration = max_duration
         self.max_steps = int(round(max_duration / dt))
@@ -146,7 +148,8 @@ class DronePursuitEnv(gym.Env):
             max_vel_xy=self.max_fwd_vel,
             max_accel_xy=self.max_accel_xy,
             max_vel_up=self.max_climb_vel,
-            max_vel_down=self.max_desc_vel
+            max_vel_down=self.max_desc_vel,
+            tau_yaw=self.tau_yaw,
         )
         self.scenario_gen = PursuitDatasetGenerator()
         self.obs_builder = RecurrentVisualServoController(
@@ -1702,7 +1705,7 @@ class DronePursuitEnv(gym.Env):
         self.prev_distance_error = dist_err
 
         # Total Composite Step Reward (Guaranteed strictly non-negative for in-FOV non-terminal steps; FOV loss incurs step penalty)
-        if self.reward_mode.startswith("theory_"):
+        if self.reward_mode.startswith("theory_") or self.reward_mode == "fast_catch_compounding_dwell":
             step_reward = self._compute_theory_reward(
                 dist=dist,
                 dist_err=dist_err,
@@ -1876,232 +1879,6 @@ class DronePursuitEnv(gym.Env):
                 r_dwell = r_base_dwell + r_streak
             else:
                 r_dwell = 0.0
-
-        # =========================================================================
-        # CANDIDATE 01: theory_01_potential_dwell_baseline (Additive Baseline)
-        # =========================================================================
-        elif mode == "theory_01_potential_dwell_baseline":
-            if in_basket:
-                r_basket = 5.0 * float(1.0 - ((dist - self.standoff_nominal) / 1.0)**2)
-                r_close = 2.0 * float(np.exp(-0.5 * (closing_speed / 0.8)**2))
-                r_dwell = 8.0 * float(dwell_progress**1.5)
-            elif dist > self.standoff_max:
-                r_basket = -0.40 * float(dist - self.standoff_max)
-                r_close = 2.0 * float(np.clip(closing_speed, -2.0, 5.0))
-            else:
-                r_basket = -2.5 * float((self.standoff_min - dist)**2)
-                r_close = 1.5 * float(np.clip(-closing_speed, -2.0, 3.0))
-
-        # =========================================================================
-        # CANDIDATE 02: theory_02_asymmetric_sprint_huber
-        # =========================================================================
-        elif mode == "theory_02_asymmetric_sprint_huber":
-            if in_basket:
-                r_basket = 5.0 * float(1.0 - ((dist - self.standoff_nominal) / 1.0)**2)
-                r_close = 2.5 * float(np.exp(-0.5 * (closing_speed / 0.8)**2))
-                r_dwell = 8.0 * float(dwell_progress**1.5)
-            elif dist > self.standoff_max:
-                r_basket = -0.75 * float(dist - self.standoff_max)
-                r_close = 3.5 * float(np.clip(closing_speed, 0.0, 6.0))
-            else:
-                r_basket = -3.0 * float((self.standoff_min - dist)**2)
-                r_close = 2.0 * float(np.clip(-closing_speed, -2.0, 3.0))
-
-        # =========================================================================
-        # CANDIDATE 03: theory_03_optical_looming_expansion
-        # =========================================================================
-        elif mode == "theory_03_optical_looming_expansion":
-            if in_basket:
-                r_basket = 5.0 * float(1.0 - ((dist - self.standoff_nominal) / 1.0)**2)
-                r_close = 2.0 * float(np.exp(-0.5 * (closing_speed / 0.8)**2))
-                r_dwell = 8.0 * float(dwell_progress**1.5)
-            elif dist > self.standoff_max:
-                r_basket = -0.40 * float(dist - self.standoff_max)
-                expansion_term = 3.5 * float(np.clip(self.filtered_d_w / 0.15, 0.0, 1.0))
-                r_close = 2.0 * float(np.clip(closing_speed, -2.0, 5.0)) + expansion_term
-            else:
-                r_basket = -2.5 * float((self.standoff_min - dist)**2)
-                r_close = 1.5 * float(np.clip(-closing_speed, -2.0, 3.0))
-
-        # =========================================================================
-        # CANDIDATE 04: theory_04_kinematic_glide_slope
-        # =========================================================================
-        elif mode == "theory_04_kinematic_glide_slope":
-            if in_basket:
-                r_basket = 5.0 * float(1.0 - ((dist - self.standoff_nominal) / 1.0)**2)
-                r_close = 2.5 * float(np.exp(-0.5 * (closing_speed / 0.8)**2))
-                r_dwell = 8.0 * float(dwell_progress**1.5)
-            elif dist > self.standoff_max:
-                r_basket = -0.40 * float(dist - self.standoff_max)
-                v_allowed = float(np.sqrt(2.0 * 3.5 * max(0.1, dist - self.standoff_nominal)))
-                if closing_speed > v_allowed:
-                    r_close = -1.5 * float(closing_speed - v_allowed)
-                else:
-                    r_close = 2.5 * float(np.clip(closing_speed, 0.0, 5.0))
-            else:
-                r_basket = -3.0 * float((self.standoff_min - dist)**2)
-                r_close = 2.0 * float(np.clip(-closing_speed, -2.0, 3.0))
-
-        # =========================================================================
-        # CANDIDATE 05: theory_05_relative_velocity_nulling
-        # =========================================================================
-        elif mode == "theory_05_relative_velocity_nulling":
-            if in_basket:
-                r_basket = 5.0 * float(1.0 - ((dist - self.standoff_nominal) / 1.0)**2)
-                rel_v = float(np.linalg.norm(self.sim.vel - target_vel_w))
-                r_close = 4.0 * float(np.exp(-0.5 * (rel_v / 1.2)**2))
-                r_dwell = 8.0 * float(dwell_progress**1.5)
-            elif dist > self.standoff_max:
-                r_basket = -0.40 * float(dist - self.standoff_max)
-                r_close = 2.5 * float(np.clip(closing_speed, -2.0, 5.0))
-            else:
-                r_basket = -2.5 * float((self.standoff_min - dist)**2)
-                r_close = 1.5 * float(np.clip(-closing_speed, -2.0, 3.0))
-
-        # =========================================================================
-        # CANDIDATE 06: theory_06_lead_pursuit_vector_alignment
-        # =========================================================================
-        elif mode == "theory_06_lead_pursuit_vector_alignment":
-            if in_basket:
-                r_basket = 5.0 * float(1.0 - ((dist - self.standoff_nominal) / 1.0)**2)
-                r_close = 2.0 * float(np.exp(-0.5 * (closing_speed / 0.8)**2))
-                r_dwell = 8.0 * float(dwell_progress**1.5)
-            elif dist > self.standoff_max:
-                r_basket = -0.40 * float(dist - self.standoff_max)
-                r_close = 2.0 * float(np.clip(closing_speed, -2.0, 5.0))
-            else:
-                r_basket = -2.5 * float((self.standoff_min - dist)**2)
-                r_close = 1.5 * float(np.clip(-closing_speed, -2.0, 3.0))
-
-            v_c = self.sim.vel[:2]
-            v_t = target_vel_w[:2]
-            nc = float(np.linalg.norm(v_c))
-            nt = float(np.linalg.norm(v_t))
-            if nc > 1.0 and nt > 1.0 and raw_in_view:
-                align = float(np.dot(v_c, v_t) / (nc * nt))
-                r_close += 3.0 * float(max(0.0, align))
-
-        # =========================================================================
-        # CANDIDATE 07: theory_07_decel_to_turn_centripetal
-        # =========================================================================
-        elif mode == "theory_07_decel_to_turn_centripetal":
-            if in_basket:
-                r_basket = 5.0 * float(1.0 - ((dist - self.standoff_nominal) / 1.0)**2)
-                r_close = 2.0 * float(np.exp(-0.5 * (closing_speed / 0.8)**2))
-                r_dwell = 8.0 * float(dwell_progress**1.5)
-            elif dist > self.standoff_max:
-                r_basket = -0.40 * float(dist - self.standoff_max)
-                r_close = 2.5 * float(np.clip(closing_speed, -2.0, 5.0))
-            else:
-                r_basket = -2.5 * float((self.standoff_min - dist)**2)
-                r_close = 1.5 * float(np.clip(-closing_speed, -2.0, 3.0))
-
-            if raw_in_view and abs(raw_ex) > 0.20:
-                v_turn = 4.0 + 8.0 * float(np.exp(-0.5 * (abs(raw_ex) / 0.25)**2))
-                if v_fwd > v_turn:
-                    r_close += -2.0 * float((v_fwd - v_turn) / 4.0) + 2.5 * float(max(0.0, -action[0]))
-
-        # =========================================================================
-        # CANDIDATE 08: theory_08_retinal_slip_raptor
-        # =========================================================================
-        elif mode == "theory_08_retinal_slip_raptor":
-            if in_basket:
-                r_basket = 5.0 * float(1.0 - ((dist - self.standoff_nominal) / 1.0)**2)
-                r_close = 2.0 * float(np.exp(-0.5 * (closing_speed / 0.8)**2))
-                r_dwell = 8.0 * float(dwell_progress**1.5)
-            elif dist > self.standoff_max:
-                r_basket = -0.40 * float(dist - self.standoff_max)
-                r_close = 2.5 * float(np.clip(closing_speed, -2.0, 5.0))
-            else:
-                r_basket = -2.5 * float((self.standoff_min - dist)**2)
-                r_close = 1.5 * float(np.clip(-closing_speed, -2.0, 3.0))
-
-            slip = float(np.hypot(self.filtered_d_ex, self.filtered_d_ey))
-            if raw_in_view and slip > 0.25:
-                p_slip = 2.5 * float((v_fwd / 12.0)**2 * min(2.0, slip / 0.40))
-                r_close -= p_slip
-
-        # =========================================================================
-        # CANDIDATE 09: theory_09_curvature_adaptive_basket
-        # =========================================================================
-        elif mode == "theory_09_curvature_adaptive_basket":
-            slip_yaw = float(abs(self.filtered_d_ex))
-            d_nom_eff = self.standoff_nominal + 0.8 * float(np.clip(slip_yaw / 0.5, 0.0, 1.0))
-            in_eff_basket = (d_nom_eff - 1.0 <= dist <= d_nom_eff + 1.0) and raw_in_view
-            if in_eff_basket:
-                r_basket = 5.0 * float(1.0 - ((dist - d_nom_eff) / 1.0)**2)
-                r_close = 2.0 * float(np.exp(-0.5 * (closing_speed / 0.8)**2))
-                r_dwell = 8.0 * float(dwell_progress**1.5)
-            elif dist > d_nom_eff + 1.0:
-                r_basket = -0.40 * float(dist - (d_nom_eff + 1.0))
-                r_close = 2.5 * float(np.clip(closing_speed, -2.0, 5.0))
-            else:
-                r_basket = -2.5 * float((max(1.8, d_nom_eff - 1.0) - dist)**2)
-                r_close = 1.5 * float(np.clip(-closing_speed, -2.0, 3.0))
-
-        # =========================================================================
-        # CANDIDATE 10: theory_10_superlinear_dwell_jackpot
-        # =========================================================================
-        elif mode == "theory_10_superlinear_dwell_jackpot":
-            if in_basket:
-                r_basket = 5.0 * float(1.0 - ((dist - self.standoff_nominal) / 1.0)**2)
-                r_close = 2.0 * float(np.exp(-0.5 * (closing_speed / 0.8)**2))
-                r_dwell = 14.0 * float(dwell_progress**2.0)
-            elif dist > self.standoff_max:
-                r_basket = -0.40 * float(dist - self.standoff_max)
-                r_close = 2.5 * float(np.clip(closing_speed, -2.0, 5.0))
-            else:
-                r_basket = -2.5 * float((self.standoff_min - dist)**2)
-                r_close = 1.5 * float(np.clip(-closing_speed, -2.0, 3.0))
-
-        # =========================================================================
-        # CANDIDATE 11: theory_11_unified_dogfight_synthesis
-        # =========================================================================
-        elif mode == "theory_11_unified_dogfight_synthesis":
-            if in_basket:
-                r_basket = 5.0 * float(1.0 - ((dist - self.standoff_nominal) / 1.0)**2)
-                r_close = 2.5 * float(np.exp(-0.5 * (closing_speed / 0.8)**2))
-                r_dwell = 10.0 * float(dwell_progress**1.8)
-            elif dist > self.standoff_max:
-                r_basket = -0.60 * float(dist - self.standoff_max)
-                v_allowed = float(np.sqrt(2.0 * 3.5 * max(0.1, dist - self.standoff_nominal)))
-                if closing_speed > v_allowed:
-                    r_close = -1.5 * float(closing_speed - v_allowed)
-                else:
-                    r_close = 3.0 * float(np.clip(closing_speed, 0.0, 5.0))
-            else:
-                r_basket = -3.0 * float((self.standoff_min - dist)**2)
-                r_close = 2.0 * float(np.clip(-closing_speed, -2.0, 3.0))
-
-            v_c = self.sim.vel[:2]
-            v_t = target_vel_w[:2]
-            nc = float(np.linalg.norm(v_c))
-            nt = float(np.linalg.norm(v_t))
-            if nc > 1.0 and nt > 1.0 and raw_in_view:
-                align = float(np.dot(v_c, v_t) / (nc * nt))
-                r_close += 2.5 * float(max(0.0, align))
-
-        # =========================================================================
-        # CANDIDATE 12: theory_12_adaptive_grand_champion
-        # =========================================================================
-        elif mode == "theory_12_adaptive_grand_champion":
-            if in_basket:
-                r_basket = 6.0 * float(1.0 - ((dist - self.standoff_nominal) / 1.0)**2)
-                rel_v = float(np.linalg.norm(self.sim.vel - target_vel_w))
-                r_close = 3.5 * float(np.exp(-0.5 * (rel_v / 1.2)**2))
-                r_dwell = 12.0 * float(dwell_progress**1.8)
-            elif dist > self.standoff_max:
-                r_basket = -0.50 * float(dist - self.standoff_max)
-                expansion_term = 3.0 * float(np.clip(self.filtered_d_w / 0.15, 0.0, 1.0))
-                r_close = 2.5 * float(np.clip(closing_speed, -2.0, 5.0)) + expansion_term
-            else:
-                r_basket = -3.0 * float((self.standoff_min - dist)**2)
-                r_close = 2.0 * float(np.clip(-closing_speed, -2.0, 3.0))
-
-            if raw_in_view and abs(raw_ex) > 0.20:
-                v_turn = 4.0 + 8.0 * float(np.exp(-0.5 * (abs(raw_ex) / 0.25)**2))
-                if v_fwd > v_turn:
-                    r_close += -2.0 * float((v_fwd - v_turn) / 4.0) + 2.5 * float(max(0.0, -action[0]))
 
         else:
             r_basket = 4.0 * float(1.0 - ((dist - self.standoff_nominal) / 1.5)**2) if in_basket else -0.3 * float(max(0.0, dist - self.standoff_max))

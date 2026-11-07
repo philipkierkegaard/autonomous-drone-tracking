@@ -348,31 +348,71 @@ class AutonomousTrackerNode:
             p_gains = Path(pid_gains_path)
             if not p_gains.is_absolute():
                 p_gains = ROOT_DIR / p_gains
-            if p_gains.exists():
-                try:
-                    with open(p_gains, "r", encoding="utf-8") as f:
-                        g_data = json.load(f)
-                    p_map = g_data.get("tuned_parameters", g_data)
-                    for k in [
-                        "kp_forward", "ki_forward", "kd_forward", "max_decel",
-                        "centering_damping", "min_centering_factor",
-                        "kp_lat", "ki_lat", "kd_lat",
-                        "kp_z", "ki_z", "kd_z",
-                        "kp_yaw", "ki_yaw", "kd_yaw"
-                    ]:
-                        if k in p_map and k in sig.parameters:
-                            if k in ("kp_lat", "ki_lat", "kd_lat") and not getattr(args, "lateral_strafe", True):
-                                ctrl_kwargs[k] = 0.0
-                            else:
-                                ctrl_kwargs[k] = float(p_map[k])
-                    print(f"[PID] Loaded tuned gains from {p_gains.name}: "
-                          f"Fwd(kp={ctrl_kwargs.get('kp_forward', 0):.3f}, ki={ctrl_kwargs.get('ki_forward', 0):.3f}, kd={ctrl_kwargs.get('kd_forward', 0):.3f}), "
-                          f"Lat(kp={ctrl_kwargs.get('kp_lat', 0):.3f}, ki={ctrl_kwargs.get('ki_lat', 0):.3f}, kd={ctrl_kwargs.get('kd_lat', 0):.3f}), "
-                          f"Z(kp={ctrl_kwargs.get('kp_z', 0):.3f}, ki={ctrl_kwargs.get('ki_z', 0):.3f}, kd={ctrl_kwargs.get('kd_z', 0):.3f}), "
-                          f"Yaw(kp={ctrl_kwargs.get('kp_yaw', 0):.1f}, ki={ctrl_kwargs.get('ki_yaw', 0):.2f}, kd={ctrl_kwargs.get('kd_yaw', 0):.1f}), "
-                          f"max_decel={ctrl_kwargs.get('max_decel', 0):.2f}")
-                except Exception as e:
-                    print(f"[WARN] Failed to load PID gains from {p_gains}: {e}")
+            if not p_gains.exists():
+                err_msg = (
+                    f"\n{'='*70}\n"
+                    f"[FATAL ERROR] Requested PID gains file does NOT exist:\n"
+                    f"  --> {p_gains}\n\n"
+                    f"Why this happens:\n"
+                    f"  1. The file was not transferred to the Jetson yet.\n"
+                    f"     Fix on Mac: ./sync_to_jetson.sh --code-only\n"
+                    f"  2. Typo in the file path passed to --pid-gains.\n\n"
+                    f"If you intentionally want to run with default un-tuned gains, pass:\n"
+                    f"  --pid-gains none\n"
+                    f"{'='*70}\n"
+                )
+                raise FileNotFoundError(err_msg)
+
+            try:
+                with open(p_gains, "r", encoding="utf-8") as f:
+                    g_data = json.load(f)
+                p_map = g_data.get("tuned_parameters", g_data)
+                for k in [
+                    "kp_forward", "ki_forward", "kd_forward", "max_decel",
+                    "centering_damping", "min_centering_factor",
+                    "kp_lat", "ki_lat", "kd_lat",
+                    "kp_z", "ki_z", "kd_z",
+                    "kp_yaw", "ki_yaw", "kd_yaw"
+                ]:
+                    if k in p_map and k in sig.parameters:
+                        if k in ("kp_lat", "ki_lat", "kd_lat") and not getattr(args, "lateral_strafe", True):
+                            ctrl_kwargs[k] = 0.0
+                        else:
+                            ctrl_kwargs[k] = float(p_map[k])
+                # Automatically synchronize deployment limits from dynamics envelope if present
+                dyn_map = g_data.get("dynamics_envelope", {})
+                if "max_speed_m_s" in dyn_map:
+                    env_max_speed = float(dyn_map["max_speed_m_s"])
+                    if not any(arg.startswith("--max-speed") for arg in sys.argv):
+                        args.max_speed = env_max_speed
+                        ctrl_kwargs["max_limits"][0] = env_max_speed
+                        print(f"[PID] Auto-configured forward max speed from envelope: {args.max_speed:.1f} m/s")
+                    if not any(arg.startswith("--max-lat-speed") for arg in sys.argv):
+                        args.max_lat_speed = min(1.5, args.max_speed)
+                        ctrl_kwargs["max_lat_vel"] = args.max_lat_speed
+                        print(f"[PID] Auto-configured lateral max speed from envelope: {args.max_lat_speed:.1f} m/s")
+                    if env_max_speed <= 3.0:
+                        if not any(arg.startswith("--max-yawspeed") for arg in sys.argv):
+                            args.max_yawspeed = 60.0
+                            ctrl_kwargs["max_limits"][2] = 60.0
+                            ctrl_kwargs["min_limits"][2] = -60.0
+                            print(f"[PID] Auto-configured yaw speed limit from envelope: {args.max_yawspeed:.1f} deg/s")
+                        if not any(arg.startswith("--max-climb") for arg in sys.argv):
+                            args.max_climb = 1.0
+                            ctrl_kwargs["min_limits"][1] = -1.0
+                        if not any(arg.startswith("--max-desc") for arg in sys.argv):
+                            args.max_desc = 0.8
+                            ctrl_kwargs["max_limits"][1] = 0.8
+
+                print(f"[PID] Loaded tuned gains from {p_gains.name}: "
+                      f"Fwd(kp={ctrl_kwargs.get('kp_forward', 0):.3f}, ki={ctrl_kwargs.get('ki_forward', 0):.3f}, kd={ctrl_kwargs.get('kd_forward', 0):.3f}), "
+                      f"Lat(kp={ctrl_kwargs.get('kp_lat', 0):.3f}, ki={ctrl_kwargs.get('ki_lat', 0):.3f}, kd={ctrl_kwargs.get('kd_lat', 0):.3f}), "
+                      f"Z(kp={ctrl_kwargs.get('kp_z', 0):.3f}, ki={ctrl_kwargs.get('ki_z', 0):.3f}, kd={ctrl_kwargs.get('kd_z', 0):.3f}), "
+                      f"Yaw(kp={ctrl_kwargs.get('kp_yaw', 0):.1f}, ki={ctrl_kwargs.get('ki_yaw', 0):.2f}, kd={ctrl_kwargs.get('kd_yaw', 0):.1f}), "
+                      f"max_decel={ctrl_kwargs.get('max_decel', 0):.2f}")
+            except Exception as e:
+                print(f"[FATAL] Failed to parse PID gains from {p_gains}: {e}")
+                raise
 
         # CLI overrides for yaw gains (allows safe manual tuning for live flight tests)
         if getattr(args, "kp_yaw", None) is not None:
@@ -453,13 +493,42 @@ class AutonomousTrackerNode:
                 record_raw_arg = "auto"
 
         from datetime import datetime
-        shared_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        rec_dir = ROOT_DIR / "outputs" / "recordings"
+        # Human-readable date and time filename timestamp (e.g. 2026-11-06_12-16-14)
+        shared_ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+
+        # Check for persistent storage mount on Jetson Orin Nano (e.g. /data partition bypassing overlayfs tmpfs)
+        persistent_data_dir = Path("/data")
+        if persistent_data_dir.is_dir():
+            if os.access("/data", os.W_OK):
+                base_storage = persistent_data_dir
+                print(f"[STORAGE] ✓ Detected persistent mount at {persistent_data_dir} (bypassing overlayfs RAM tmpfs)")
+            else:
+                base_storage = ROOT_DIR
+                cur_user = os.environ.get("USER", "philip")
+                print(f"\n{'!'*70}")
+                print(f"[STORAGE WARNING] Persistent mount '/data' exists, but user '{cur_user}' lacks WRITE permission!")
+                print(f"  Fix on Jetson terminal: sudo chown -R {cur_user}:{cur_user} /data")
+                print(f"  Falling back to local storage: {ROOT_DIR}")
+                print(f"  CAUTION: Under OverlayFS, files saved here WILL BE LOST upon reboot!")
+                print(f"{'!'*70}\n")
+        else:
+            base_storage = ROOT_DIR
+
+        rec_dir = base_storage / "outputs" / "recordings"
+        # On persistent /data, store CSV logs directly in /data/logs/ for immediate access;
+        # in the development repo, preserve the standard logs/flight_logs/ hierarchy.
+        log_dir = base_storage / "logs" if base_storage == persistent_data_dir else base_storage / "logs" / "flight_logs"
 
         if record_arg:
             if record_arg == "auto":
-                rec_dir.mkdir(parents=True, exist_ok=True)
-                self.record_path = rec_dir / f"flight_tracking_{shared_ts}.mp4"
+                try:
+                    rec_dir.mkdir(parents=True, exist_ok=True)
+                    self.record_path = rec_dir / f"{shared_ts}.mp4"
+                except (PermissionError, OSError) as e:
+                    fallback_rec = ROOT_DIR / "outputs" / "recordings"
+                    fallback_rec.mkdir(parents=True, exist_ok=True)
+                    self.record_path = fallback_rec / f"{shared_ts}.mp4"
+                    print(f"[RECORD WARNING] Could not write to {rec_dir} ({e}). Falling back to {self.record_path}")
             else:
                 self.record_path = Path(record_arg)
                 self.record_path.parent.mkdir(parents=True, exist_ok=True)
@@ -467,15 +536,80 @@ class AutonomousTrackerNode:
 
         if record_raw_arg:
             if record_raw_arg == "auto":
-                rec_dir.mkdir(parents=True, exist_ok=True)
-                if self.record_path and record_arg != "auto":
-                    self.record_raw_path = self.record_path.parent / f"{self.record_path.stem}_raw{self.record_path.suffix}"
-                else:
-                    self.record_raw_path = rec_dir / f"flight_raw_{shared_ts}.mp4"
+                try:
+                    rec_dir.mkdir(parents=True, exist_ok=True)
+                    if self.record_path and record_arg != "auto":
+                        self.record_raw_path = self.record_path.parent / f"{self.record_path.stem}_raw{self.record_path.suffix}"
+                    else:
+                        self.record_raw_path = rec_dir / f"{shared_ts}_raw.mp4"
+                except (PermissionError, OSError):
+                    fallback_rec = ROOT_DIR / "outputs" / "recordings"
+                    fallback_rec.mkdir(parents=True, exist_ok=True)
+                    self.record_raw_path = fallback_rec / f"{shared_ts}_raw.mp4"
             else:
                 self.record_raw_path = Path(record_raw_arg)
                 self.record_raw_path.parent.mkdir(parents=True, exist_ok=True)
             print(f"[RECORD-RAW] Clean raw camera recording destination: {self.record_raw_path}")
+
+        # 5. High-Resolution Flight Telemetry CSV Logger (Persists to /data on Jetson)
+        self.flight_log_enabled = bool(getattr(args, "log_csv", True))
+        self.flight_log_path: Optional[Path] = None
+        self.flight_log_file = None
+        self.flight_log_writer = None
+        if self.flight_log_enabled:
+            log_arg = getattr(args, "log_path", None)
+            if log_arg:
+                self.flight_log_path = Path(log_arg)
+            else:
+                self.flight_log_path = log_dir / f"{shared_ts}_telemetry.csv"
+
+            # Resilient directory creation with automatic local fallback if /data permissions fail
+            try:
+                self.flight_log_path.parent.mkdir(parents=True, exist_ok=True)
+                self.flight_log_file = open(self.flight_log_path, "w", newline="", buffering=1)
+            except (PermissionError, OSError) as e:
+                fallback_log_dir = ROOT_DIR / "logs"
+                fallback_log_dir.mkdir(parents=True, exist_ok=True)
+                self.flight_log_path = fallback_log_dir / f"{shared_ts}_telemetry.csv"
+                print(f"\n{'!'*70}")
+                print(f"[FLIGHT-LOG WARNING] Could not write to {log_dir} ({e})!")
+                print(f"  --> Fix on Jetson: sudo mkdir -p /data/logs && sudo chown -R philip:philip /data")
+                print(f"  --> Temporarily falling back to: {self.flight_log_path}")
+                print(f"{'!'*70}\n")
+                try:
+                    self.flight_log_file = open(self.flight_log_path, "w", newline="", buffering=1)
+                except Exception as e2:
+                    print(f"[FLIGHT-LOG FATAL] Failed to initialize fallback CSV logger: {e2}")
+                    self.flight_log_file = None
+
+            if self.flight_log_file is not None:
+                try:
+                    import csv
+                    import atexit
+                    self.flight_log_writer = csv.writer(self.flight_log_file)
+                    self.flight_log_writer.writerow([
+                        "timestamp_s", "dt_s", "status",
+                        "error_x", "error_y", "error_range",
+                        "bbox_w", "bbox_h", "est_distance_m",
+                        "measured_pitch_deg", "measured_roll_deg", "measured_yaw_deg", "measured_alt_m",
+                        "measured_vx_body", "measured_vy_body", "measured_vz_body", "measured_yaw_rate_dps",
+                        "cmd_vx", "cmd_vy", "cmd_vz", "cmd_yaw_rate_dps",
+                        "target_vx_ff", "autonomy_authorized"
+                    ])
+                    print(f"[FLIGHT-LOG] Telemetry CSV logging ACTIVE -> {self.flight_log_path}")
+
+                    # Ensure CSV is flushed to disk on any exit
+                    def _safe_close_log():
+                        if self.flight_log_file is not None and not self.flight_log_file.closed:
+                            try:
+                                self.flight_log_file.flush()
+                                self.flight_log_file.close()
+                            except Exception:
+                                pass
+                    atexit.register(_safe_close_log)
+                except Exception as e:
+                    print(f"[FLIGHT-LOG] Warning: Failed to write CSV header: {e}")
+                    self.flight_log_writer = None
 
         self.enable_ablation_log = False
         self.ablation_csv_path: Optional[Path] = None
@@ -1384,7 +1518,43 @@ class AutonomousTrackerNode:
             # 9. Store latest safe command for HUD rendering & diagnostics
             self.latest_cmd_safe = np.array([v_fwd, v_right, v_down, yawspeed], dtype=np.float64)
 
-            # 10. Precise sleep to maintain deterministic frequency
+            # 10. Record high-resolution flight telemetry row (auto-buffered to /data on Jetson)
+            if self.flight_log_writer is not None:
+                try:
+                    now_wall = time.time()
+                    bw = float(telemetry.get("bbox_w", 0.0))
+                    bh = float(telemetry.get("bbox_h", 0.0))
+                    dist_est = 3.5 * (110.0 / max(5.0, bw)) if bw > 0 else 0.0
+                    v_body = self.vehicle_state.velocity_body if self.vehicle_state.velocity_body is not None else np.zeros(3)
+                    self.flight_log_writer.writerow([
+                        f"{now_wall:.4f}",
+                        f"{dt:.4f}",
+                        telemetry.get("status", "UNKNOWN"),
+                        f"{telemetry.get('error_x', 0.0):.4f}",
+                        f"{telemetry.get('error_y', 0.0):.4f}",
+                        f"{telemetry.get('error_range', 0.0):.4f}",
+                        f"{bw:.1f}",
+                        f"{bh:.1f}",
+                        f"{dist_est:.2f}",
+                        f"{np.rad2deg(current_pitch):.2f}",
+                        f"{np.rad2deg(current_roll):.2f}",
+                        f"{self.vehicle_state.yaw_deg:.2f}",
+                        f"{current_alt if current_alt is not None else 0.0:.2f}",
+                        f"{v_body[0]:.3f}",
+                        f"{v_body[1]:.3f}",
+                        f"{v_body[2]:.3f}",
+                        f"{np.rad2deg(self.vehicle_state.yaw_rate_rad_s):.2f}",
+                        f"{v_fwd:.3f}",
+                        f"{v_right:.3f}",
+                        f"{v_down:.3f}",
+                        f"{yawspeed:.2f}",
+                        f"{telemetry.get('target_vx_ff', 0.0):.3f}",
+                        int(is_auth)
+                    ])
+                except Exception:
+                    pass
+
+            # 11. Precise sleep to maintain deterministic frequency
             elapsed = time.perf_counter() - loop_start
             sleep_time = max(0.001, ctrl_period - elapsed)
             await asyncio.sleep(sleep_time)
@@ -1627,6 +1797,16 @@ class AutonomousTrackerNode:
             except Exception as e:
                 print(f"[RECORD-RAW] Error saving raw video: {e}")
 
+            # Flush and close flight telemetry CSV log
+            if self.flight_log_file is not None:
+                try:
+                    self.flight_log_file.flush()
+                    self.flight_log_file.close()
+                    print(f"[FLIGHT-LOG] ✓ Flight telemetry CSV successfully saved to: {self.flight_log_path}")
+                except Exception as e:
+                    print(f"[FLIGHT-LOG] Error saving telemetry CSV: {e}")
+                self.flight_log_file = None
+
 
 
             # Shutdown live MJPEG stream server
@@ -1700,20 +1880,32 @@ def parse_args() -> argparse.Namespace:
         help="Consecutive missed frames before Kalman track transitions from COASTING to SEARCHING."
     )
     parser.add_argument(
-        "--record", nargs="?", const="auto", default=None,
-        help="Record video with bounding boxes and flight HUD. Pass flag alone ('--record') to auto-generate timestamped MP4 in outputs/recordings/, or provide a path ('--record my_flight.mp4')."
+        "--record", nargs="?", const="auto", default="auto",
+        help="Record video with bounding boxes and flight HUD (defaults to auto-naming with date and time: YYYY-MM-DD_HH-MM-SS.mp4 in persistent storage). Use --no-record to disable."
+    )
+    parser.add_argument(
+        "--no-record", action="store_const", const=None, dest="record",
+        help="Disable automatic video recording."
     )
     parser.add_argument(
         "--record-raw", nargs="?", const="auto", default=None,
-        help="Record pristine raw camera feed with NO HUD or bounding boxes for offline re-evaluation or retraining. Pass flag alone ('--record-raw') or provide a path."
+        help="Record pristine raw camera feed with NO HUD or bounding boxes (auto-named YYYY-MM-DD_HH-MM-SS_raw.mp4). Pass flag alone or provide a path."
     )
     parser.add_argument(
         "--record-both", action="store_true",
-        help="Simultaneously record both the annotated HUD video (flight_tracking_*.mp4) and the clean raw video (flight_raw_*.mp4)."
+        help="Simultaneously record both the annotated HUD video (YYYY-MM-DD_HH-MM-SS.mp4) and the clean raw video (YYYY-MM-DD_HH-MM-SS_raw.mp4)."
     )
     parser.add_argument(
         "--record-fps", type=float, default=30.0,
         help="Recording framerate in FPS (default: 30.0)."
+    )
+    parser.add_argument(
+        "--no-log-csv", action="store_false", dest="log_csv", default=True,
+        help="Disable automatic high-resolution telemetry CSV logging (enabled by default, persists to /data on Jetson)."
+    )
+    parser.add_argument(
+        "--log-path", type=str, default=None,
+        help="Custom file path for the telemetry CSV log (default: auto-timestamped in persistent log dir)."
     )
     parser.add_argument(
         "--csi", action="store_true",
