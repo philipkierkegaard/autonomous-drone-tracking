@@ -492,7 +492,7 @@ class ResidualVisualServoController(RecurrentVisualServoController):
     def __init__(
         self,
         model_path: Optional[Union[str, Path]] = None,
-        pid_gains_path: str = "control/weights/tuned_pid_gains.json",
+        pid_gains_path: str = "control/weights/tuned_pid_gains_pre_attitude_dynamics.json",
         residual_scales: Optional[Any] = (3.0, 2.0, 1.0, 30.0),
         standoff_nominal: float = 3.5,
         desired_bbox_size: float = 110.0,
@@ -515,7 +515,7 @@ class ResidualVisualServoController(RecurrentVisualServoController):
                             cfg = json.load(f)
                         if residual_scales == (3.0, 2.0, 1.0, 30.0) and "residual_scales" in cfg:
                             residual_scales = cfg["residual_scales"]
-                        if pid_gains_path == "control/weights/tuned_pid_gains.json" and "pid_gains_path" in cfg:
+                        if pid_gains_path in ("control/weights/tuned_pid_gains.json", "control/weights/tuned_pid_gains_pre_attitude_dynamics.json") and "pid_gains_path" in cfg:
                             pid_gains_path = cfg["pid_gains_path"]
                         break
                     except Exception:
@@ -532,11 +532,15 @@ class ResidualVisualServoController(RecurrentVisualServoController):
             dtype=np.float64
         )
         super().__init__(model_path=model_path, **kwargs)
+        self.last_pid_cmd = np.zeros(4, dtype=np.float64)
+        self.last_residual = np.zeros(4, dtype=np.float64)
 
     def reset(self):
         super().reset()
         if hasattr(self, "pid") and self.pid is not None and hasattr(self.pid, "reset"):
             self.pid.reset()
+        self.last_pid_cmd = np.zeros(4, dtype=np.float64)
+        self.last_residual = np.zeros(4, dtype=np.float64)
 
     def compute_cmd(
         self,
@@ -589,6 +593,8 @@ class ResidualVisualServoController(RecurrentVisualServoController):
             residual = np.zeros(4, dtype=np.float64)
 
         self.episode_start = np.array([False], dtype=bool)
+        self.last_pid_cmd = pid_cmd.copy()
+        self.last_residual = residual.copy()
         target_cmd = pid_cmd + residual
 
         # 3. Standardized envelope and slew-rate limiting (strictly identical across train and eval)

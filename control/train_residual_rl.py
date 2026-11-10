@@ -265,7 +265,7 @@ def train_residual_ppo(
     gamma: float = 0.995,
     n_epochs: float = 4,
     eval_freq: int = 25_000,
-    checkpoint_freq: int = 50_000,
+    checkpoint_freq: int = 25_000,
     seed: int = 42,
     reward_mode: str = "theory_fast_catch_compounding_dwell",
     output_dir: Optional[Union[str, Path]] = None,
@@ -273,7 +273,7 @@ def train_residual_ppo(
     use_wandb: bool = False,
     wandb_project: str = "drone-residual-tracking",
     wandb_run_name: Optional[str] = None,
-    pid_gains_path: str = "control/weights/tuned_pid_gains.json",
+    pid_gains_path: str = "control/weights/tuned_pid_gains_pre_attitude_dynamics.json",
     residual_scales: Sequence[float] = (3.0, 2.0, 1.0, 30.0),
     profile_dist: Optional[Dict[str, float]] = None,
     terminate_on_catch: bool = False,
@@ -463,10 +463,10 @@ if __name__ == "__main__":
     parser.add_argument("--gamma", type=float, default=0.995, help="Discount factor (default: 0.995)")
     parser.add_argument("--epochs", type=int, default=4, help="PPO optimization epochs per rollout (default: 4)")
     parser.add_argument("--eval-freq", type=int, default=25_000, help="Evaluation frequency in timesteps (default: 25,000)")
-    parser.add_argument("--checkpoint-freq", type=int, default=50_000, help="Checkpoint frequency in timesteps (default: 50,000)")
+    parser.add_argument("--checkpoint-freq", type=int, default=25_000, help="Checkpoint frequency in timesteps (default: 25,000)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed (default: 42)")
     parser.add_argument("--reward-mode", type=str, default="theory_fast_catch_compounding_dwell", help="Reward function mode")
-    parser.add_argument("--pid-gains", type=str, default="control/weights/tuned_pid_gains.json", help="Path to tuned PID gains JSON (default: control/weights/tuned_pid_gains.json)")
+    parser.add_argument("--pid-gains", type=str, default="control/weights/tuned_pid_gains_pre_attitude_dynamics.json", help="Path to tuned PID gains JSON (default: control/weights/tuned_pid_gains_pre_attitude_dynamics.json)")
     parser.add_argument("--tau-yaw", type=float, default=0.150, help="Yaw rate time constant tau_yaw in seconds for simulation (default: 0.150)")
     parser.add_argument("--residual-scales", type=float, nargs=4, default=[3.5, 3.5, 3.5, 10.0], help="Residual scales [Surge, Sway, Heave, Yaw] (default: 3.5 3.5 3.5 10.0)")
     parser.add_argument("--output-dir", type=str, default="outputs/models/residual_ppo_v8_tau150_wide", help="Output model directory")

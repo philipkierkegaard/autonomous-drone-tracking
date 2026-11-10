@@ -289,7 +289,7 @@ def plot_combined_velocity_tracking(data: Dict[str, Any], t_min: float, t_max: f
 
     c_ref = "#d9381e"  # Crimson dashed line
     c_act = "#1d3557"  # Navy solid line
-    ref_label = "Target" if use_target else "Desired"
+    ref_label = "FC Target" if use_target else "Desired"
 
     # -------------------------------------------------------------------------
     # Panel 1: North Velocity
@@ -329,7 +329,7 @@ def plot_combined_velocity_tracking(data: Dict[str, Any], t_min: float, t_max: f
 def plot_single_axis(t_arr: np.ndarray, ref: np.ndarray, est: np.ndarray, axis_name: str,
                       intervals: List[Tuple[float, float, str]], t_min: float, t_max: float,
                       log_name: str, out_path: Path, relative_time: bool = True,
-                      subtitle_extra: str = "", ref_label: str = "Target"):
+                      subtitle_extra: str = "", ref_label: str = "FC Target"):
     """Generates a clean, minimalist standalone plot: Target (or Desired) vs Actual velocity only."""
     mask = (t_arr >= t_min) & (t_arr <= t_max)
     t_plot = (t_arr[mask] - t_min) if relative_time else t_arr[mask]
@@ -503,7 +503,7 @@ def main():
 
     intervals = compute_mode_intervals(data, t_min, t_max)
     use_target = not args.use_desired
-    ref_label = "Target" if use_target else "Desired"
+    ref_label = "FC Target" if use_target else "Desired"
     ref_key = "target" if use_target else "des"
 
     # 4. Generate Separate Standalone Plots for North and East

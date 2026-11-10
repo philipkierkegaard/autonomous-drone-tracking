@@ -72,7 +72,9 @@ def create_pid_controller(
     max_yaw_spd = 120.0
 
     if gains_path is None:
-        default_tuned = PROJECT_ROOT / "control" / "weights" / "tuned_pid_gains.json"
+        default_tuned = PROJECT_ROOT / "control" / "weights" / "tuned_pid_gains_pre_attitude_dynamics.json"
+        if not default_tuned.exists():
+            default_tuned = PROJECT_ROOT / "control" / "weights" / "tuned_pid_gains.json"
         if default_tuned.exists():
             gains_path = default_tuned
 
@@ -238,6 +240,7 @@ def evaluate_single_run(
     # Optional trajectory history recording for video rendering
     hist_times, hist_tgt, hist_pos, hist_yaw = [], [], [], []
     hist_vel, hist_cmd, hist_telem, hist_dwell = [], [], [], []
+    hist_pid_cmd, hist_res_cmd = [], []
     hist_in_view, hist_dist = [], []
 
     # 1. Initialize Drone Controller (PID vs Recurrent RL)
@@ -572,6 +575,8 @@ def evaluate_single_run(
             hist_yaw.append(sim.yaw)
             hist_vel.append(sim.vel.copy())
             hist_cmd.append(cmd.copy())
+            hist_pid_cmd.append(getattr(controller, "last_pid_cmd", cmd).copy())
+            hist_res_cmd.append(getattr(controller, "last_residual", np.zeros(4)).copy())
             hist_telem.append(ctrl_telem.copy())
             hist_dwell.append(continuous_lock_dwell)
             hist_in_view.append(in_view_gt)
@@ -616,6 +621,8 @@ def evaluate_single_run(
             "chaser_yaw": np.array(hist_yaw),
             "chaser_vel": np.array(hist_vel),
             "chaser_cmd": np.array(hist_cmd),
+            "chaser_pid_cmd": np.array(hist_pid_cmd),
+            "chaser_residual_cmd": np.array(hist_res_cmd),
             "chaser_telem": hist_telem,
             "dwell": np.array(hist_dwell),
             "in_view": np.array(hist_in_view, dtype=bool),
@@ -912,7 +919,7 @@ def run_dataset_benchmark(
         from control.predictive_controller import ResidualVisualServoController
         shared_ctrl = ResidualVisualServoController(
             model_path=str(model_path) if model_path else None,
-            pid_gains_path=str(pid_gains) if pid_gains else "control/weights/tuned_pid_gains.json",
+            pid_gains_path=str(pid_gains) if pid_gains else "control/weights/tuned_pid_gains_pre_attitude_dynamics.json",
             standoff_nominal=3.5,
             desired_bbox_size=110.0,
             w_nominal=0.0859
@@ -1115,7 +1122,7 @@ if __name__ == "__main__":
     parser.add_argument("--no-ablation", action="store_true", help="Skip Kalman vs Raw ablation comparison")
     parser.add_argument("--drop-rate", type=float, default=0.0, help="Frame drop rate when running dataset (default: 0.0)")
     parser.add_argument("--noise-mode", type=str, default="empirical", choices=["empirical", "bernoulli", "none"], help="Perception noise model: 'empirical' (calibrated Jetson YOLO noise + AR(1) colored jitter), 'bernoulli' (simple random dropouts on ground truth), or 'none' (default: empirical)")
-    parser.add_argument("--pid-gains", type=str, default="control/weights/tuned_pid_gains.json", help="Path to tuned PID gains JSON (default: control/weights/tuned_pid_gains.json)")
+    parser.add_argument("--pid-gains", type=str, default="control/weights/tuned_pid_gains_pre_attitude_dynamics.json", help="Path to tuned PID gains JSON (default: control/weights/tuned_pid_gains_pre_attitude_dynamics.json)")
     parser.add_argument("--tau-yaw", type=float, default=None, help="Chaser yaw rate first-order time constant tau_yaw in seconds (e.g. 0.770 for Pixhawk sysid, 0.150 for legacy simulation)")
     parser.add_argument("--tau-v-vert", type=float, default=None, help="Chaser vertical velocity first-order time constant tau_v_vert in seconds (default: 0.220)")
     parser.add_argument("--tau-v-horiz", type=float, default=None, help="Chaser horizontal velocity first-order time constant tau_v_horiz in seconds (default: 0.320)")
